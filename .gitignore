@@ -254,3 +254,7 @@ containers/runtime/Dockerfile
 containers/runtime/project.tar.gz
 containers/runtime/code
 **/node_modules/
+
+# Claude Code local state (hooks, sessions, cost logs). Config is tracked; runtime state is not.
+.claude/state/
+.claude/cache/

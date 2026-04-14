@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "description": "Block git --no-verify / --no-gpg-sign",
+        "id": "pre:bash:block-no-verify",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/block-no-verify.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "description": "Warn on git commit: staged-file lint reminder, surface secret patterns",
+        "id": "pre:bash:commit-quality",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/commit-quality.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "description": "Block edits to linter/formatter/type-checker configs without ECC_ALLOW_CONFIG_EDIT=1",
+        "id": "pre:edit-write:config-protection",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/config-protection.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "description": "Auto-run ruff check --fix and ruff format on edited *.py files",
+        "id": "post:edit-write:ruff",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/ruff-post-edit.sh\""
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "description": "Warn on print() / pdb / breakpoint() introduced in edited *.py files",
+        "id": "post:edit:console-warn",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/console-warn.sh\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "description": "5-line session orientation: branch, uncommitted count, unset env vars",
+        "id": "session:start",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/session-start.sh\""
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "description": "Dump structured summary to .claude/state/last-precompact.md before compaction",
+        "id": "pre:compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/pre-compact.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "description": "Persist session summary (when ECC_SESSION_PERSIST=1)",
+        "id": "stop:session-summary",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-session-summary.sh\""
+          }
+        ]
+      },
+      {
+        "description": "Queue session for continuous-learning pattern extraction",
+        "id": "stop:pattern-extraction",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-pattern-extraction.sh\""
+          }
+        ]
+      },
+      {
+        "description": "Emit cost/telemetry marker to .claude/state/costs.jsonl",
+        "id": "stop:cost-tracker",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/stop-cost-tracker.sh\""
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "ECC_HOOK_PROFILE": "standard"
+  }
+}

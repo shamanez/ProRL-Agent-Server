@@ -1,0 +1,232 @@
+<?xml version="1.0" standalone="no"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 720" width="1060" height="720" style="background:#ffffff">
+  <defs>
+    <marker id="arrow-dark" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#1e1e1e"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2f9e44"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#e8590c"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#228be6"/>
+    </marker>
+    <marker id="arrow-dark-left" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">
+      <polygon points="10 0, 0 3.5, 10 7" fill="#1e1e1e"/>
+    </marker>
+    <marker id="arrow-green-left" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">
+      <polygon points="10 0, 0 3.5, 10 7" fill="#2f9e44"/>
+    </marker>
+  </defs>
+
+  <!-- ==================== TITLE ==================== -->
+  <text x="530" y="32" font-family="sans-serif" font-size="20" font-weight="700" fill="#1e1e1e" text-anchor="middle">Decoupled Agentic RL with TEE-Protected Rollouts</text>
+  <text x="530" y="52" font-family="sans-serif" font-size="13" fill="#868e96" text-anchor="middle">RES-107 | Target architecture. Different devices for training and rollouts.</text>
+
+  <!-- ==================== LEGEND ==================== -->
+  <rect x="260" y="64" width="540" height="28" rx="6" fill="#f8f9fa" stroke="#dee2e6" stroke-width="1"/>
+  <rect x="278" y="72" width="12" height="12" rx="2" fill="#ebfbee" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="296" y="83" font-family="sans-serif" font-size="11" fill="#1e1e1e">Exists in ProRL</text>
+  <rect x="408" y="72" width="12" height="12" rx="2" fill="#fff4e6" stroke="#e8590c" stroke-width="1.5"/>
+  <text x="426" y="83" font-family="sans-serif" font-size="11" fill="#1e1e1e">Needs to be built</text>
+  <rect x="548" y="72" width="12" height="12" rx="2" fill="#e7f5ff" stroke="#228be6" stroke-width="1.5"/>
+  <text x="566" y="83" font-family="sans-serif" font-size="11" fill="#1e1e1e">TEE security boundary</text>
+  <rect x="708" y="72" width="12" height="12" rx="2" fill="#f8f0fc" stroke="#9c36b5" stroke-width="1.5"/>
+  <text x="726" y="83" font-family="sans-serif" font-size="11" fill="#1e1e1e">Research</text>
+
+  <!-- ==================== LEFT: TRAINING CLUSTER ==================== -->
+  <rect x="30" y="110" width="280" height="590" rx="12" fill="#ebfbee" stroke="#2f9e44" stroke-width="2" stroke-dasharray="none"/>
+  <text x="170" y="136" font-family="sans-serif" font-size="15" font-weight="700" fill="#2f9e44" text-anchor="middle">TRAINING CLUSTER</text>
+  <text x="170" y="152" font-family="sans-serif" font-size="11" fill="#868e96" text-anchor="middle">Centralized, trusted. Owns the model.</text>
+
+  <!-- FSDP Trainer -->
+  <rect x="50" y="170" width="240" height="110" rx="8" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="170" y="192" font-family="sans-serif" font-size="13" font-weight="600" fill="#2f9e44" text-anchor="middle">FSDP / Megatron Trainer</text>
+  <text x="65" y="212" font-family="monospace" font-size="10.5" fill="#495057">RayPPOTrainer.fit()</text>
+  <text x="65" y="227" font-family="monospace" font-size="10.5" fill="#495057">GRPO/PPO optimization</text>
+  <text x="65" y="242" font-family="monospace" font-size="10.5" fill="#495057">In-place weight updates</text>
+  <!-- GPU chips -->
+  <g transform="translate(58, 252)">
+    <rect x="0" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="13" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G0</text>
+    <rect x="30" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="43" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G1</text>
+    <rect x="60" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="73" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G2</text>
+    <rect x="90" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="103" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G3</text>
+    <rect x="120" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="133" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G4</text>
+    <rect x="150" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="163" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G5</text>
+    <rect x="180" y="0" width="26" height="16" rx="3" fill="#2f9e44"/><text x="193" y="12" font-family="monospace" font-size="9" fill="#fff" text-anchor="middle">G6</text>
+  </g>
+  <text x="170" y="140" font-family="sans-serif" font-size="10" fill="#2f9e44" text-anchor="middle" font-style="italic"></text>
+
+  <!-- Reward Manager -->
+  <rect x="50" y="296" width="240" height="60" rx="8" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="170" y="318" font-family="sans-serif" font-size="13" font-weight="600" fill="#2f9e44" text-anchor="middle">Reward Manager</text>
+  <text x="65" y="338" font-family="monospace" font-size="10.5" fill="#495057">SWEBenchRewardManager</text>
+
+  <!-- NEW: Weight Serializer -->
+  <rect x="50" y="376" width="240" height="80" rx="8" fill="#fff4e6" stroke="#e8590c" stroke-width="2"/>
+  <text x="170" y="398" font-family="sans-serif" font-size="13" font-weight="600" fill="#e8590c" text-anchor="middle">Weight Serializer</text>
+  <text x="65" y="416" font-family="monospace" font-size="10.5" fill="#495057">state_dict materialization</text>
+  <text x="65" y="431" font-family="monospace" font-size="10.5" fill="#495057">delta compression</text>
+  <text x="65" y="446" font-family="monospace" font-size="10.5" fill="#495057">encrypt before sending</text>
+
+  <!-- NEW: Orchestrator -->
+  <rect x="50" y="476" width="240" height="80" rx="8" fill="#fff4e6" stroke="#e8590c" stroke-width="2"/>
+  <text x="170" y="498" font-family="sans-serif" font-size="13" font-weight="600" fill="#e8590c" text-anchor="middle">Training Orchestrator</text>
+  <text x="65" y="516" font-family="monospace" font-size="10.5" fill="#495057">Job dispatch to rollout nodes</text>
+  <text x="65" y="531" font-family="monospace" font-size="10.5" fill="#495057">Backpressure + staleness</text>
+  <text x="65" y="546" font-family="monospace" font-size="10.5" fill="#495057">TEE attestation check</text>
+
+  <!-- What gets replaced -->
+  <rect x="50" y="580" width="240" height="104" rx="8" fill="#fff5f5" stroke="#e03131" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="170" y="602" font-family="sans-serif" font-size="12" font-weight="600" fill="#e03131" text-anchor="middle">Replaced (co-located today)</text>
+  <text x="65" y="621" font-family="monospace" font-size="10.5" fill="#868e96">ExternalRayDistributed</text>
+  <text x="65" y="636" font-family="monospace" font-size="10.5" fill="#868e96">  Executor (actor lookup)</text>
+  <text x="65" y="654" font-family="monospace" font-size="10.5" fill="#868e96">wake_up() / sleep()</text>
+  <text x="65" y="669" font-family="monospace" font-size="10.5" fill="#868e96">Shared CUDA memory</text>
+
+  <!-- ==================== MIDDLE: ARROWS ==================== -->
+
+  <!-- Weight updates arrow (orange, thick) -->
+  <line x1="310" y1="416" x2="418" y2="300" stroke="#e8590c" stroke-width="2.5" marker-end="url(#arrow-orange)"/>
+  <rect x="330" y="332" width="80" height="38" rx="5" fill="#fff4e6" stroke="#e8590c" stroke-width="1"/>
+  <text x="370" y="347" font-family="monospace" font-size="9" fill="#e8590c" text-anchor="middle" font-weight="600">WEIGHTS</text>
+  <text x="370" y="361" font-family="monospace" font-size="8.5" fill="#e8590c" text-anchor="middle">encrypted</text>
+
+  <!-- TEE attestation arrow (blue, dashed) -->
+  <line x1="420" y1="270" x2="312" y2="530" stroke="#228be6" stroke-width="1.5" stroke-dasharray="6,3" marker-end="url(#arrow-blue)"/>
+  <rect x="330" y="382" width="76" height="22" rx="5" fill="#e7f5ff" stroke="#228be6" stroke-width="1"/>
+  <text x="368" y="397" font-family="monospace" font-size="9" fill="#228be6" text-anchor="middle">attestation</text>
+
+  <!-- Job dispatch arrow (green) -->
+  <line x1="310" y1="510" x2="418" y2="510" stroke="#2f9e44" stroke-width="2" marker-end="url(#arrow-green)"/>
+  <rect x="332" y="492" width="60" height="16" rx="4" fill="#ebfbee" stroke="#2f9e44" stroke-width="1"/>
+  <text x="362" y="504" font-family="monospace" font-size="8.5" fill="#2f9e44" text-anchor="middle">jobs</text>
+
+  <!-- Results arrow (green, leftward) -->
+  <line x1="418" y1="560" x2="312" y2="560" stroke="#2f9e44" stroke-width="2" marker-end="url(#arrow-green-left)"/>
+  <rect x="328" y="545" width="72" height="16" rx="4" fill="#ebfbee" stroke="#2f9e44" stroke-width="1"/>
+  <text x="364" y="557" font-family="monospace" font-size="8.5" fill="#2f9e44" text-anchor="middle">DataProto</text>
+
+  <!-- ==================== RIGHT: ROLLOUT INFRASTRUCTURE ==================== -->
+  <!-- Outer wrapper -->
+  <rect x="420" y="110" width="620" height="590" rx="12" fill="#f8f9fa" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="730" y="136" font-family="sans-serif" font-size="15" font-weight="700" fill="#495057" text-anchor="middle">ROLLOUT INFRASTRUCTURE</text>
+  <text x="730" y="152" font-family="sans-serif" font-size="11" fill="#868e96" text-anchor="middle">Decentralized. Scales horizontally. Potentially untrusted hardware.</text>
+
+  <!-- ======= ROLLOUT NODE A: Data Center (TEE) ======= -->
+  <rect x="438" y="166" width="286" height="520" rx="10" fill="#ffffff" stroke="#adb5bd" stroke-width="1.5"/>
+  <text x="581" y="184" font-family="sans-serif" font-size="11" font-weight="600" fill="#495057" text-anchor="middle">Rollout Node A (Data Center)</text>
+
+  <!-- TEE Enclave -->
+  <rect x="450" y="194" width="262" height="200" rx="8" fill="#e7f5ff" stroke="#228be6" stroke-width="2.5"/>
+  <rect x="470" y="186" width="160" height="20" rx="4" fill="#228be6"/>
+  <text x="550" y="200" font-family="sans-serif" font-size="11" font-weight="700" fill="#ffffff" text-anchor="middle">TEE Enclave (H100 CC-On)</text>
+
+  <!-- Attestation + Weight Loader inside TEE -->
+  <rect x="462" y="212" width="238" height="52" rx="6" fill="#ffffff" stroke="#228be6" stroke-width="1.5"/>
+  <text x="581" y="230" font-family="sans-serif" font-size="11.5" font-weight="600" fill="#228be6" text-anchor="middle">Attestation + Weight Loader</text>
+  <text x="472" y="252" font-family="monospace" font-size="10" fill="#495057">Decrypt weights inside TEE only</text>
+
+  <!-- vLLM inside TEE -->
+  <rect x="462" y="272" width="238" height="112" rx="6" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="581" y="292" font-family="sans-serif" font-size="12" font-weight="600" fill="#2f9e44" text-anchor="middle">vLLM Inference Engine</text>
+  <text x="474" y="310" font-family="monospace" font-size="10" fill="#495057">AsyncvLLMServer</text>
+  <text x="474" y="325" font-family="monospace" font-size="10" fill="#495057">POST /generate</text>
+  <text x="474" y="340" font-family="monospace" font-size="10" fill="#495057">token-in / token-out</text>
+  <!-- GPU chips -->
+  <g transform="translate(474, 350)">
+    <rect x="0" y="0" width="26" height="14" rx="3" fill="#228be6"/><text x="13" y="11" font-family="monospace" font-size="8" fill="#fff" text-anchor="middle">G0</text>
+    <rect x="30" y="0" width="26" height="14" rx="3" fill="#228be6"/><text x="43" y="11" font-family="monospace" font-size="8" fill="#fff" text-anchor="middle">G1</text>
+    <rect x="60" y="0" width="26" height="14" rx="3" fill="#228be6"/><text x="73" y="11" font-family="monospace" font-size="8" fill="#fff" text-anchor="middle">G2</text>
+    <rect x="90" y="0" width="26" height="14" rx="3" fill="#228be6"/><text x="103" y="11" font-family="monospace" font-size="8" fill="#fff" text-anchor="middle">G3</text>
+  </g>
+
+  <!-- Arrow: TEE vLLM down to OpenHands -->
+  <line x1="581" y1="394" x2="581" y2="420" stroke="#1e1e1e" stroke-width="1.5" marker-end="url(#arrow-dark)"/>
+  <text x="604" y="412" font-family="monospace" font-size="9" fill="#868e96">/generate</text>
+
+  <!-- OpenHands Agent Server -->
+  <rect x="450" y="424" width="262" height="120" rx="6" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="581" y="446" font-family="sans-serif" font-size="12" font-weight="600" fill="#2f9e44" text-anchor="middle">OpenHands Agent Server</text>
+  <text x="462" y="466" font-family="monospace" font-size="10" fill="#495057">FastAPI :8006</text>
+  <text x="462" y="481" font-family="monospace" font-size="10" fill="#495057">AgentHandler registry</text>
+  <text x="462" y="496" font-family="monospace" font-size="10" fill="#495057">Multi-turn orchestration</text>
+  <!-- Pipeline boxes -->
+  <g transform="translate(462, 506)">
+    <rect x="0" y="0" width="46" height="18" rx="3" fill="#b2f2bb" stroke="#2f9e44" stroke-width="1"/><text x="23" y="13" font-family="monospace" font-size="9.5" fill="#1e1e1e" text-anchor="middle">INIT</text>
+    <text x="52" y="13" font-family="sans-serif" font-size="12" fill="#adb5bd">&#8594;</text>
+    <rect x="64" y="0" width="46" height="18" rx="3" fill="#b2f2bb" stroke="#2f9e44" stroke-width="1"/><text x="87" y="13" font-family="monospace" font-size="9.5" fill="#1e1e1e" text-anchor="middle">RUN</text>
+    <text x="116" y="13" font-family="sans-serif" font-size="12" fill="#adb5bd">&#8594;</text>
+    <rect x="128" y="0" width="46" height="18" rx="3" fill="#b2f2bb" stroke="#2f9e44" stroke-width="1"/><text x="151" y="13" font-family="monospace" font-size="9.5" fill="#1e1e1e" text-anchor="middle">EVAL</text>
+  </g>
+
+  <!-- Arrow: OpenHands down to Environments -->
+  <line x1="581" y1="544" x2="581" y2="564" stroke="#1e1e1e" stroke-width="1.5" marker-end="url(#arrow-dark)"/>
+  <text x="604" y="558" font-family="monospace" font-size="9" fill="#868e96">actions</text>
+
+  <!-- Environment Sandboxes -->
+  <rect x="450" y="568" width="262" height="60" rx="6" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="581" y="590" font-family="sans-serif" font-size="12" font-weight="600" fill="#2f9e44" text-anchor="middle">Environment Sandboxes</text>
+  <text x="462" y="616" font-family="monospace" font-size="10" fill="#495057">Singularity containers</text>
+
+  <!-- ======= ROLLOUT NODE B: Community ======= -->
+  <rect x="742" y="166" width="286" height="520" rx="10" fill="#ffffff" stroke="#adb5bd" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <rect x="790" y="158" width="190" height="20" rx="4" fill="#9c36b5"/>
+  <text x="885" y="172" font-family="sans-serif" font-size="11" font-weight="700" fill="#ffffff" text-anchor="middle">Rollout Node B (Community)</text>
+
+  <!-- Protection layer (research) -->
+  <rect x="754" y="194" width="262" height="142" rx="8" fill="#f8f0fc" stroke="#9c36b5" stroke-width="2" stroke-dasharray="6,3"/>
+  <rect x="774" y="186" width="136" height="20" rx="4" fill="#9c36b5"/>
+  <text x="842" y="200" font-family="sans-serif" font-size="10" font-weight="700" fill="#ffffff" text-anchor="middle">Protection (Research)</text>
+
+  <rect x="766" y="212" width="238" height="112" rx="6" fill="#ffffff" stroke="#9c36b5" stroke-width="1"/>
+  <text x="885" y="232" font-family="sans-serif" font-size="11.5" font-weight="600" fill="#9c36b5" text-anchor="middle">Weight Protection (TBD)</text>
+  <text x="776" y="252" font-family="monospace" font-size="10" fill="#495057">Option A: H100 TEE</text>
+  <text x="776" y="268" font-family="monospace" font-size="10" fill="#495057">Option B: Advisor split</text>
+  <text x="776" y="284" font-family="monospace" font-size="10" fill="#868e96">  (open draft model on</text>
+  <text x="776" y="298" font-family="monospace" font-size="10" fill="#868e96">   worker, verifier on</text>
+  <text x="776" y="312" font-family="monospace" font-size="10" fill="#868e96">   trusted infra)</text>
+
+  <!-- vLLM Node B -->
+  <rect x="754" y="346" width="262" height="72" rx="6" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="885" y="368" font-family="sans-serif" font-size="12" font-weight="600" fill="#2f9e44" text-anchor="middle">vLLM Inference</text>
+  <text x="766" y="388" font-family="monospace" font-size="10" fill="#495057">Same ProRL server code</text>
+  <text x="766" y="403" font-family="monospace" font-size="10" fill="#495057">Different protection model</text>
+
+  <!-- Arrow: vLLM to OpenHands Node B -->
+  <line x1="885" y1="418" x2="885" y2="438" stroke="#1e1e1e" stroke-width="1.5" marker-end="url(#arrow-dark)"/>
+
+  <!-- OpenHands Node B -->
+  <rect x="754" y="442" width="262" height="72" rx="6" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="885" y="464" font-family="sans-serif" font-size="12" font-weight="600" fill="#2f9e44" text-anchor="middle">OpenHands Agent Server</text>
+  <text x="766" y="484" font-family="monospace" font-size="10" fill="#495057">Same 3-stage pipeline</text>
+  <text x="766" y="500" font-family="monospace" font-size="10" fill="#495057">INIT -> RUN -> EVAL</text>
+
+  <!-- Arrow: OpenHands to Env Node B -->
+  <line x1="885" y1="514" x2="885" y2="534" stroke="#1e1e1e" stroke-width="1.5" marker-end="url(#arrow-dark)"/>
+
+  <!-- Env Node B -->
+  <rect x="754" y="538" width="262" height="60" rx="6" fill="#ffffff" stroke="#2f9e44" stroke-width="1.5"/>
+  <text x="885" y="560" font-family="sans-serif" font-size="12" font-weight="600" fill="#2f9e44" text-anchor="middle">Env Sandboxes</text>
+  <text x="766" y="585" font-family="monospace" font-size="10" fill="#495057">Singularity containers</text>
+
+  <!-- Ellipsis for more nodes -->
+  <text x="885" y="630" font-family="sans-serif" font-size="20" fill="#adb5bd" text-anchor="middle">. . .</text>
+  <text x="885" y="652" font-family="sans-serif" font-size="11" fill="#adb5bd" text-anchor="middle">More rollout nodes</text>
+  <text x="885" y="668" font-family="sans-serif" font-size="11" fill="#adb5bd" text-anchor="middle">(scale horizontally)</text>
+
+  <!-- ==================== NEW COMPONENT LABEL ==================== -->
+  <rect x="438" y="640" width="262" height="46" rx="6" fill="#fff4e6" stroke="#e8590c" stroke-width="2"/>
+  <text x="569" y="660" font-family="sans-serif" font-size="11.5" font-weight="600" fill="#e8590c" text-anchor="middle">Remote Weight Receiver</text>
+  <text x="450" y="678" font-family="monospace" font-size="10" fill="#495057">Replaces ExternalRayDistributedExecutor</text>
+
+  <!-- ==================== KEY METRICS FOOTER ==================== -->
+  <line x1="30" y1="708" x2="1040" y2="708" stroke="#dee2e6" stroke-width="1"/>
+  <text x="170" y="720" font-family="monospace" font-size="10" fill="#868e96" text-anchor="middle">Weight transfer: 14-140 GB/step</text>
+  <text x="430" y="720" font-family="monospace" font-size="10" fill="#868e96" text-anchor="middle">Staleness budget: 2-4 training steps</text>
+  <text x="690" y="720" font-family="monospace" font-size="10" fill="#868e96" text-anchor="middle">Episodes: 10-50 turns, minutes each</text>
+  <text x="940" y="720" font-family="monospace" font-size="10" fill="#868e96" text-anchor="middle">TEE overhead: ~0%</text>
+
+</svg>
