@@ -258,3 +258,11 @@ containers/runtime/code
 # Claude Code local state (hooks, sessions, cost logs). Config is tracked; runtime state is not.
 .claude/state/
 .claude/cache/
+
+# Singularity/Apptainer image cache and artifacts (large, machine-local)
+scripts/_singularity_cache/
+singularity_images/
+
+# Training outputs and experiment tracking
+outputs/
+wandb/
