@@ -21,10 +21,9 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from verl_custom.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl_custom.trainer.ppo.ray_trainer_dapo import RayPPOTrainerDAPO
-from verl_custom.trainer.ppo.reward import load_reward_manager
 
 
-@hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
+@hydra.main(config_path='config', config_name='ppo_trainer', version_base=None)
 def main(config):
     run_ppo(config)
 
@@ -38,7 +37,15 @@ def run_ppo(config) -> None:
         # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
         # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         ray.init(
-            runtime_env={"env_vars": {"TOKENIZERS_PARALLELISM": "true", "NCCL_DEBUG": "WARN", "VLLM_LOGGING_LEVEL": "WARN", "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "true", "VLLM_USE_V1": "1"}},
+            runtime_env={
+                'env_vars': {
+                    'TOKENIZERS_PARALLELISM': 'true',
+                    'NCCL_DEBUG': 'WARN',
+                    'VLLM_LOGGING_LEVEL': 'WARN',
+                    'VLLM_ALLOW_RUNTIME_LORA_UPDATING': 'true',
+                    'VLLM_USE_V1': '1',
+                }
+            },
             num_cpus=config.ray_init.num_cpus,
         )
 
@@ -49,7 +56,7 @@ def run_ppo(config) -> None:
 
     # [Optional] get the path of the timeline trace file from the configuration, default to None
     # This file is used for performance analysis
-    timeline_json_file = config.ray_init.get("timeline_json_file", None)
+    timeline_json_file = config.ray_init.get('timeline_json_file', None)
     if timeline_json_file:
         ray.timeline(filename=timeline_json_file)
 
@@ -61,7 +68,6 @@ class TaskRunner:
         from pprint import pprint
 
         from omegaconf import OmegaConf
-
         from verl.utils.fs import copy_to_local
 
         pprint(OmegaConf.to_container(config, resolve=True))
@@ -69,39 +75,69 @@ class TaskRunner:
 
         # Download the checkpoint from HDFS to the local machine.
         # `use_shm` determines whether to use shared memory, which could lead to faster model loading if turned on
-        local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        local_path = copy_to_local(
+            config.actor_rollout_ref.model.path,
+            use_shm=config.actor_rollout_ref.model.get('use_shm', False),
+        )
 
         # Instantiate the tokenizer and processor.
         from verl.utils import hf_processor, hf_tokenizer
 
-        trust_remote_code = config.data.get("trust_remote_code", False)
+        trust_remote_code = config.data.get('trust_remote_code', False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         # Used for multimodal LLM, could be None
-        processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)
+        processor = hf_processor(
+            local_path, trust_remote_code=trust_remote_code, use_fast=True
+        )
 
         # Version validation for vllm.
-        if config.actor_rollout_ref.rollout.name in ["vllm"]:
-            from verl.utils.vllm_utils import is_version_ge
+        if config.actor_rollout_ref.rollout.name in ['vllm']:
+            from verl.utils.vllm import is_version_ge
 
-            if config.actor_rollout_ref.model.get("lora_rank", 0) > 0:
-                if not is_version_ge(pkg="vllm", minver="0.7.3"):
-                    raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
+            if config.actor_rollout_ref.model.get('lora_rank', 0) > 0:
+                if not is_version_ge(pkg='vllm', minver='0.7.3'):
+                    raise NotImplementedError(
+                        'PPO LoRA is not supported before vllm 0.7.3'
+                    )
 
         # Define worker classes based on the actor strategy.
-        if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
-            assert config.critic.strategy in ["fsdp", "fsdp2"]
+        if config.actor_rollout_ref.actor.strategy in ['fsdp', 'fsdp2']:
+            assert config.critic.strategy in ['fsdp', 'fsdp2']
             from verl.single_controller.ray import RayWorkerGroup
-            from verl.workers.fsdp_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
+            from verl.workers.fsdp_workers import (
+                ActorRolloutRefWorker,
+                CriticWorker,
+            )
 
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            from verl_custom.workers.fsdp_workers import AsyncActorRolloutRefWorker
+
+            actor_rollout_cls = (
+                AsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == 'async'
+                else ActorRolloutRefWorker
+            )
             ray_worker_group_cls = RayWorkerGroup
 
-        elif config.actor_rollout_ref.actor.strategy == "megatron":
+        elif config.actor_rollout_ref.actor.strategy == 'megatron':
             assert config.actor_rollout_ref.actor.strategy == config.critic.strategy
-            from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
-            from verl.workers.megatron_workers import ActorRolloutRefWorker, AsyncActorRolloutRefWorker, CriticWorker
+            try:
+                from verl.single_controller.ray.megatron import NVMegatronRayWorkerGroup
+            except ImportError:
+                raise ImportError(
+                    'NVMegatronRayWorkerGroup was removed in verl v0.8. '
+                    'Use strategy="fsdp" or "fsdp2" instead.'
+                )
+            from verl.workers.megatron_workers import (
+                ActorRolloutRefWorker,
+                AsyncActorRolloutRefWorker,
+                CriticWorker,
+            )
 
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            actor_rollout_cls = (
+                AsyncActorRolloutRefWorker
+                if config.actor_rollout_ref.rollout.mode == 'async'
+                else ActorRolloutRefWorker
+            )
             ray_worker_group_cls = NVMegatronRayWorkerGroup
 
         else:
@@ -117,7 +153,7 @@ class TaskRunner:
 
         # Define the resource pool specification.
         # Map roles to the resource pool.
-        global_pool_id = "global_pool"
+        global_pool_id = 'global_pool'
         resource_pool_spec = {
             global_pool_id: [config.trainer.n_gpus_per_node] * config.trainer.nnodes,
         }
@@ -133,9 +169,9 @@ class TaskRunner:
         # finally, we combine all the rewards together
         # The reward type depends on the tag of the data
         if config.reward_model.enable:
-            if config.reward_model.strategy in ["fsdp", "fsdp2"]:
+            if config.reward_model.strategy in ['fsdp', 'fsdp2']:
                 from verl.workers.fsdp_workers import RewardModelWorker
-            elif config.reward_model.strategy == "megatron":
+            elif config.reward_model.strategy == 'megatron':
                 from verl.workers.megatron_workers import RewardModelWorker
             else:
                 raise NotImplementedError
@@ -143,45 +179,62 @@ class TaskRunner:
             mapping[Role.RewardModel] = global_pool_id
 
         # Add a reference policy worker if KL loss or KL reward is used.
-        if config.algorithm.use_kl_in_reward or config.actor_rollout_ref.actor.use_kl_loss:
+        if (
+            config.algorithm.use_kl_in_reward
+            or config.actor_rollout_ref.actor.use_kl_loss
+        ):
             role_worker_mapping[Role.RefPolicy] = ray.remote(ActorRolloutRefWorker)
             mapping[Role.RefPolicy] = global_pool_id
 
-        reward_manager_name = config.reward_manager.get("type", "naive")
-        if reward_manager_name == "naive":
+        reward_manager_name = config.reward_manager.get('type', 'naive')
+        if reward_manager_name == 'naive':
             from verl.workers.reward_manager import NaiveRewardManager
 
             reward_manager_cls = NaiveRewardManager
-        elif reward_manager_name == "prime":
+        elif reward_manager_name == 'prime':
             from verl_custom.nvidia.reward_manager import PrimeRewardManager
 
             reward_manager_cls = PrimeRewardManager
-        elif reward_manager_name == "dapo":
+        elif reward_manager_name == 'dapo':
             from verl.workers.reward_manager import DAPORewardManager
 
             reward_manager_cls = DAPORewardManager
-        elif reward_manager_name == "swebench":
+        elif reward_manager_name == 'swebench':
             from verl_custom.nvidia.reward_manager import SWEBenchRewardManager
 
             reward_manager_cls = SWEBenchRewardManager
         else:
             raise NotImplementedError
-        
+
         # enforce placement on head node
-        strategy = NodeAffinitySchedulingStrategy(node_id = ray.get_runtime_context().get_node_id(), soft = False)
-        reward_fn = reward_manager_cls.options(scheduling_strategy=strategy).remote(tokenizer=tokenizer, compute_score=None, config=config.reward_manager)
+        strategy = NodeAffinitySchedulingStrategy(
+            node_id=ray.get_runtime_context().get_node_id(), soft=False
+        )
+        reward_fn = reward_manager_cls.options(scheduling_strategy=strategy).remote(
+            tokenizer=tokenizer, compute_score=None, config=config.reward_manager
+        )
         val_reward_fn = reward_fn
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec, mapping=mapping
+        )
 
         from verl_custom.utils.dataset.rl_dataset import collate_fn
 
         # Create training and validation datasets.
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        train_dataset = create_rl_dataset(
+            config.data.train_files, config.data, tokenizer, processor
+        )
+        val_dataset = create_rl_dataset(
+            config.data.val_files, config.data, tokenizer, processor
+        )
         train_sampler = create_rl_sampler(config.data, train_dataset)
-        trainer_cls = RayPPOTrainerDAPO if config.algorithm.get("filter_groups", {}).get("enable", False) else RayPPOTrainer
-        print(f"Using trainer: {trainer_cls.__name__}")
+        trainer_cls = (
+            RayPPOTrainerDAPO
+            if config.algorithm.get('filter_groups', {}).get('enable', False)
+            else RayPPOTrainer
+        )
+        print(f'Using trainer: {trainer_cls.__name__}')
         # Initialize the PPO trainer.
         trainer = trainer_cls(
             config=config,
@@ -222,18 +275,25 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
 
     # Check if a custom dataset class is specified in the data configuration
     # and if the path to the custom class is provided
-    if "custom_cls" in data_config and data_config.custom_cls.get("path", None) is not None:
+    if (
+        'custom_cls' in data_config
+        and data_config.custom_cls.get('path', None) is not None
+    ):
         from verl.utils.import_utils import load_extern_type
 
         # Dynamically load the custom dataset class
-        dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
+        dataset_cls = load_extern_type(
+            data_config.custom_cls.path, data_config.custom_cls.name
+        )
         # Verify that the custom dataset class inherits from torch.utils.data.Dataset
         if not issubclass(dataset_cls, Dataset):
-            raise TypeError(f"The custom dataset class '{data_config.custom_cls.name}' from '{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset")
+            raise TypeError(
+                f"The custom dataset class '{data_config.custom_cls.name}' from '{data_config.custom_cls.path}' must inherit from torch.utils.data.Dataset"
+            )
     else:
         # Use the default RLHFDataset class if no custom class is specified
         dataset_cls = RLHFDataset
-    print(f"Using dataset class: {dataset_cls.__name__}")
+    print(f'Using dataset class: {dataset_cls.__name__}')
 
     # Instantiate the dataset using the determined dataset class
     dataset = dataset_cls(
@@ -263,8 +323,10 @@ def create_rl_sampler(data_config, dataset):
     # If shuffling is enabled in the data configuration, create a random sampler.
     if data_config.shuffle:
         train_dataloader_generator = torch.Generator()
-        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
-        sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
+        train_dataloader_generator.manual_seed(data_config.get('seed', 1))
+        sampler = RandomSampler(
+            data_source=dataset, generator=train_dataloader_generator
+        )
     else:
         # If shuffling is disabled, use a sequential sampler to iterate through the dataset in order.
         sampler = SequentialSampler(data_source=dataset)
@@ -272,5 +334,5 @@ def create_rl_sampler(data_config, dataset):
     return sampler
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

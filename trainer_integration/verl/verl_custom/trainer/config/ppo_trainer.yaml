@@ -146,7 +146,7 @@ actor_rollout_ref:
 
   # configs for the actor
   actor:
-  
+
     # fsdp, fsdp2 or megatron. fsdp backend used here.
     strategy: fsdp
     
@@ -186,7 +186,32 @@ actor_rollout_ref:
     
     # Policy loss type: "ppo" (standard PPO) or "gspo" (Geometric Sequence PPO)
     policy_loss_type: ppo
-    
+
+    # verl v0.8 dp_actor.py:609 reads `actor.policy_loss.loss_mode`.
+    # "vanilla" is the standard PPO loss (matches policy_loss_type: ppo above).
+    # See verl/trainer/ppo/core_algos.py @register_policy_loss("vanilla").
+    policy_loss:
+      loss_mode: vanilla
+      clip_cov_ratio: 0.0002
+      clip_cov_lb: 1.0
+      clip_cov_ub: 5.0
+      kl_cov_ratio: 0.0002
+
+    # verl v0.8 core_algos.py:1361 unpacks `**config.global_batch_info`
+    # into agg_loss (dp_size, batch_num_tokens, global_batch_size,
+    # loss_scale_factor). With an empty dict, agg_loss falls back to
+    # dp_size=1 + batch_num_tokens=loss_mask.sum() — the old v0.4
+    # per-rank-mean behavior. The new ppo_loss path in
+    # verl/workers/utils/losses.py would populate this with global
+    # values, but our verl_custom trainer goes through dp_actor
+    # directly and skips that path.
+    global_batch_info: {}
+
+    # loss_scale_factor must exist as a field on actor config because
+    # losses.py:69 (and ppo_loss path generally) reads it. Default None
+    # means agg_loss won't override its computed normalizer.
+    loss_scale_factor: null
+
     # Entropy regularization coefficient in PPO loss
     entropy_coeff: 0
     
@@ -211,6 +236,10 @@ actor_rollout_ref:
     # Sequence parallelism size for Ulysses-style model parallelism
     ulysses_sequence_parallel_size: 1
 
+    # Fields required by verl v0.8 DataParallelPPOActor
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
+
     correct_sample_advantage_boost_value: 0  # value to boost advantages for high-scoring samples
     correct_sample_advantage_boost_threshold: 1.0  # threshold to boost advantages for high-scoring samples
 
@@ -227,33 +256,49 @@ actor_rollout_ref:
 
     # optimizer configs
     optim:
-    
+
+      # Optimizer class name (e.g. "AdamW", "AdamW8bit")
+      optimizer: AdamW
+
+      # Module path to import optimizer from
+      optimizer_impl: torch.optim
+
+      # Adam betas
+      betas: [0.9, 0.999]
+
+      # LR scheduler type: "constant" or "cosine"
+      lr_scheduler_type: constant
+
+      # Override optimizer config (e.g. for custom optimizer args)
+      override_optimizer_config: null
+
       # Learning rate
       lr: 1e-6
-      
+
       # Warmup steps; negative value delegates to lr_warmup_steps_ratio
       lr_warmup_steps: -1
-      
+
       # Warmup steps ratio (used if lr_warmup_steps is negative)
       lr_warmup_steps_ratio: 0.0
-      
+
       # Minimum LR ratio for cosine schedule
       min_lr_ratio: 0.0
-      
+
       # Number of cosine cycles in LR schedule
       num_cycles: 0.5
-      
-      # LR warmup style: "constant" or "cosine"
+
+      # LR warmup style: "constant" or "cosine" (deprecated, use lr_scheduler_type)
       warmup_style: constant
-      
+
       # Total training steps (must be overridden at runtime)
       total_training_steps: -1
-      
+
       # Weight decay
       weight_decay: 0.01
 
     # configs for FSDP
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
 
       # policy for wrapping the model
       wrap_policy:
@@ -285,6 +330,7 @@ actor_rollout_ref:
 
     # config for FSDP strategy
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
 
       # whether to offload parameters in FSDP
       param_offload: False
@@ -301,6 +347,11 @@ actor_rollout_ref:
 
     # whether to enable torch.compile
     use_torch_compile: ${actor_rollout_ref.actor.use_torch_compile}
+
+    # Fields required by verl v0.8 DataParallelPPOActor.__init__ / compute_log_prob
+    entropy_from_logits_with_chunking: false
+    entropy_checkpointing: false
+    grad_clip: ${actor_rollout_ref.actor.grad_clip}
 
     # [Will be deprecated, use log_prob_micro_batch_size_per_gpu]
     # The batch size for one forward pass in the computation of log_prob. Global batch size.
@@ -324,8 +375,8 @@ actor_rollout_ref:
     # actor_rollout_ref.rollout.name: hf/vllm/sglang.
     name: vllm
 
-    # sync: LLM, async: AsyncLLM
-    mode: sync
+    # async: AsyncLLM (sync mode removed in verl v0.8)
+    mode: async
 
     # Sampling temperature for rollout.
     temperature: 1.0
@@ -522,6 +573,7 @@ critic:
 
     # FSDP-specific config
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
 
       # Whether to offload model parameters to CPU
       param_offload: False
@@ -643,6 +695,7 @@ reward_model:
 
     # FSDP-specific config
     fsdp_config:
+      _target_: verl.workers.config.FSDPEngineConfig
 
       # Policy for wrapping layers with FSDP
       wrap_policy:

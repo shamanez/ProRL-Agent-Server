@@ -43,6 +43,7 @@ docker run --rm --name "$CNAME" \
   -e HF_TOKEN \
   -e HUGGING_FACE_HUB_TOKEN \
   -e PYTHONPATH=/workspace \
+  -e PYTORCH_ALLOC_CONF=expandable_segments:True \
   "$IMG" \
   bash -c '
     set -eo pipefail
@@ -59,9 +60,17 @@ docker run --rm --name "$CNAME" \
     pip install --no-deps -e /workspace/trainer_integration/verl >/dev/null
 
     # Any extra deps verl_custom needs that are not in the image.
-    pip install scipy math_verify tabulate absl-py async_generator 2>/dev/null || true
+    pip install scipy math_verify tabulate absl-py async_generator codetiming 2>/dev/null || true
 
     python3 -c "import verl, verl_custom; print(\"verl=\"+verl.__version__); print(\"verl_custom ok\")"
+
+    # Smoke test: verify critical imports resolve after verl v0.8 upgrade.
+    python3 -c "
+from verl.utils.profiler.performance import _timer
+from verl.utils.vllm import is_version_ge
+from verl_custom.workers.fsdp_workers import AsyncActorRolloutRefWorker
+print(\"import compat: OK\")
+"
 
     cd /workspace
     bash trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct.sh \
@@ -69,8 +78,9 @@ docker run --rm --name "$CNAME" \
       ++trainer.total_training_steps=20 \
       trainer.save_freq=10 \
       data.max_prompt_length=16384 \
-      actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+      actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
       actor_rollout_ref.actor.ulysses_sequence_parallel_size=2 \
+      +actor_rollout_ref.actor.calculate_entropy=false \
       data.train_files=[/data/SkyRL-v0-293/train.filtered.parquet] \
       data.val_files=[/data/SkyRL-v0-293/validation.filtered.parquet] \
       trainer.default_local_dir=/workspace/outputs/ProAgent/ProAgent-Qwen3-4B-instruct-training-GRPO \
