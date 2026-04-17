@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage 0.1: 20-step colocated GRPO baseline inside the verl docker image.
+# Stage 0: 20-step colocated GRPO baseline inside the verl docker image (v0.8 + vLLM 0.18).
 #
 # Why docker:
 #   /opt/pytorch has torch 2.10 + vllm 0.19. verl + verl_custom need a

@@ -1,9 +1,10 @@
 # `scripts/serving/`
 
-Stage 1 external vLLM pool. Runs outside the trainer so ProRL can route rollouts
-to a standalone inference endpoint. See `plans-n-solutions/stages/stage1.md` for
-the full stage plan and `plans-n-solutions/stages/stage1_playbook.md` for the
-combined Stages 1 + 2 runbook.
+External vLLM pool for the decoupling milestone (Stage 1). Runs outside the
+trainer so ProRL can route rollouts to a standalone inference endpoint. See
+`plans-n-solutions/stages/stage1.md` for the full milestone plan (Part A:
+smoke; Part B: trainer bypass) and `plans-n-solutions/stages/stage1_playbook.md`
+for the operator runbook.
 
 ## Files
 
@@ -33,7 +34,7 @@ The supervisor proxies `/generate` byte-for-byte to the child; no
 translation, no re-tokenization, which preserves the token-level invariant
 documented in `openhands/llm/nvidia/README.md`.
 
-## Stage 1 use
+## Part A (smoke) use
 
 ```bash
 # Terminal 1 — ProRL on host (unchanged Stage 0 launcher)
@@ -54,7 +55,7 @@ curl -sX POST http://localhost:8006/start
 poetry run python scripts/tests/test_external_vllm.py
 ```
 
-## Stage 2 use
+## Part B (trainer bypass) use
 
 Same launcher, different GPUs/ports:
 
@@ -62,7 +63,7 @@ Same launcher, different GPUs/ports:
 bash scripts/serving/launch_external_vllm_pool.sh --gpus 4,5,6,7 --ports 8100,8101,8102,8103
 ```
 
-The trainer (Stage 2) runs on GPUs `0-3` via `scripts/_internal/s2_decoupled_docker.sh`.
+The trainer runs on GPUs `0-3` via `scripts/_internal/s2_decoupled_docker.sh`.
 
 ## Teardown
 

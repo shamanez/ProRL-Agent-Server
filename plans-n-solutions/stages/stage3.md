@@ -14,13 +14,13 @@ After each `save_freq` step, publish HF-format actor weights and force the exter
 
 ### GPU plan
 
-Same as Stage 2: trainer 0-3, external vLLM 4-7.
+Same as the Stage 1 Part-B decoupled trainer: trainer 0-3, external vLLM 4-7.
 
 ### Success criteria
 
 - 20 steps, >= 4 successful `/reload_weights` events
 - Each publish causes a drop in `actor/rollout_kl` on the next step
-- Rewards trend is not flat (unlike stale-weight Stage 2)
+- Rewards trend is not flat (unlike the stale-weight Stage 1 Part B)
 - No "No LLM server addresses added" errors during drain window
 
 ### Risks

@@ -72,6 +72,67 @@ def _get_free_port():
         return sock.getsockname()[1]
 
 
+# Host prefixes that must never appear in an external_llm_endpoints value.
+# These are the AWS / GCP / Azure instance-metadata addresses and standard
+# loopback-escape ranges. If a malicious or sloppy config points the
+# trainer at one of these, ProRL would POST prompt payloads to it and
+# potentially exfiltrate cloud credentials. Keep the list explicit rather
+# than importing ipaddress — these strings must be rejected even when the
+# caller typed them as hostnames.
+_EXTERNAL_ENDPOINT_DENY_HOST_PREFIXES = (
+    '169.254.',  # link-local, incl. AWS/GCP IMDS and Azure IMDS (169.254.169.254)
+    'metadata.google.internal',
+    'metadata.goog',
+)
+
+
+def _parse_external_endpoint(raw: str) -> str:
+    """Validate an external_llm_endpoints URL and return bare ``host:port``.
+
+    ``_send_llm_addresses_to_openhands`` later prepends ``http://`` to each
+    stored address, so we must not store a scheme here. We also refuse
+    metadata-service hosts — an operator mis-pastes there cost the tenant
+    its IAM credentials.
+    """
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    text = str(raw).strip()
+    if not text:
+        raise ValueError('external_llm_endpoints contains an empty entry')
+
+    # If the value has no scheme (bare host:port), urlparse won't populate
+    # netloc. Add a scheme for parsing, then discard it.
+    parseable = text if '://' in text else f'http://{text}'
+    parsed = urlparse(parseable)
+
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError(
+            f'external_llm_endpoints only supports http:// or https://; got '
+            f'{parsed.scheme!r} in {raw!r}'
+        )
+    if parsed.scheme == 'https':
+        # The downstream OpenHands registration path re-wraps in http://,
+        # which would silently downgrade; refuse rather than mislead.
+        raise ValueError(
+            f'external_llm_endpoints value {raw!r} is https://; only http:// '
+            f'is wired today (Stage 3 may add TLS)'
+        )
+    if not parsed.hostname or not parsed.port:
+        raise ValueError(
+            f'external_llm_endpoints entry {raw!r} must be host:port (got '
+            f'hostname={parsed.hostname!r}, port={parsed.port!r})'
+        )
+    host_lc = parsed.hostname.lower()
+    for deny in _EXTERNAL_ENDPOINT_DENY_HOST_PREFIXES:
+        if host_lc.startswith(deny):
+            raise ValueError(
+                f'external_llm_endpoints host {parsed.hostname!r} matches '
+                f'instance-metadata prefix {deny!r}; refusing to route '
+                f'rollout traffic there'
+            )
+    return f'{parsed.hostname}:{parsed.port}'
+
+
 class AsyncServerBase(ABC):
     """Base class for AsyncServer."""
 
@@ -202,10 +263,13 @@ class AsyncLLMServerManager:
         self.async_llm_servers = [None] * self.rollout_dp_size  # Ray actor references
         self.server_addresses = [None] * self.rollout_dp_size  # HTTP server addresses
 
-        # Start LLM server instances and initialize their engines
+        # Start LLM server instances and initialize their engines.
+        # start_llm_servers() may short-circuit when external_llm_endpoints is
+        # set; in that case async_llm_servers stays empty and init_engine /
+        # ray.get on the tokenizer are skipped (external pool owns the engine).
         self.start_llm_servers()
-        # All server instances are ready, initialize AsyncLLM engines
-        ray.get([server.init_engine.remote() for server in self.async_llm_servers])
+        if self.async_llm_servers:
+            ray.get([server.init_engine.remote() for server in self.async_llm_servers])
 
         # Extract generation and processing parameters
         self.num_trajectories = (
@@ -216,9 +280,15 @@ class AsyncLLMServerManager:
             self.config.rollout.remove_think_tokens
         )  # Token filtering
 
-        # Get tokenizer from the first server instance via Ray remote call
-        # This ensures we use the same tokenizer as the inference engines
-        self.tokenizer = ray.get(self.async_llm_servers[0].get_tokenizer.remote())
+        # Get tokenizer. For colocated mode we fetch from the first Ray actor to
+        # guarantee identity with the inference engine. For external mode we
+        # load locally from the model path (no actors exist to query).
+        if self.async_llm_servers:
+            self.tokenizer = ray.get(self.async_llm_servers[0].get_tokenizer.remote())
+        else:
+            from transformers import AutoTokenizer  # noqa: PLC0415
+
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.path)
         # In older vLLM, the tokenizer was wrapped; unwrap if needed.
         if hasattr(self.tokenizer, 'tokenizer'):
             self.tokenizer = self.tokenizer.tokenizer
@@ -321,6 +391,39 @@ class AsyncLLMServerManager:
         The method uses a retry loop to handle common startup issues like
         port conflicts, ensuring robust server initialization.
         """
+        # Stage 2 decoupled path: when actor_rollout_ref.rollout.external_llm_endpoints
+        # is set, skip the entire Ray-colocated vLLM actor spawn. The trainer
+        # instead points at an externally-run pool (see
+        # scripts/serving/launch_external_vllm_pool.sh). server_addresses is
+        # populated with bare host:port (matching the colocated format at
+        # line 387) so _send_llm_addresses_to_openhands() works unchanged.
+        #
+        # Weight synchronization note (Stage 2 scope):
+        #   The external pool's /reload_weights currently returns 501. Stage 2
+        #   runs with intentionally STALE weights — the trainer updates its
+        #   own FSDP params each step but the external pool keeps serving the
+        #   initial checkpoint. validate_run.py --expect-weight-publishes 0
+        #   enforces this. Stage 3 will wire real weight publishing; until
+        #   then, KL drift between actor and rollout is expected and accepted.
+        endpoints = self.config.rollout.get('external_llm_endpoints', None)
+        if endpoints:
+            if len(endpoints) != self.rollout_dp_size:
+                raise ValueError(
+                    f'external_llm_endpoints has {len(endpoints)} entries but '
+                    f'rollout_dp_size is {self.rollout_dp_size}; every DP rank '
+                    f'needs exactly one endpoint. endpoints={list(endpoints)}'
+                )
+            logger.warning(
+                'EXTERNAL BYPASS ACTIVE: start_llm_servers() skipped, using %d '
+                'external endpoints: %s',
+                len(endpoints),
+                list(endpoints),
+            )
+            for rollout_dp_rank, url in enumerate(endpoints):
+                self.server_addresses[rollout_dp_rank] = _parse_external_endpoint(url)
+            self.async_llm_servers = []
+            return
+
         # Get worker node IDs directly from Ray runtime context.
         # verl v0.8 removed the WorkerGroupRegisterCenter actor; we query
         # each worker's node_id via __ray_call__ instead (same pattern as
@@ -679,6 +782,9 @@ class AsyncLLMServerManager:
         The wake_up operation is performed synchronously across all servers to ensure
         they are ready before returning control to the caller.
         """
+        if not self.async_llm_servers:
+            # External pool owns engine lifecycle; nothing to wake.
+            return
         ray.get([server.wake_up.remote() for server in self.async_llm_servers])
 
     def sleep(self):
@@ -693,6 +799,9 @@ class AsyncLLMServerManager:
 
         The sleep operation is performed synchronously across all servers.
         """
+        if not self.async_llm_servers:
+            # External pool owns engine lifecycle; nothing to sleep.
+            return
         ray.get([server.sleep.remote() for server in self.async_llm_servers])
 
     def _convert_results_to_dataproto(

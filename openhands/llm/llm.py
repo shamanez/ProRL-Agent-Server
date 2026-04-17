@@ -228,7 +228,10 @@ class LLM(RetryMixin, DebugMixin):
             kwargs['chat_template_kwargs'] = {'enable_thinking': False}
 
         if self.token_level_generation:
-            if 'qwen2.5-vl' in self.config.model.lower() or 'qwen2_5_vl' in self.config.model.lower():
+            if (
+                'qwen2.5-vl' in self.config.model.lower()
+                or 'qwen2_5_vl' in self.config.model.lower()
+            ):
                 from openhands.llm.nvidia.qwen2_5_vl import request_response_tokens
             else:
                 from openhands.llm.nvidia.qwen3 import request_response_tokens

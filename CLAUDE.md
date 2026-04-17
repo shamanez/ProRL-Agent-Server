@@ -6,46 +6,16 @@ Guidance for Claude Code working in this repo.
 
 ProRLAgent Server is a scalable multi-turn rollout service for training/evaluating RL agents. It is a fork of OpenHands — the upstream `openhands/` tree is kept largely intact, and the new RL-serving code lives under `openhands/nvidia/`, `openhands/llm/nvidia/`, `scripts/`, and `trainer_integration/verl/`. Agent jobs flow through a FastAPI server that dispatches to pluggable handlers and talks to vLLM via token-level I/O.
 
-## Commands
+## Running the rollout server or training
 
-Python 3.12, Poetry for deps. The Makefile wraps most setup.
+Use the canonical launchers — do not invent new invocations.
 
-```bash
-# Env
-make build                                   # poetry install + pre-commit install
-pip install git+https://github.com/SWE-Gym/SWE-Bench-Package.git
-pip install git+https://github.com/R2E-Gym/R2E-Gym.git
+- ProRL server (host, poetry): `bash scripts/_internal/s0_prorl.sh`
+- Stage 0 trainer (Docker, v0.8 + vLLM 0.18): `bash scripts/_internal/s0_baseline_docker.sh`
 
-# Lint (pre-commit: ruff + mypy + pyproject-fmt)
-make lint                 # openhands/**, evaluation/**, tests/**
-make lint-scripts         # scripts/**
+Full runbook with prerequisites, gating metrics, and problem log: [`plans-n-solutions/stages/stage0.md`](plans-n-solutions/stages/stage0.md). Active milestone (Stages 1 + 2): [`plans-n-solutions/stages/stage1_playbook.md`](plans-n-solutions/stages/stage1_playbook.md).
 
-# Fast test loop
-pytest -m "not integration and not slow and not real_data" tests/ -q
-
-# Runtime tests (need env vars)
-TEST_RUNTIME=singularity RUN_AS_OPENHANDS=False PYTHONPATH=. \
-    pytest tests/runtime/test_browsing.py -v -s
-
-# NVIDIA subtree
-pytest -m "not integration and not slow" tests/nvidia/
-pytest --cov=openhands.nvidia --cov-report=term-missing tests/nvidia/
-```
-
-Running the rollout server and training:
-
-```bash
-# 1) Start vLLM (see README.md step 2)
-# 2) Start rollout server — REQUIRES image repo env var
-export OH_RUNTIME_SINGULARITY_IMAGE_REPO=/path/to/singularity_images
-python scripts/start_server.py --host 0.0.0.0 --port 8006 \
-    --max-init-workers 64 --max-run-workers 64 --timeout 300
-
-# 3) Register LLM + /start (see README.md step 5)
-# 4) Bulk eval / RL loop
-python scripts/run_swe.py --dataset-path ... --llm-addresses http://.../v1 ...
-bash trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct.sh
-```
+Dev commands (lint, test, poetry setup) live in `.claude/rules/` — those auto-load as system instructions.
 
 ## Architecture
 
@@ -82,7 +52,7 @@ Default sandbox is **Singularity/Apptainer**, not Docker — rootless single-fil
 
 ### RL trainer integration
 
-`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack (post Stage 0.1):** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. See `plans-n-solutions/stages/stage0_1.md` for the upgrade record and cold-start bootstrap.
+`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack (Stage 0 baseline):** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. See `plans-n-solutions/stages/stage0.md` for the baseline record and cold-start bootstrap.
 
 ## Conventions
 

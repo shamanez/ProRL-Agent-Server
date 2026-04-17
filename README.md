@@ -159,7 +159,7 @@ Output (response body):
 
 Current stack: `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+) + `shamanez/verl` main at commit `910ba344` (v0.8.0.dev). Training runs inside the Docker container; the ProRL FastAPI server runs on the host.
 
-For the full cold-start bootstrap (Docker pull, verl clone, HF weights, SkyRL-v0-293 parquets, SIF images, credentials), see **[`plans-n-solutions/stages/stage0_1.md`](plans-n-solutions/stages/stage0_1.md)**.
+For the full cold-start bootstrap (Docker pull, verl clone, HF weights, SkyRL-v0-293 parquets, SIF images, credentials), see **[`plans-n-solutions/stages/stage0.md`](plans-n-solutions/stages/stage0.md)**.
 
 Quick launch after prerequisites are in place:
 

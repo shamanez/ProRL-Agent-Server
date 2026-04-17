@@ -1,11 +1,12 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "env": {
+    "ECC_HOOK_PROFILE": "standard"
+  },
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Bash",
-        "description": "Block git --no-verify / --no-gpg-sign",
-        "id": "pre:bash:block-no-verify",
         "hooks": [
           {
             "type": "command",
@@ -15,8 +16,6 @@
       },
       {
         "matcher": "Bash",
-        "description": "Warn on git commit: staged-file lint reminder, surface secret patterns",
-        "id": "pre:bash:commit-quality",
         "hooks": [
           {
             "type": "command",
@@ -26,8 +25,6 @@
       },
       {
         "matcher": "Edit|Write|MultiEdit",
-        "description": "Block edits to linter/formatter/type-checker configs without ECC_ALLOW_CONFIG_EDIT=1",
-        "id": "pre:edit-write:config-protection",
         "hooks": [
           {
             "type": "command",
@@ -39,8 +36,6 @@
     "PostToolUse": [
       {
         "matcher": "Edit|Write",
-        "description": "Auto-run ruff check --fix and ruff format on edited *.py files",
-        "id": "post:edit-write:ruff",
         "hooks": [
           {
             "type": "command",
@@ -50,8 +45,6 @@
       },
       {
         "matcher": "Edit",
-        "description": "Warn on print() / pdb / breakpoint() introduced in edited *.py files",
-        "id": "post:edit:console-warn",
         "hooks": [
           {
             "type": "command",
@@ -62,8 +55,6 @@
     ],
     "SessionStart": [
       {
-        "description": "5-line session orientation: branch, uncommitted count, unset env vars",
-        "id": "session:start",
         "hooks": [
           {
             "type": "command",
@@ -74,8 +65,6 @@
     ],
     "PreCompact": [
       {
-        "description": "Dump structured summary to .claude/state/last-precompact.md before compaction",
-        "id": "pre:compact",
         "hooks": [
           {
             "type": "command",
@@ -86,8 +75,6 @@
     ],
     "Stop": [
       {
-        "description": "Persist session summary (when ECC_SESSION_PERSIST=1)",
-        "id": "stop:session-summary",
         "hooks": [
           {
             "type": "command",
@@ -96,8 +83,6 @@
         ]
       },
       {
-        "description": "Queue session for continuous-learning pattern extraction",
-        "id": "stop:pattern-extraction",
         "hooks": [
           {
             "type": "command",
@@ -106,8 +91,6 @@
         ]
       },
       {
-        "description": "Emit cost/telemetry marker to .claude/state/costs.jsonl",
-        "id": "stop:cost-tracker",
         "hooks": [
           {
             "type": "command",
@@ -117,7 +100,7 @@
       }
     ]
   },
-  "env": {
-    "ECC_HOOK_PROFILE": "standard"
+  "enabledPlugins": {
+    "codex@openai-codex": true
   }
 }

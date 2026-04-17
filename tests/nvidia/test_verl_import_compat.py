@@ -1,6 +1,6 @@
 # Copyright 2024 Pluralis AI
 # Licensed under the Apache License, Version 2.0
-"""Import compatibility tests for verl v0.8.0.dev upgrade (Stage 0.1).
+"""Import compatibility tests for verl v0.8.0.dev upgrade (Stage 0 baseline).
 
 These tests verify that all verl imports used by verl_custom resolve
 correctly after upgrading from verl v0.4 (commit 60138ebd) to v0.8.0.dev.
