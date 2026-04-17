@@ -1,8 +1,10 @@
 # Stage 1 — External vLLM standalone
 
-**Status:** Not started. Depends on Stage 0.1 gating metrics passing.
+**Status:** Not started. Depends on Stage 0 gating metrics passing (Stage 0 completed: `plans-n-solutions/stages/stage0.md`).
 
-**Stack assumption (from Stage 0.1, non-negotiable):**
+**Part 1 of 2 for the decoupling milestone.** Stage 1 only *hosts* vLLM outside the trainer — no training code is touched and nothing is actually decoupled yet. **Stage 2** (`stage2.md`) is what completes the cut, by making the trainer bypass its in-Ray vLLM and target this pool. Both stages are driven together via `plans-n-solutions/stages/stage1_playbook.md`. **Reuse** `scripts/_internal/s0_prorl.sh` for the ProRL server — do not invent a new server launcher.
+
+**Stack assumption (from Stage 0, non-negotiable):**
 - Docker image for the trainer: `verlai/verl:vllm018.dev1`
 - vLLM: 0.18 (both host-side standalone and the trainer-side client)
 - verl: v0.8.0.dev (`shamanez/verl` main) at `/tmp/verl`
@@ -28,7 +30,7 @@ A pass here means Stage 2 (decoupled training loop) can assume vLLM is reachable
 | 0 | vLLM supervisor 0 | 8100 |
 | 1 | vLLM supervisor 1 | 8101 |
 
-ProRL stays on the host at `:8006` (same as Stage 0.1).
+ProRL stays on the host at `:8006` (same as Stage 0).
 
 ---
 
@@ -101,14 +103,11 @@ pkill -9 -f 'vllm.entrypoints' 2>/dev/null || true
 pkill -9 -f 'vllm_launcher'    2>/dev/null || true
 sleep 2
 
-source /home/ubuntu/.prorl_creds.env
-export OH_RUNTIME_SINGULARITY_IMAGE_REPO=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/singularity_images
-
-nohup poetry run python scripts/start_server.py \
-  --host 0.0.0.0 --port 8006 \
-  --max-init-workers 64 --max-run-workers 64 \
-  --timeout 1000 \
-  > /tmp/s1-prorl.log 2>&1 &
+# Start ProRL using the existing poetry-based launcher (unchanged since Stage 0).
+# This sources /home/ubuntu/.prorl_creds.env and runs the same
+#   poetry run python scripts/start_server.py --host 0.0.0.0 --port 8006 ...
+# invocation used in Stage 0. Do NOT write a new server launcher.
+bash scripts/_internal/s0_prorl.sh 2>&1 | tee /tmp/s1-prorl.log &
 ```
 
 ### Step 2 — Launch the vLLM pool (built in this stage)
@@ -182,9 +181,72 @@ kill $(cat /tmp/s1-prorl.pid 2>/dev/null) 2>/dev/null || true
 
 ## Solution
 
-*To be filled in by the agent that completes this stage. Document:*
-- *Final vLLM 0.18 CLI flag set used*
-- *Any deviations from the plan and why*
-- *Smoke test run output + timing*
-- *WandB or log URL if applicable*
-- *Any Stage 1 bugs that surfaced, same table format as Stage 0.1 Problem log*
+### Checkpoint log
+
+- 2026-04-17 — Step 2 done: launcher + child + pool script landed, ruff green, manual
+  end-to-end verified on GPU 0. Container /health=200 at 30 s cold-start,
+  `/generate` with `prompt_ids=[9707,11,7299,2138,498,525]` returned valid
+  `{response_ids, logprobs}`, `/reload_weights` → 501, images → 400,
+  `docker stop` clean shutdown in 0.94 s with zero GPU-resident processes.
+- 2026-04-17 — Step 3 done: `scripts/tests/test_external_vllm.py` landed,
+  ruff green, 7/7 criteria pass against live pool (GPUs 0+1, ports 8100/8101,
+  both healthy in 20 s). Criterion 3 (SWE-Bench rollout) delegated to
+  `standalone_swebench_test.py` for the Step 4 live run.
+- 2026-04-17 — Step 4 resolved via option A after user sign-off: the 7/7 smoke
+  test already proves the decoupled rollout path end-to-end — ProRL accepts
+  the pool (`/add_llm_server` 200 for each of :8100 and :8101, `/start` →
+  `running=True`), and direct `/generate` round-trips through the supervisor
+  into the child produce valid `{response_ids, logprobs}` with corresponding
+  `POST /generate` hits in each child log. The outstanding criterion 3
+  evidence (multi-turn SWE-Bench rollout through ProRL) is absorbed into the
+  Stage 2 `validate_run.py` gate, which requires a successful 20-step GRPO
+  run against this same pool and therefore transitively covers the ProRL
+  routing path. Pool torn down cleanly (0 GPU procs) before handoff.
+
+### Deviation from original plan
+
+The plan proposed fronting vLLM 0.18's stock `vllm.entrypoints.openai.api_server`
+with a `/generate` translation proxy in the supervisor. Two things pushed us to
+a simpler design:
+
+1. ProRL's `openhands/llm/nvidia/qwen3.py` client POSTs
+   `{prompt_ids:[int], …}` → expects `{response_ids:[int], logprobs:[float]}`.
+   OpenAI `/v1/completions` speaks `{prompt:str|[int], …}` and puts token ids
+   inside `choices[0].logprobs.token_ids`. Translating correctly for every
+   kwarg (top_p, seed, temperature, max_tokens, …) adds surface area without
+   value — the supervisor would just be renaming fields.
+2. `scripts/tests/vllm_api_server.py` already speaks the ProRL contract but
+   imports `FlexibleArgumentParser` from `vllm.utils`, which vLLM 0.18 moved.
+   Using it directly would require patching the import.
+
+So we shipped `scripts/serving/_vllm_child.py` — a tiny FastAPI+AsyncLLMEngine
+server that speaks `{prompt_ids} → {response_ids, logprobs}` natively. The
+supervisor's `/generate` is a pure byte-for-byte pass-through; no translation,
+no re-tokenization. This preserves the token-level invariant documented in
+`openhands/llm/nvidia/README.md`.
+
+### Final vLLM 0.18 flag set used
+
+```
+--gpu-memory-utilization 0.45
+--max-model-len 17920
+--enforce-eager
+--enable-chunked-prefill
+--max-num-batched-tokens 8192
+```
+
+Model is the HF repo id `Qwen/Qwen3-4B-Instruct-2507`, resolved at runtime via
+the bind-mounted HF cache (`-v /home/ubuntu/.cache/huggingface:/root/.cache/huggingface`
+with `HF_HOME=/root/.cache/huggingface` in the container).
+
+### Problem log
+
+| # | Symptom | Fix |
+|---|---------|-----|
+| 1 | Initial child crashed with `OSError: Repo id must be in the form 'repo_name' or 'namespace/repo_name': '/home/ubuntu/.cache/huggingface/hub/.../snapshots/<hash>'` | The launcher was passing a host-absolute snapshot path to the container, where the HF cache is mounted at `/root/.cache/huggingface` instead. Switched default `--model` to the HF repo id so vLLM resolves via the mounted cache. |
+| 2 | `scripts/tests/vllm_api_server.py` import failure on vLLM 0.18 (`FlexibleArgumentParser` moved out of `vllm.utils`) | Wrote fresh `scripts/serving/_vllm_child.py` speaking ProRL's `{prompt_ids}` contract directly on `AsyncLLMEngine` + `TokensPrompt`. |
+| 3 | Host `rm -f /tmp/vllm-*.pid` failed because the container's root wrote the files under the shared `/tmp` bind mount | Dropped the host-side `rm`; supervisor's `Path.write_text` truncates on open, so stale content is overwritten on next launch. |
+| 4 | `docker run ... &` backgrounded with `disown` silently lost non-zero exit codes (image pull fail, port collision, bind-mount missing) — pool reported "launched N supervisor(s)" even when all containers had already crashed | Added a 3-s liveness gate after the launch loop; `docker inspect` each container and `exit 1` with log tails if any is not Running. |
+| 5 | `sys.exit(0)` from inside the supervisor's SIGTERM handler could be deferred by CPython when the signal arrives in a C-call frame, potentially stranding the child holding GPU memory | Signal handler now calls `child.terminate()` directly, then `os._exit(128+signum)`. Child termination is idempotent via `_terminated` flag. |
+| 6 | `_vllm_child._flatten_logprobs` returned `None` on the first empty-dict mid-sequence, which the trainer cannot distinguish from "logprobs not requested" | Raise `RuntimeError` on empty dict mid-sequence so the failure is loud, not a silent advantage-estimate corruption. |
+| 7 | `/generate` handler caught `asyncio.CancelledError` and returned 499 without aborting the engine request — orphaned inflight requests would accumulate under client-timeout churn | Added `await engine.abort(request_id)` then re-raise, so vLLM frees GPU blocks promptly. |
