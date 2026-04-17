@@ -156,25 +156,21 @@ Output (response body):
 ```
 
 ## 💻 Do RL Training with verl
-1) Clone [verl](https://github.com/verl-project/verl) and switch to specific commit
+
+Current stack: `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+) + `shamanez/verl` main at commit `910ba344` (v0.8.0.dev). Training runs inside the Docker container; the ProRL FastAPI server runs on the host.
+
+For the full cold-start bootstrap (Docker pull, verl clone, HF weights, SkyRL-v0-293 parquets, SIF images, credentials), see **[`plans-n-solutions/stages/stage0_1.md`](plans-n-solutions/stages/stage0_1.md)**.
+
+Quick launch after prerequisites are in place:
+
 ```shell
-cd /path/to/verl
-git checkout 60138ebd
-```
-2) Install verl following [verl](https://github.com/verl-project/verl)'s instructions
-3) Install our verl patch
-```shell
-cd ProRL-Agent-Server/trainer_integration/verl
-pip install -e .
-```
-4) Start agent server
-```shell
+# Host: agent server
 export OH_RUNTIME_SINGULARITY_IMAGE_REPO=/path/to/singularity_images
-python scripts/start_server.py --host 0.0.0.0 --port 8006 --max-init-workers 64 --max-run-workers 64 --timeout 1000
-```
-5) Run training script
-```shell
-bash trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct.sh
+python scripts/start_server.py --host 0.0.0.0 --port 8006 \
+    --max-init-workers 64 --max-run-workers 64 --timeout 1000
+
+# Trainer (in Docker, joins host network)
+bash scripts/_internal/s0_baseline_docker.sh
 ```
 
 ## 💻 Add a New Task/Handler
