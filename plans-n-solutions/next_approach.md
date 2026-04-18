@@ -72,16 +72,22 @@ vLLM 0.18 LoRA surface (verified 2026-04-18 against the image): `LoRARequest(lor
 
 ---
 
-## Tooling the planner should consider (optional, at most 1–2 per turn)
+## Mandatory review gates (do not skip for this phase)
+
+Phase 1 is correctness-sensitive: a partial `/reload_lora` failure or a mid-batch version split is a data-correctness bug, not a warning. Treat these as gates, not options.
+
+1. **Codex review of the plan** — before any code is written. `Agent(subagent_type="codex:codex-rescue")` with the completed plan + this brief + the five known unknowns. Ask it specifically to attack: (a) the mid-batch publish strategy (block-vs-defer), (b) the abort-on-partial-failure contract, (c) policy-version ownership, (d) the PEFT-from-FSDP extraction path. Capture its objections in the plan before cutting.
+2. **Codex review at each cut boundary** — after (i) pool-side `/reload_lora` lands, (ii) the orchestrator `publish` subcommand lands, (iii) trainer-side `_publish_lora_adapter` lands. Same agent, diff-scoped. Each cut must be green on Codex review before the next cut starts.
+3. **`silent-failure-hunter`** on the partial-reload abort path and the mixed-version detection in `async_server.py` — before the 20-step run.
+4. **`security-reviewer`** on `/reload_lora` if the transport choice is URL-based (SSRF surface on the pool child).
+
+## Other tooling the planner should consider (optional, at most 1–2 per turn)
 
 | Need | Tool |
 |---|---|
 | Orient in unfamiliar verl/vLLM modules | `Skill("repo-architecture")` |
 | Surgical changes, avoid rabbit holes | `Skill("karpathy-guidelines")` |
 | Fast codebase search (LoRA inside verl/vLLM, PEFT checkpoint format) | `Agent(subagent_type="Explore")` |
-| Second opinion or rescue when stuck | `Agent(subagent_type="codex:codex-rescue")` |
-| Audit the partial-reload abort + mixed-version detection paths | `Agent(subagent_type="silent-failure-hunter")` |
-| SSRF / URL download review on `/reload_lora` | `Agent(subagent_type="security-reviewer")` |
 | Test-first for `_publish_lora_adapter` and `/reload_lora` | `Skill("tdd-workflow")` / `Agent(subagent_type="tdd-guide")` |
 | Context compaction between cuts | `Skill("strategic-compact")` |
 | Verify loop (lint + fast pytest) before commit | `Skill("verification-loop")` |
