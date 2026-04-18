@@ -8,12 +8,21 @@ ProRLAgent Server is a scalable multi-turn rollout service for training/evaluati
 
 ## Running the rollout server or training
 
-Use the canonical launchers — do not invent new invocations.
+Use the canonical launchers — do not invent new invocations. The baseline topology needs **three processes on two machines**:
 
-- ProRL server (host, poetry): `bash scripts/_internal/s0_prorl.sh`
-- Decoupled trainer (Docker, remote vLLM pool): `bash scripts/_internal/s1_remote_docker.sh`
+| Role | Machine | Launcher |
+|---|---|---|
+| ProRL FastAPI server | trainer box (host, poetry venv) | `bash scripts/_internal/s0_prorl.sh` |
+| Remote vLLM pool (4 children, ports 8100–8103) | EC2 `vllm-instance` (SSH alias) | `bash scripts/serving/launch_remote_vllm_pool.sh start` |
+| Decoupled GRPO trainer (Docker, 8 × A100 FSDP) | trainer box | `bash scripts/_internal/s1_remote_docker.sh` |
 
 Baseline record: [`plans-n-solutions/stages/baseline.md`](plans-n-solutions/stages/baseline.md). Next milestone (LoRA weight sync): [`plans-n-solutions/stages/weight_sync_lora.md`](plans-n-solutions/stages/weight_sync_lora.md).
+
+**Frozen files** (baseline reproduction depends on them — make siblings, do not edit):
+- `scripts/_internal/s1_remote_docker.sh`
+- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh`
+
+`WANDB_API_KEY` and other secrets are pinned in `/home/ubuntu/.prorl_creds.env` and sourced by both the ProRL and pool launchers — do not re-export them inline.
 
 Dev commands (lint, test, poetry setup) live in `.claude/rules/` — those auto-load as system instructions.
 
