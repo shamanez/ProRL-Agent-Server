@@ -21,6 +21,6 @@ if [ ${#missing[@]} -gt 0 ]; then
   echo "Unset env vars (set if running runtime tests): ${missing[*]}"
 fi
 
-echo "Docs: CLAUDE.md  |  Commands: .claude/commands/  |  Skills: .claude/skills/"
+echo "Docs: CLAUDE.md  |  Plans: plans-n-solutions/  |  Skills: .claude/skills/"
 echo "════════════════════"
 exit 0

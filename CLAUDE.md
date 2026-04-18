@@ -11,9 +11,9 @@ ProRLAgent Server is a scalable multi-turn rollout service for training/evaluati
 Use the canonical launchers — do not invent new invocations.
 
 - ProRL server (host, poetry): `bash scripts/_internal/s0_prorl.sh`
-- Stage 0 trainer (Docker, v0.8 + vLLM 0.18): `bash scripts/_internal/s0_baseline_docker.sh`
+- Decoupled trainer (Docker, remote vLLM pool): `bash scripts/_internal/s1_remote_docker.sh`
 
-Full runbook with prerequisites, gating metrics, and problem log: [`plans-n-solutions/stages/stage0.md`](plans-n-solutions/stages/stage0.md). Active milestone (Stages 1 + 2): [`plans-n-solutions/stages/stage1_playbook.md`](plans-n-solutions/stages/stage1_playbook.md).
+Baseline record: [`plans-n-solutions/stages/baseline.md`](plans-n-solutions/stages/baseline.md). Next milestone (LoRA weight sync): [`plans-n-solutions/stages/weight_sync_lora.md`](plans-n-solutions/stages/weight_sync_lora.md).
 
 Dev commands (lint, test, poetry setup) live in `.claude/rules/` — those auto-load as system instructions.
 
@@ -52,7 +52,7 @@ Default sandbox is **Singularity/Apptainer**, not Docker — rootless single-fil
 
 ### RL trainer integration
 
-`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack (Stage 0 baseline):** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. See `plans-n-solutions/stages/stage0.md` for the baseline record and cold-start bootstrap.
+`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack:** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. See `plans-n-solutions/stages/baseline.md` for the decoupled-rollout baseline record.
 
 ## Conventions
 

@@ -1,10 +1,10 @@
-# Stage 1 — Cut C: Remote vLLM pool (direct HTTP)
+# Baseline — decoupled trainer ↔ remote vLLM pool (stale weights)
 
-**Status: DONE.** Part A (infra smoke) + Part B (GRPO training against a remote pool) both shipped. Stale-weight tolerance confirmed: gradient signal arrived on the first rewarded step, no trainer/pool coordination issues.
+**This is the fork-point for the `decoup-weight-sync` branch.** WandB run `wdqqu52k`, 7 training steps, 8/8 gates green. The decoupled multi-machine topology is stable; this doc captures what works, the HTTP-topology architecture, and the measured rollout throughput. Everything on this branch layers on top of it.
 
-> This was previously labelled "Stage 1.5" during development. It is folded into Stage 1 as **Cut C** of the decoupling milestone. Cuts A and B (local external pool + trainer bypass) are recorded in [`stage1.md`](./stage1.md). All three cuts ship the same decoupling invariant; only the physical topology and the machine that owns the pool GPUs change.
+**What's stale (and what the next doc closes).** The pool loads Qwen3-4B once at `start` and serves from those frozen weights for the entire run. By step N the pool is N steps behind the trainer. GRPO's per-group advantage normalization tolerates the staleness; gradient signal arrives cleanly on the first rewarded step. Closing the staleness gap — LoRA first — is the work tracked in [`weight_sync_lora.md`](./weight_sync_lora.md).
 
-Reuses the Stage 1 Cut B `EXTERNAL BYPASS ACTIVE` path, `_parse_external_endpoint()`, and the `_vllm_child.py` token-level contract verbatim. The only change is physical topology: the pool now lives on a separate EC2 host (`vllm-instance`, public DNS `ec2-54-145-77-207.compute-1.amazonaws.com`, 4 × 23 GiB) and the trainer reclaims all 8 local A100s for FSDP.
+Trainer ↔ pool coupling is exactly one config knob: `actor_rollout_ref.rollout.external_llm_endpoints` + the `EXTERNAL BYPASS ACTIVE` path in `async_server.py:408-425`. The bypass swaps one list (Ray-spawned local vLLM actors) for another (pre-existing HTTP endpoints). Physical topology: pool on a separate EC2 host (`vllm-instance`, public DNS `ec2-54-145-77-207.compute-1.amazonaws.com`, 4 × 23 GiB), trainer reclaims all 8 local A100s for FSDP.
 
 ---
 
@@ -88,7 +88,7 @@ All values from the per-step log line in `/tmp/s1-remote.log`.
 
 - `timing_s/gen` (rollout wall clock) dominates at 70–90% of step time.
 - `timing_s/update_actor` is rock-steady at ~22–25 s — FSDP backward is not the bottleneck.
-- Cross-machine HTTP tax is near-invisible: `/health` RTT is 2–5 ms and the per-token throughput at the trainer (64–111 tok/s) tracks what a colocated pool returned in Stage 1 Cut B within ±10%.
+- Cross-machine HTTP tax is near-invisible: `/health` RTT is 2–5 ms and the per-token throughput at the trainer (64–111 tok/s) tracks what a colocated pool returned on earlier local-pool runs within ±10%.
 - `perf/cpu_memory_used_gb` flat at ~158 GiB; `max_memory_allocated_gb` per FSDP rank ~24.7 GiB. `param_offload=True` + `optimizer_offload=True` keep local GPUs quiet during `gen` — local `nvidia-smi` shows ~1 GiB idle on each of 8 GPUs mid-rollout, confirming rollouts truly live on the remote pool.
 - `actor/grad_norm` trajectory: `0.046, 0.066, 0.040, 0.035, 0.023, 0.045, 9.913`. Steps 1–6 have identically-zero rewards (all-negative GRPO groups → zero advantages → near-zero gradient from KL term only). Step 7 is the first group with reward variance, producing a real policy-gradient signal. `filter_groups.enable=False` (inner script:122) keeps those zero-variance steps in the batch, matching prior run `e6496fdt`.
 
@@ -175,4 +175,4 @@ bash scripts/serving/teardown_remote_vllm_pool.sh
 
 ## Next
 
-Stage 2 — weight sync + replay buffer. Plan: [`stage2_weight_sync_and_replay.md`](./stage2_weight_sync_and_replay.md). Fresh-session kickoff: `.claude/commands/continue-weight-sync.md`.
+LoRA-first weight sync — see [`weight_sync_lora.md`](./weight_sync_lora.md).

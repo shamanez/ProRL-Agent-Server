@@ -2,8 +2,8 @@
 
 External vLLM pool for decoupled rollouts. Two deployment modes:
 
-- **Local pool** (Stage 1, Cuts A + B) — supervisors run in Docker on the same box as the trainer, GPUs 4–7. Launcher: `launch_external_vllm_pool.sh`. See [`plans-n-solutions/stages/stage1.md`](../../plans-n-solutions/stages/stage1.md).
-- **Remote pool** (Stage 1, Cut C) — children run on a separate EC2 host, trainer talks over public HTTP. Launcher: `launch_remote_vllm_pool.sh`. See [`plans-n-solutions/stages/stage1_remote_pool.md`](../../plans-n-solutions/stages/stage1_remote_pool.md).
+- **Local pool** — supervisors run in Docker on the same box as the trainer, GPUs 4–7. Launcher: `launch_external_vllm_pool.sh`. Historical; left intact for reference.
+- **Remote pool** (the baseline on this branch) — children run on a separate EC2 host, trainer talks over public HTTP. Launcher: `launch_remote_vllm_pool.sh`. See [`plans-n-solutions/stages/baseline.md`](../../plans-n-solutions/stages/baseline.md).
 
 Both modes share the same token-level `{prompt_ids} → {response_ids, logprobs}` contract served by `_vllm_child.py`. They differ only in supervision (local has a `vllm_launcher.py` FastAPI supervisor; remote runs the child directly under `nohup`).
 
@@ -75,13 +75,13 @@ done
 rm -f /tmp/vllm-sup-*.pid /tmp/vllm-child-*.pid
 ```
 
-## Remote pool (Stage 1 — Cut C)
+## Remote pool (baseline)
 
 When the vLLM pool has to live on a different box than the trainer (EC2
 `vllm-instance`, 4 × 23 GiB), use the remote orchestrator instead of the
 Docker launcher. Direct HTTP over the public EC2 DNS — no SSH tunnel, no
 supervisor on the remote. Full plan + problem log:
-[`plans-n-solutions/stages/stage1_remote_pool.md`](../../plans-n-solutions/stages/stage1_remote_pool.md).
+[`plans-n-solutions/stages/baseline.md`](../../plans-n-solutions/stages/baseline.md).
 
 | File | Role |
 |---|---|
