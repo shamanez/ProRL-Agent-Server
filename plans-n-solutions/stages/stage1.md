@@ -1,10 +1,16 @@
 # Stage 1 — Decoupling milestone (external vLLM + trainer bypass, stale weights)
 
-**Status: ENGINEERING PROVEN.** Five independent trainer-log + child-log signals confirm the trainer has no in-Ray vLLM worker and every rollout token + logprob comes from the external pool. See §Solution "Decoupling proofs".
+**Status: DONE.** The milestone shipped in three cuts. This doc is the record for Cuts A + B (local pool); Cut C (remote HTTP pool) has its own record at [`stage1_remote_pool.md`](./stage1_remote_pool.md).
 
-This stage merges what earlier drafts called "Stage 1" (host vLLM standalone) and "Stage 2" (trainer bypass) into one milestone, because shipping either half alone proves nothing: Stage 1 alone decouples nothing, Stage 2 alone has no endpoint to talk to. They only count together.
+| Cut | Scope | Evidence |
+|---|---|---|
+| **A — External vLLM standalone** | Host vLLM as an independent service outside the trainer; ProRL routes rollouts to it over localhost HTTP. | `849314ff` — 7/7 smoke gates green on GPUs 0+1, ports 8100/8101. |
+| **B — Trainer bypass with stale weights** | Trainer skips its in-Ray vLLM startup and targets the external pool; 20 GRPO steps with intentionally stale weights isolates decoupling plumbing from weight-sync plumbing. | `53949b72` — five decoupling proofs green (see §Solution); WandB `bgbvlqslo`. |
+| **C — Remote HTTP pool** | Pool lives on a separate EC2 host; trainer reclaims all 8 local A100s for FSDP. Previously labelled "Stage 1.5" during development. | WandB `wdqqu52k` — 7/7 training steps, 8/8 gates green. Record: [`stage1_remote_pool.md`](./stage1_remote_pool.md). |
 
-**Execution playbook:** [`stage1_playbook.md`](./stage1_playbook.md). Follow it for plan-gates, phase sequencing, and Codex-in-the-loop.
+This stage merges what earlier drafts called "Stage 1" (host vLLM standalone) and "Stage 2" (trainer bypass) into one milestone, because shipping either half alone proves nothing: standalone alone decouples nothing, bypass alone has no endpoint to talk to. They only count together, and Cut C then proved the same invariant holds across machines.
+
+**Historical execution playbook:** [`stage1_playbook.md`](./stage1_playbook.md). Preserved for reference — do not re-run.
 
 **Stack (from Stage 0, non-negotiable):**
 - Docker image for the trainer: `verlai/verl:vllm018.dev1`
@@ -22,7 +28,7 @@ Decouple vLLM inference from the GRPO trainer in two related cuts landed togethe
 - **Part A — External vLLM standalone.** Host vLLM outside the trainer (no Ray, no trainer actor). Prove ProRL can route SWE-Bench rollouts to it and back.
 - **Part B — Trainer bypass with stale weights.** Make the trainer skip its in-Ray vLLM startup and target the external pool. Run 20 GRPO steps with intentionally stale weights to isolate the decoupling plumbing from the weight-sync plumbing.
 
-A pass here means Stage 3 (iterative off-policy publish) can assume vLLM is reachable via HTTP at a stable endpoint, independent of the trainer lifecycle, and that the trainer no longer tries to spawn its own vLLM worker when `external_llm_endpoints` is set.
+A pass here means Stage 2 (weight sync + replay buffer) can assume vLLM is reachable via HTTP at a stable endpoint, independent of the trainer lifecycle, and that the trainer no longer tries to spawn its own vLLM worker when `external_llm_endpoints` is set.
 
 ---
 
@@ -51,7 +57,7 @@ ProRL stays on the host at `:8006` (same as Stage 0).
 
 | Path | Action | Summary |
 |---|---|---|
-| `scripts/serving/vllm_launcher.py` | **new** | FastAPI supervisor app. One `subprocess.Popen` owns the child vLLM server. Routes: `GET /health` (200 iff child `/v1/models` OK), `POST /generate` (pass-through to child's native `{prompt_ids}` endpoint — does NOT re-tokenize), `POST /reload_weights` (501 stub until Stage 4). `SIGTERM`/`SIGINT`/`atexit` hooks → child `SIGTERM` → 30 s wait → `SIGKILL`. PID files for both supervisor and child. |
+| `scripts/serving/vllm_launcher.py` | **new** | FastAPI supervisor app. One `subprocess.Popen` owns the child vLLM server. Routes: `GET /health` (200 iff child `/v1/models` OK), `POST /generate` (pass-through to child's native `{prompt_ids}` endpoint — does NOT re-tokenize), `POST /reload_weights` (501 stub until Stage 2). `SIGTERM`/`SIGINT`/`atexit` hooks → child `SIGTERM` → 30 s wait → `SIGKILL`. PID files for both supervisor and child. |
 | `scripts/serving/_vllm_child.py` | **new** | Tiny FastAPI + AsyncLLMEngine server that natively speaks ProRL's `{prompt_ids} → {response_ids, logprobs}` contract on top of vLLM 0.18. Replaced the original plan of fronting `vllm.entrypoints.openai.api_server` with a translation proxy — see §Deviation. |
 | `scripts/serving/launch_external_vllm_pool.sh` | **new** | `--gpus a,b,... --ports X,Y,...`; one supervisor per (gpu, port), child port = supervisor port + 1000, PID files at `/tmp/vllm-sup-<port>.pid`. |
 | `scripts/serving/README.md` | **new** | Minimal invocation + port discipline. |
@@ -163,7 +169,7 @@ docker rm -f s2-decoupled vllm-sup-8100 vllm-sup-8101 vllm-sup-8102 vllm-sup-810
 
 ## Out of scope for this milestone
 
-- Dynamic weight updates → Stage 3/4 (`/reload_weights` is a 501 stub here).
+- Dynamic weight updates → Stage 2 (`/reload_weights` is a 501 stub here).
 - Multi-node → single-node first.
 - Eviction / sleep mode → later stage.
 - Exact metric convergence at small `max_prompt_length` — plumbing-only; see §Problem log #1 and #8.

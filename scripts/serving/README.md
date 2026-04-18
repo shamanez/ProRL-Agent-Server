@@ -1,10 +1,11 @@
 # `scripts/serving/`
 
-External vLLM pool for the decoupling milestone (Stage 1). Runs outside the
-trainer so ProRL can route rollouts to a standalone inference endpoint. See
-`plans-n-solutions/stages/stage1.md` for the full milestone plan (Part A:
-smoke; Part B: trainer bypass) and `plans-n-solutions/stages/stage1_playbook.md`
-for the operator runbook.
+External vLLM pool for decoupled rollouts. Two deployment modes:
+
+- **Local pool** (Stage 1, Cuts A + B) — supervisors run in Docker on the same box as the trainer, GPUs 4–7. Launcher: `launch_external_vllm_pool.sh`. See [`plans-n-solutions/stages/stage1.md`](../../plans-n-solutions/stages/stage1.md).
+- **Remote pool** (Stage 1, Cut C) — children run on a separate EC2 host, trainer talks over public HTTP. Launcher: `launch_remote_vllm_pool.sh`. See [`plans-n-solutions/stages/stage1_remote_pool.md`](../../plans-n-solutions/stages/stage1_remote_pool.md).
+
+Both modes share the same token-level `{prompt_ids} → {response_ids, logprobs}` contract served by `_vllm_child.py`. They differ only in supervision (local has a `vllm_launcher.py` FastAPI supervisor; remote runs the child directly under `nohup`).
 
 ## Files
 
@@ -73,3 +74,51 @@ for p in 8100 8101 8102 8103; do
 done
 rm -f /tmp/vllm-sup-*.pid /tmp/vllm-child-*.pid
 ```
+
+## Remote pool (Stage 1 — Cut C)
+
+When the vLLM pool has to live on a different box than the trainer (EC2
+`vllm-instance`, 4 × 23 GiB), use the remote orchestrator instead of the
+Docker launcher. Direct HTTP over the public EC2 DNS — no SSH tunnel, no
+supervisor on the remote. Full plan + problem log:
+[`plans-n-solutions/stages/stage1_remote_pool.md`](../../plans-n-solutions/stages/stage1_remote_pool.md).
+
+| File | Role |
+|---|---|
+| `launch_remote_vllm_pool.sh` | Orchestrator with `bootstrap` / `start` / `stop` subcommands. `bootstrap` rsyncs `_vllm_child.py` + the remote runner + `requirements-remote.txt` to `vllm-instance:~/vllm-pool/`, creates a python3.12 venv, pip-installs, and `hf download`s the model into `~/vllm-pool/hf-cache`. `start` SSHes in and `nohup`s 4 children on GPUs 0–3, then polls `/health` over the public DNS. `stop` kills the PIDs (plus a `VLLM::EngineCore` orphan sweep) and rsyncs remote child logs back to `/tmp/vllm-child-<port>.log` so `scripts/validate_run.py` keeps working. |
+| `_remote_vllm_runner.sh` | Remote-side helper invoked under `nohup` by the orchestrator. Sources the venv, exports `CUDA_VISIBLE_DEVICES`, `PYTORCH_ALLOC_CONF`, `HF_HOME`, writes its PID file, and `exec`s `_vllm_child.py`. |
+| `requirements-remote.txt` | Pins `vllm==0.18.*` + the FastAPI stack the remote venv needs. |
+| `teardown_remote_vllm_pool.sh` | One-liner wrapper → `launch_remote_vllm_pool.sh stop`. |
+
+Use:
+
+```bash
+# One-time (idempotent)
+bash scripts/serving/launch_remote_vllm_pool.sh bootstrap
+
+# User: open EC2 security-group inbound 8100-8103 from trainer-box public IP.
+
+# Start, verify health, run training (via scripts/_internal/s1_remote_docker.sh),
+# then teardown.
+bash scripts/serving/launch_remote_vllm_pool.sh start
+bash scripts/serving/teardown_remote_vllm_pool.sh
+```
+
+Overrides via env: `REMOTE_HOST`, `REMOTE_DNS`, `REMOTE_POOL_DIR`,
+`REMOTE_PYTHON`, `MODEL`, `GPU_MEM_UTIL` (default 0.85), `MAX_MODEL_LEN`.
+
+### Child launch flags (remote)
+
+Each remote `_vllm_child.py` is invoked by `_remote_vllm_runner.sh` with:
+
+```
+--gpu-memory-utilization $GPU_MEM_UTIL   # default 0.85
+--max-model-len $MAX_MODEL_LEN           # default 17920
+--dtype bfloat16
+--enable-chunked-prefill
+--enable-prefix-caching                  # big win for GRPO n=4 shared prefixes
+--max-num-batched-tokens 16384
+--max-num-seqs 128
+```
+
+No `--enforce-eager` — CUDA graphs are on, adds ~30–60 s one-time capture to `start` but gives ~30–50% throughput lift on Qwen3-4B. The 300 s health budget in `s1_remote_docker.sh` covers the capture.

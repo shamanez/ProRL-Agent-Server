@@ -1,0 +1,13 @@
+# Stage 1 Cut C — remote vLLM pool dependencies.
+#
+# Installed into ~/vllm-pool/venv on the remote EC2 instance (vllm-instance),
+# created with /usr/local/bin/python3.12 -m venv.
+#
+# vllm 0.18 pulls torch 2.10 + nvidia-cuda-* 12.8 wheels transitively; pinning
+# vllm is enough to lock the stack. Pre-flight (Phase 2a probe 3) confirmed
+# the resolver is clean on python 3.12 against this set.
+vllm==0.18.*
+transformers
+fastapi
+uvicorn
+huggingface-hub

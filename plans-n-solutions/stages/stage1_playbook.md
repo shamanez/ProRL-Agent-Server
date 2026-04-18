@@ -1,6 +1,10 @@
-# Decoupling Milestone — Stages 1 + 2 Execution Runbook
+# Decoupling Milestone — Stage 1 Execution Runbook (historical)
 
-**Status:** Not started. Stage 0 complete (`stage0.md`).
+**Status: DONE. Preserved for historical reference.** Stage 1 shipped in three cuts: `849314ff` (Cut A, local smoke), `53949b72` (Cut B, local decoupled trainer), and the remote HTTP cut ("Cut C", previously labelled "Stage 1.5" during development) — see [`stage1_remote_pool.md`](./stage1_remote_pool.md). For the next milestone, read [`stage2_weight_sync_and_replay.md`](./stage2_weight_sync_and_replay.md) and use `.claude/commands/continue-weight-sync.md` as the fresh-session kickoff.
+
+This playbook is kept intact so the phase sequencing, Codex gates, and commit discipline that drove Stage 1 are reviewable by future work. **Do not re-run these steps.**
+
+---
 
 From this point forward, **all subsequent stages run against the upgraded stack** (verl v0.8.0.dev + vLLM 0.18 + Docker `verlai/verl:vllm018.dev1`).
 
