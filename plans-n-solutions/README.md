@@ -25,7 +25,4 @@ Phase 1 adds siblings `scripts/_internal/s2_weightsync_docker.sh` and `.../run_p
 
 ## How the next session starts
 
-1. Fresh session → Claude Code plan mode. No code edits before `ExitPlanMode` is approved.
-2. Read `stages/weight_sync_lora.md`, then `stages/baseline.md` §Architecture.
-3. Re-confirm the vLLM 0.18 LoRA surface against the docker image (one-liner in the Phase 1 entry points).
-4. Draft the publish protocol, then implement.
+Follow [`next_approach.md`](./next_approach.md) — concise kickoff with the planner-agent invocation, the skills/agents worth using, the environment gate, and commit discipline.

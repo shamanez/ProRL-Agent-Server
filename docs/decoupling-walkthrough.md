@@ -1,5 +1,9 @@
 # Decoupling Walkthrough — Trainer ↔ vLLM
 
+> **Purpose on this branch.** This is the "big picture" doc: it explains why colocated vLLM training works (tensor aliasing via `wake_up()`) and what breaks the moment vLLM moves to a different node. Read it to understand **why** we decoupled and **what** weight sync has to put back. For what the `decoup-weight-sync` branch actually runs today, see [`../plans-n-solutions/stages/baseline.md`](../plans-n-solutions/stages/baseline.md); for the LoRA-first closure plan, see [`../plans-n-solutions/stages/weight_sync_lora.md`](../plans-n-solutions/stages/weight_sync_lora.md).
+>
+> **Historical refs.** This walkthrough was written against the colocated baseline. Source-file citations (ray_trainer, vllm_async_server, async_server, qwen3) still resolve. Citations to the pre-decoupling launch script `run_proagent_qwn3_4B_instruct.sh` are **historical** — on this branch the live launcher is `..._remote_decoupled.sh` and the `s1_remote_docker.sh` Docker wrapper.
+
 > *Read-only code walkthrough. Every claim is backed by a `path/to/file.py:<line>` citation with a verbatim code quote.*
 
 ## Contents
