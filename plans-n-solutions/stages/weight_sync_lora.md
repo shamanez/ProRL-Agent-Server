@@ -1,6 +1,6 @@
 # Weight sync — LoRA first
 
-**Status: NOT STARTED.** The baseline ([`baseline.md`](./baseline.md)) ships the decoupled topology with stale weights. This doc closes the staleness gap — LoRA first.
+**Status: DONE** (WandB `w9nj4akn`, 20 steps, 6/6 gates green — see [`timing_decoupled_4B.md`](./timing_decoupled_4B.md) for numbers, [`progress_stage.md`](./progress_stage.md) for the as-built walkthrough). This doc is the design record; it was written before the code landed and is kept as the design+protocol reference.
 
 ---
 

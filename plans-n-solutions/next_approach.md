@@ -1,94 +1,83 @@
-# Issue — Phase 1: LoRA weight sync for the decoupled trainer ↔ remote vLLM pool
+# What comes next after Phase 1
 
-> **How to use this doc.** Paste the following prompt into a fresh planning session:
->
-> > *You are the best software architect in the world. Read `plans-n-solutions/next_approach.md` and work out a perfect step-by-step plan to solve the issue described there. Cite file paths and line numbers for every edit site. Call out open questions. Do not write code — produce a plan only.*
->
-> The doc below is the full issue brief. Everything the planner needs is either stated here or reachable from the pointers in §Context.
+Phase 1 (LoRA weight-sync) landed on `decoup-weight-sync`. Run `w9nj4akn`, 20 steps, 6/6 gates green. The decoupled topology now closes the loop: trainer publishes rank-16 LoRA adapters to the remote vLLM pool after every `save_freq` steps, `rollout_corr/ppl_ratio` stays bounded instead of drifting.
+
+This doc frames the next two phases and lists the small residual polish from Phase 1.
 
 ---
 
-## Problem
+## Phase 2 — full state-dict publish
 
-On branch `decoup-weight-sync` the trainer runs FSDP on 8 × A100-40GB locally while the vLLM pool runs on a separate EC2 host over HTTP (see [`stages/baseline.md`](./stages/baseline.md) — WandB run `wdqqu52k`, 7 steps, 8/8 gates green). The pool loads Qwen3-4B once at `start` and serves from those frozen weights for the entire run. By training step N the pool is N steps stale; GRPO's importance ratio `r(θ) = π_θ(a|s) / π_behavior(a|s)` drifts from 1 (verl logs it as `rollout_corr/ppl_ratio` — baseline sat near 1.6 and grew), the PPO clip fraction rises, the gradient signal eventually degenerates.
+**Why.** LoRA rank-16 caps expressiveness. When reward plateaus before loss plateaus, or when KL regularization fights the adapter's low-rank subspace, Phase 1 is the bottleneck. Phase 2 swaps the payload — same publish protocol, same trainer-authoritative `policy_version` ownership, same partial-failure abort contract — but ships the full HF checkpoint (~8 GiB bf16 for Qwen3-4B).
 
-**Close the loop with a publish protocol.** After every `save_freq` training steps the trainer ships an updated policy to every pool endpoint so `π_behavior ≈ π_θ` on the next batch. **Phase 1 does this with LoRA** (rank-16 adapter, ~20–80 MiB payload, in-place `AsyncLLMEngine.add_lora(...)`). Phase 2 (full state-dict) and Phase 3 (replay buffer) are deferred — do not design them now.
+**Shape of the change.**
 
----
+| Layer | Phase 1 | Phase 2 |
+|---|---|---|
+| Payload | `adapter_model.safetensors` + `adapter_config.json`, ~122 MiB gzipped | full HF shards, ~8 GiB bf16 (Qwen3-4B) |
+| Transport | HTTP multipart body in one POST | presigned S3 URL in POST body, pool downloads → loads |
+| Pool-side swap | `engine.add_lora(LoRARequest)` → drain → `remove_lora(prior)` | `collective_rpc('update_weight', ...)` or AsyncLLMEngine equivalent against CPU-loaded shards; drain mechanism reuses Phase 1's `_inflight_cond` |
+| `max-loras` slot | Needed (old+new coexist) | Not needed — full-model update replaces in place |
 
-## Deliverables the plan must produce
+**Open questions worth attacking before writing code.**
 
-1. **Pool side — `POST /reload_lora` on `scripts/serving/_vllm_child.py`** (currently a 501 stub). Body: `{adapter_url, policy_version}` (or raw bytes for small ranks). Download → `LoRARequest(lora_name=f"pv{v}", lora_int_id=v, lora_path=<local>)` → `engine.add_lora(...)` → retire prior adapter via `engine.remove_lora(old_int_id)`. Return `200 {policy_version, vllm_load_latency_ms, adapter_bytes}` on success, `5xx` with a specific error string on failure. Thread the currently-pinned `LoRARequest` into `POST /generate` so served rollouts are against `{base + adapter}`.
-2. **Pool orchestrator — `launch_remote_vllm_pool.sh publish <adapter_dir>` subcommand** that fans `/reload_lora` to all 4 children. Enables manual testing before the trainer-side hook lands.
-3. **Trainer side — `_publish_lora_adapter(checkpoint_dir)` in `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py`**, called at the end of `_save_checkpoint`. Extracts the PEFT-style `adapter_model.safetensors` + `adapter_config.json` from the FSDP checkpoint, bumps a trainer-owned `policy_version`, fan-outs `/reload_lora` over `self.config.actor_rollout_ref.rollout.external_llm_endpoints`, **blocks the next training step until all endpoints return 200**, and **aborts the run on any partial failure** (mixed-version batches are a correctness bug, not a warning). Stamp `meta.policy_version` on every rollout job in `trainer_integration/verl/verl_custom/nvidia/rollout/async_server.py` before dispatch.
-4. **Observability** (detail in `stages/weight_sync_lora.md` §5.2 / §5.3): the eight WandB keys (`weight_sync/policy_version`, `adapter_mib`, `publish_latency_s`, `transfer_latency_s`, `vllm_load_latency_s`, `endpoints_ok`, `endpoints_failed`, `rollout/staleness_steps`) and the structured JSON log line the pool child emits on every `/reload_lora`. Separating `transfer_latency_s` from `vllm_load_latency_s` is non-negotiable — it is the signal that tells us whether a slow publish is the network or `add_lora`.
-5. **Sibling launchers (new files — frozen originals must NOT be edited):**
-   - `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` — sibling of `..._remote_decoupled.sh`. Adds `actor_rollout_ref.model.{lora_rank=16, lora_alpha=32, lora_target_modules=[...]}`, `+actor_rollout_ref.rollout.publish_on_save=True`, `trainer.save_freq=5`, `trainer.experiment_name=weight-sync-decup-prorl`.
-   - `scripts/_internal/s2_weightsync_docker.sh` — sibling of `s1_remote_docker.sh`.
+1. Does `AsyncLLMEngine` in vLLM 0.18 expose a public `update_weight` path that doesn't require spinning up a separate `WorkerWrapperBase`? If not, we need `collective_rpc` on the Ray-less child path (the pool runs bare FastAPI, not Ray).
+2. How long is the pool unavailable during the swap? Phase 1's `add_lora` is ~11–14 s and *does not* block `/generate`. Full-weight update will block — need to decide whether the trainer tolerates that wait synchronously or if a second hot-spare pool member takes rollouts during the swap.
+3. S3 presigned URLs introduce SSRF surface on the pool child. Security review required before merging (`security-reviewer` agent).
+4. Transfer-latency budget scales ~60× over Phase 1 (8 GiB vs 122 MiB at same ~60 MB/s). At `save_freq=1` that's minutes; may dictate a minimum `save_freq` or a chunked / resumable transfer.
 
----
-
-## Success criteria (Phase 1 gates)
-
-Enumerated in [`stages/weight_sync_lora.md`](./stages/weight_sync_lora.md) §5.5. In one sentence: 20 training steps complete with `save_freq=5`; ≥ 4 successful `/reload_lora` events; zero mixed-version batches; `rollout_corr/ppl_ratio` dips on the step after each publish; `critic/rewards/mean` trends up (baseline was flat until step 7); zero `POST /generate` 5xx during swap; baseline invariants (`EXTERNAL BYPASS ACTIVE`, zero Ray vLLM actors, 8 local GPUs hold FSDP shards) still hold.
+**Reuses from Phase 1 (no re-design).** `policy_version` ownership, the 8 `weight_sync/*` WandB keys + `rollout/staleness_steps`, partial-failure abort, structured JSON log line, `_swap_lock` + `_inflight_cond` discipline.
 
 ---
 
-## Constraints and guardrails
+## Phase 3 — replay buffer / truly async RL
 
-- **Topology is fixed.** Trainer inside Docker (`verlai/verl:vllm018.dev1`, vLLM 0.18), 8 A100-40GB FSDP locally; pool on EC2 `vllm-instance`, 4 children on ports 8100–8103; ProRL on host :8006. Do not propose changing it.
-- **Frozen files** (baseline reproduction — new siblings only): `scripts/_internal/s1_remote_docker.sh`, `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh`.
-- **Must-preserve invariants**: the token-level `{prompt_ids} → {response_ids, logprobs}` contract (`openhands/llm/nvidia/qwen3.py`), the `EXTERNAL BYPASS ACTIVE` path (`trainer_integration/verl/verl_custom/nvidia/rollout/async_server.py:408-425`), and the WandB keys the baseline already logs (`actor/*`, `critic/*`, `rollout_corr/ppl_ratio`).
-- **Cut order (hard).** Pool-side `/reload_lora` first → orchestrator `publish` subcommand → trainer-side `_publish_lora_adapter` → sibling launchers → 20-step run. Each cut must run green before the next.
-- **No `--no-verify`. No `git push` without explicit user approval.** Stage-boundary commits only.
-- **Policy-version ownership is trainer-authoritative.** Pool echoes what it installed; never increments on its own.
+**Why.** Phase 1 publishes in lock-step with training: step N ends, publish, step N+1 starts. Publish overhead scales with publish frequency. For future multi-node / multi-pool topologies (decentralized rollouts), the trainer and rollout clocks need to decouple entirely — rollouts run continuously, trainer draws from a bounded trajectory store.
+
+**Pieces that already exist** (from Phase 1, nothing to redo):
+
+- `policy_version` stamp on every rollout message (`async_server.py:1495`).
+- `rollout_corr/ppl_ratio` per-step importance ratio, already logged.
+- `rollout/staleness_steps` metric — the denominator for staleness-budget filtering.
+
+**Pieces that don't exist and need design work.**
+
+1. **Bounded trajectory store.** FIFO, or priority-by-TD-error. Sizing driven by staleness budget (keep trajectories ≤ K versions stale, drop older).
+2. **Staleness-budgeted sampler.** Draw by priority, apply importance weight `w_i = π_θ / π_behavior^{pv_i}` with clipping (`tis_imp_ratio_cap` already exists per-step in Phase 1 — Phase 3 generalizes it across time).
+3. **Off-policy correction math.** V-trace / IMPALA, or clipped IS with a hard staleness cutoff. The choice affects whether we need the value head to evaluate off-policy trajectories, which cascades to how the reference model is used.
+4. **Async rollout worker lifecycle.** Today `generate_sequences` is called once per step by the trainer's Ray controller. Phase 3 needs rollouts running independently and emitting into the store; the trainer drives `update_actor` on its own clock.
+
+**Prerequisite signal Phase 3 must preserve.** The token-level `{prompt_ids, response_ids, logprobs}` contract (`openhands/llm/nvidia/qwen3.py`) stays invariant. A replay buffer that decodes/re-encodes text across steps would re-shift token boundaries and reintroduce the same off-policy bug staleness correction is supposed to fix.
 
 ---
 
-## Context (read before planning)
+## Phase 1 residual polish (non-blocking)
+
+- `_vllm_child.py` emits one benign `reload_lora prior adapter dir cleanup failed` WARNING per swap after `pv=1` — the PosixPath was already removed by the previous swap's `shutil.rmtree`. Separate log line from the ok event; doesn't move gates. Fix: only attempt cleanup on the *last-but-one* adapter dir, or `ignore_errors=True`.
+- Scan `add_lora` GPU time vs (rank, hidden_dim, num_layers) so Phase 2 planning has an empirical curve rather than an extrapolation.
+- Wire test: assert `policy_version` on rollout messages matches the pool's `/health` reply at dispatch time (cross-validation rather than sender-side assertion only).
+
+---
+
+## Constraints that carry forward
+
+- Topology stays fixed: trainer FSDP local (8×A100-40GB Docker), vLLM pool on EC2 (4 children, ports 8100–8103), ProRL on host `:8006`. Phase 2+3 ride on top.
+- Frozen files: `scripts/_internal/s1_remote_docker.sh`, `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh`. New siblings only.
+- Trainer-authoritative `policy_version`. Pool only echoes.
+- Partial publish failure = `RuntimeError` = abort. Mixed-version batches are a correctness bug, not a warning.
+- Token-in/token-out contract (`openhands/llm/nvidia/qwen3.py`, `qwen2_5_vl.py`) is invariant.
+- No `--no-verify`, no `git push` without explicit user approval, stage-boundary commits only.
+
+---
+
+## Pointers for whoever picks this up next
 
 | Path | Why |
 |---|---|
-| `plans-n-solutions/stages/weight_sync_lora.md` | The full Phase 1 design sketch, fresh-box setup, run book, and observability spec. Everything in this issue brief is expanded there. |
-| `plans-n-solutions/stages/baseline.md` | §Architecture (HTTP topology + bypass path), §"Rollout time stats" (throughput baseline the new protocol must not regress). |
-| `scripts/serving/_vllm_child.py` | The 501 `/reload_weights` stub and the current `/generate` wiring. |
-| `trainer_integration/verl/verl_custom/nvidia/rollout/async_server.py:408-425` | `EXTERNAL BYPASS ACTIVE` path — do not break. |
-| `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` | `_save_checkpoint` is the hook site for `_publish_lora_adapter`. |
-| `scripts/serving/launch_remote_vllm_pool.sh` | Orchestrator — `publish` subcommand lands here. |
-| `../CLAUDE.md` | Repo invariants, frozen files, credential pin, autoflake precedents. |
-| `docs/decoupling-walkthrough.md` | Architectural background: the weight handoff via tensor aliasing in the colocated path, i.e. what decoupling replaces. |
-
-vLLM 0.18 LoRA surface (verified 2026-04-18 against the image): `LoRARequest(lora_name, lora_int_id, lora_path, base_model_name, tensorizer_config_dict, load_inplace)` + `AsyncLLMEngine.{add_lora, remove_lora, list_loras, pin_lora}`.
-
----
-
-## Known unknowns the plan must resolve
-
-1. **Adapter extraction from an FSDP checkpoint** — does verl's `_save_checkpoint` already dump PEFT-format shards when `lora_rank>0`, or do we need a merge step? Confirm against `/tmp/verl` before proposing the extraction code.
-2. **Transport** — raw HTTP body of the safetensors shard (simple, one hop) vs presigned S3 URL (adds a dependency but survives larger future ranks). Pick one with rationale; the protocol's 200 body is identical either way.
-3. **`rollout.n=4` + adapter swap mid-batch** — GRPO groups 4 samples/prompt into one advantage group. If a publish lands mid-batch, the group contains mixed versions. Plan must either (a) block dispatch during publish or (b) defer publish to batch boundaries. State the choice and justify.
-4. **Adapter shape change between publishes** — if `lora_target_modules` or rank were to shift, `add_lora` refuses. Decide whether Phase 1 locks them at run start or surfaces the engine error; document the choice.
-5. **Pool restart mid-run** — lost adapter state on the pool. Plan the recovery path (is `policy_version=0` the "adapter absent" sentinel? does the trainer detect and abort, or re-publish on next step?).
-
----
-
-## Mandatory review gates (do not skip for this phase)
-
-Phase 1 is correctness-sensitive: a partial `/reload_lora` failure or a mid-batch version split is a data-correctness bug, not a warning. Treat these as gates, not options.
-
-1. **Codex review of the plan** — before any code is written. `Agent(subagent_type="codex:codex-rescue")` with the completed plan + this brief + the five known unknowns. Ask it specifically to attack: (a) the mid-batch publish strategy (block-vs-defer), (b) the abort-on-partial-failure contract, (c) policy-version ownership, (d) the PEFT-from-FSDP extraction path. Capture its objections in the plan before cutting.
-2. **Codex review at each cut boundary** — after (i) pool-side `/reload_lora` lands, (ii) the orchestrator `publish` subcommand lands, (iii) trainer-side `_publish_lora_adapter` lands. Same agent, diff-scoped. Each cut must be green on Codex review before the next cut starts.
-3. **`silent-failure-hunter`** on the partial-reload abort path and the mixed-version detection in `async_server.py` — before the 20-step run.
-4. **`security-reviewer`** on `/reload_lora` if the transport choice is URL-based (SSRF surface on the pool child).
-
-## Other tooling the planner should consider (optional, at most 1–2 per turn)
-
-| Need | Tool |
-|---|---|
-| Orient in unfamiliar verl/vLLM modules | `Skill("repo-architecture")` |
-| Surgical changes, avoid rabbit holes | `Skill("karpathy-guidelines")` |
-| Fast codebase search (LoRA inside verl/vLLM, PEFT checkpoint format) | `Agent(subagent_type="Explore")` |
-| Test-first for `_publish_lora_adapter` and `/reload_lora` | `Skill("tdd-workflow")` / `Agent(subagent_type="tdd-guide")` |
-| Context compaction between cuts | `Skill("strategic-compact")` |
-| Verify loop (lint + fast pytest) before commit | `Skill("verification-loop")` |
-| CUDA OOM / tensor shape errors during the run | `Agent(subagent_type="pytorch-build-resolver")` |
+| [`stages/weight_sync_lora.md`](./stages/weight_sync_lora.md) | Phase 1 design — protocol, failure modes, success gates. Phase 2 reuses all of this. |
+| [`stages/progress_stage.md`](./stages/progress_stage.md) | Phase 1 as-built — what each file does, what happens inside a swap, how staleness is accounted. |
+| [`stages/timing_decoupled_4B.md`](./stages/timing_decoupled_4B.md) | First empirical numbers. Phase 2 budget negotiations start here. |
+| [`stages/baseline.md`](./stages/baseline.md) | Pre-weight-sync baseline; the "before" picture for importance-ratio drift. |
+| `../CLAUDE.md` | Repo invariants, frozen files, credential pin. |
+| `scripts/serving/_vllm_child.py` | Pool-side reload implementation — the drain/swap protocol Phase 2 extends. |
+| `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py:1266+` | `_publish_lora_adapter` — the publish fan-out Phase 2 generalizes. |

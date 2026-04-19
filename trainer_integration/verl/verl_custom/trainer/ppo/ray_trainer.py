@@ -385,6 +385,16 @@ class RayPPOTrainer:
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = config.actor_rollout_ref.model.get('lora_rank', 0) > 0
 
+        # LoRA weight-sync bookkeeping. `policy_version` is trainer-authoritative
+        # and only advances after every endpoint in
+        # `actor_rollout_ref.rollout.external_llm_endpoints` ACKs /reload_lora
+        # with 200. `_last_publish_step` tracks the trainer step at which the
+        # last successful publish happened, used for `rollout/staleness_steps`.
+        # See plans-n-solutions/stages/weight_sync_lora.md §5.
+        self.policy_version = 0
+        self._last_publish_step = 0
+        self._last_publish_metrics: dict = {}
+
         # define in-reward KL control
         # kl loss control currently not suppoorted
         if config.algorithm.use_kl_in_reward:
@@ -1253,6 +1263,131 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, 'w') as f:
             f.write(str(self.global_steps))
 
+    def _publish_lora_adapter(self, local_global_step_folder: str) -> None:
+        # Broadcasts the rank-16 LoRA adapter emitted by
+        # verl/workers/fsdp_workers.py::save_checkpoint (when _is_lora=True) to
+        # every vLLM pool child listed in
+        # config.actor_rollout_ref.rollout.external_llm_endpoints. Trainer mints
+        # the monotonic policy_version — pool only echoes what it installed.
+        # Any endpoint failure aborts the run (mixed-version batches would be
+        # a correctness bug). See plans-n-solutions/stages/weight_sync_lora.md §5.
+        import io  # noqa: PLC0415
+        import tarfile  # noqa: PLC0415
+        import time  # noqa: PLC0415
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+
+        import requests  # noqa: PLC0415
+
+        adapter_dir = os.path.join(local_global_step_folder, 'actor', 'lora_adapter')
+        required = ('adapter_model.safetensors', 'adapter_config.json')
+        missing = [
+            f for f in required if not os.path.isfile(os.path.join(adapter_dir, f))
+        ]
+        if missing:
+            raise RuntimeError(
+                f'PEFT adapter missing from checkpoint at {adapter_dir}: {missing}. '
+                "verl's _is_lora save path (fsdp_workers.py) did not emit shards."
+            )
+
+        new_version = self.policy_version + 1
+
+        # Build tarball in memory (adapter ≤ ~80 MiB at rank=16 for Qwen3-4B).
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode='w:gz') as tar:
+            for fname in required:
+                tar.add(os.path.join(adapter_dir, fname), arcname=fname)
+        adapter_bytes = buf.tell()
+        buf.seek(0)
+        payload = buf.getvalue()
+
+        endpoints = list(self.config.actor_rollout_ref.rollout.external_llm_endpoints)
+        if not endpoints:
+            raise RuntimeError(
+                'external_llm_endpoints is empty — nothing to publish LoRA to.'
+            )
+
+        def _post(endpoint: str) -> dict:
+            url = endpoint.rstrip('/') + '/reload_lora'
+            started = time.monotonic()
+            try:
+                resp = requests.post(
+                    url,
+                    files={'adapter': ('adapter.tgz', payload, 'application/gzip')},
+                    data={'policy_version': str(new_version)},
+                    timeout=60,
+                )
+                wall_s = time.monotonic() - started
+                body: dict = {}
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = {'detail': resp.text[:512]}
+                return {
+                    'endpoint': endpoint,
+                    'status': resp.status_code,
+                    'wall_s': wall_s,
+                    'body': body,
+                }
+            except requests.RequestException as exc:
+                return {
+                    'endpoint': endpoint,
+                    'status': -1,
+                    'wall_s': time.monotonic() - started,
+                    'body': {'detail': f'{type(exc).__name__}: {exc}'},
+                }
+
+        with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
+            responses = list(pool.map(_post, endpoints))
+
+        # 409 = pool rejected because new_version <= active_policy_version,
+        # i.e. this exact version is already installed on that child. Treat
+        # as success (idempotent replay after a partial-failure retry); the
+        # body's `policy_version` still lets us surface the ack latency.
+        ok = [r for r in responses if r['status'] in (200, 409)]
+        failed = [r for r in responses if r['status'] not in (200, 409)]
+        if failed:
+            raise RuntimeError(
+                f'ABORT: {len(failed)}/{len(endpoints)} endpoints failed /reload_lora '
+                f'at pv={new_version}: {failed}'
+            )
+
+        # Commit only after every endpoint ACKed.
+        self.policy_version = new_version
+        self._last_publish_step = self.global_steps
+        if getattr(self, 'async_rollout_manager', None) is not None:
+            self.async_rollout_manager.policy_version = new_version
+
+        publish_latency_s = max(r['wall_s'] for r in ok)
+        vllm_load_latency_s = (
+            max(float(r['body'].get('vllm_load_latency_ms', 0.0)) for r in ok) / 1000.0
+        )
+        transfer_latency_s = max(0.0, publish_latency_s - vllm_load_latency_s)
+
+        self._last_publish_metrics = {
+            'weight_sync/policy_version': new_version,
+            'weight_sync/adapter_mib': adapter_bytes / (1024 * 1024),
+            'weight_sync/publish_latency_s': publish_latency_s,
+            'weight_sync/transfer_latency_s': transfer_latency_s,
+            'weight_sync/vllm_load_latency_s': vllm_load_latency_s,
+            'weight_sync/endpoints_ok': len(ok),
+            'weight_sync/endpoints_failed': len(failed),
+        }
+
+        print(
+            json.dumps(
+                {
+                    'event': 'publish_lora_adapter',
+                    'policy_version': new_version,
+                    'adapter_bytes': adapter_bytes,
+                    'endpoints_ok': len(ok),
+                    'publish_latency_s': round(publish_latency_s, 3),
+                    'transfer_latency_s': round(transfer_latency_s, 3),
+                    'vllm_load_latency_s': round(vllm_load_latency_s, 3),
+                },
+                separators=(',', ':'),
+            )
+        )
+
     def _load_checkpoint(self):
         # Sleep and wake up the async rollout manager: https://github.com/volcengine/verl/issues/2613
         # This syncs weights to vllm server. Also release GPU memory.
@@ -1656,15 +1791,32 @@ class RayPPOTrainer:
                                 dump_path=rollout_data_dir,
                             )
 
+                    did_save = False
                     if self.config.trainer.save_freq > 0 and (
                         is_last_step
                         or self.global_steps % self.config.trainer.save_freq == 0
                     ):
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
+                        did_save = True
                     elif self.timeout.check_save():
                         with _timer('save_checkpoint', timing_raw):
                             self._save_checkpoint()
+                        did_save = True
+
+                    if (
+                        did_save
+                        and self.config.actor_rollout_ref.rollout.get(
+                            'publish_on_save', False
+                        )
+                        and self.config.actor_rollout_ref.model.get('lora_rank', 0) > 0
+                    ):
+                        local_global_step_folder = os.path.join(
+                            self.config.trainer.default_local_dir,
+                            f'global_step_{self.global_steps}',
+                        )
+                        with _timer('publish_lora', timing_raw):
+                            self._publish_lora_adapter(local_global_step_folder)
 
                     # validate
                     if (
@@ -1702,6 +1854,19 @@ class RayPPOTrainer:
                     compute_throughout_metrics(
                         batch=batch, timing_raw=timing_raw, n_gpus=n_gpus
                     )
+                )
+
+                # LoRA weight-sync metrics: publish keys appear only on steps
+                # where _publish_lora_adapter ran; staleness is logged every
+                # step as "training steps since last successful publish"
+                # (mixing global_steps with policy_version conflates ordinals
+                # with cardinals). Before the first publish, staleness equals
+                # the current step count.
+                if self._last_publish_metrics:
+                    metrics.update(self._last_publish_metrics)
+                    self._last_publish_metrics = {}
+                metrics['rollout/staleness_steps'] = max(
+                    0, self.global_steps - self._last_publish_step
                 )
 
                 # TODO: make a canonical logger that supports various backend

@@ -18,11 +18,17 @@
 #   stop        SSH-kill the 4 PIDs. Rsync remote child logs back to
 #               /tmp/vllm-child-<port>.log so validate_run.py finds them at
 #               the Stage-1 path.
+#   publish     Fan POST /reload_lora to all 4 children in parallel with a
+#               tar.gz of {adapter_model.safetensors, adapter_config.json}.
+#               Used manually before the trainer-side hook lands in Cut 3;
+#               partial failure → exit 1 (mixed-version rollouts are a
+#               correctness bug, see plans-n-solutions/stages/weight_sync_lora.md).
 #
 # Usage:
 #   bash scripts/serving/launch_remote_vllm_pool.sh bootstrap
 #   bash scripts/serving/launch_remote_vllm_pool.sh start
 #   bash scripts/serving/launch_remote_vllm_pool.sh stop
+#   bash scripts/serving/launch_remote_vllm_pool.sh publish <adapter_dir> --policy-version <N>
 set -eo pipefail
 
 # -----------------------------------------------------------------------------
@@ -50,7 +56,12 @@ SSH_BASE=(ssh -o BatchMode=yes -o ConnectTimeout=15 "$REMOTE_HOST")
 
 usage() {
   cat <<EOF >&2
-usage: $0 <bootstrap|start|stop>
+usage: $0 <bootstrap|start|stop|publish>
+
+  publish <adapter_dir> --policy-version <N>
+      Fan POST /reload_lora to all ${#PORTS[@]} children. <adapter_dir> must
+      contain adapter_model.safetensors and adapter_config.json (PEFT layout
+      emitted by verl's _save_checkpoint when lora_rank>0).
 
 Environment overrides:
   REMOTE_HOST     SSH alias (default: vllm-instance)
@@ -260,11 +271,121 @@ EOF
 }
 
 # -----------------------------------------------------------------------------
+# publish — fan POST /reload_lora to all children in parallel
+# -----------------------------------------------------------------------------
+do_publish() {
+  local adapter_dir="${1:-}"
+  shift || true
+  local policy_version=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --policy-version) policy_version="$2"; shift 2;;
+      *) echo "[publish] ERROR: unknown arg: $1" >&2; exit 2;;
+    esac
+  done
+
+  if [[ -z "$adapter_dir" ]]; then
+    echo "[publish] ERROR: missing <adapter_dir>" >&2
+    echo "[publish] usage: $0 publish <adapter_dir> --policy-version <N>" >&2
+    exit 2
+  fi
+  if [[ -z "$policy_version" ]]; then
+    echo "[publish] ERROR: --policy-version <N> is required" >&2
+    exit 2
+  fi
+  if ! [[ "$policy_version" =~ ^[0-9]+$ ]] || (( policy_version < 1 )); then
+    echo "[publish] ERROR: policy_version must be a positive integer, got '$policy_version'" >&2
+    exit 2
+  fi
+  if [[ ! -d "$adapter_dir" ]]; then
+    echo "[publish] ERROR: adapter_dir not a directory: $adapter_dir" >&2
+    exit 2
+  fi
+  for f in adapter_model.safetensors adapter_config.json; do
+    if [[ ! -f "$adapter_dir/$f" ]]; then
+      echo "[publish] ERROR: missing required file: $adapter_dir/$f" >&2
+      exit 2
+    fi
+  done
+
+  # Tar into a tmp file. Clean up on any exit path.
+  local tarball
+  tarball="$(mktemp -t "lora_publish_pv${policy_version}_XXXXXX.tgz")"
+  local response_dir
+  response_dir="$(mktemp -d -t "lora_publish_resp_XXXXXX")"
+  trap 'rm -f "$tarball"; rm -rf "$response_dir"' EXIT
+
+  echo "[publish] policy_version=$policy_version adapter_dir=$adapter_dir"
+  tar czf "$tarball" -C "$adapter_dir" adapter_model.safetensors adapter_config.json
+  local adapter_bytes
+  adapter_bytes=$(stat -c %s "$tarball" 2>/dev/null || stat -f %z "$tarball")
+  echo "[publish] tarball=$tarball bytes=$adapter_bytes"
+
+  # Fan-out in parallel. Each curl writes:
+  #   response body  -> $response_dir/body-<port>.json
+  #   status metrics -> $response_dir/meta-<port>.txt   (http=<code> ttfb=... total=...)
+  # Exit status of curl is captured via `wait $pid; echo $? > $response_dir/rc-<port>`.
+  local pids=()
+  local t_start_s
+  t_start_s=$(date +%s)
+  for port in "${PORTS[@]}"; do
+    (
+      # Disable errexit inside the subshell so a non-2xx / network failure
+      # does not abort before we record the curl exit code for the tally.
+      set +e
+      curl -sS -m 60 -X POST "http://${REMOTE_DNS}:${port}/reload_lora" \
+        -F "adapter=@${tarball}" \
+        -F "policy_version=${policy_version}" \
+        -o "$response_dir/body-${port}.json" \
+        -w "http=%{http_code} ttfb=%{time_starttransfer} total=%{time_total}\n" \
+        > "$response_dir/meta-${port}.txt" 2>"$response_dir/err-${port}.txt"
+      echo $? > "$response_dir/rc-${port}"
+    ) &
+    pids+=($!)
+  done
+  for pid in "${pids[@]}"; do
+    wait "$pid" || true
+  done
+  local t_end_s
+  t_end_s=$(date +%s)
+
+  # Tally results.
+  local ok=0
+  local failed=0
+  local failed_ports=()
+  for port in "${PORTS[@]}"; do
+    local rc meta body http
+    rc=$(cat "$response_dir/rc-${port}" 2>/dev/null || echo "?")
+    meta=$(cat "$response_dir/meta-${port}.txt" 2>/dev/null || echo "")
+    body=$(cat "$response_dir/body-${port}.json" 2>/dev/null || echo "")
+    http=$(printf '%s' "$meta" | sed -n 's/.*http=\([0-9]*\).*/\1/p')
+    if [[ "$rc" == "0" && "$http" == "200" ]]; then
+      ok=$((ok + 1))
+      echo "[publish]   :${port} OK  ${meta}  body=${body}"
+    else
+      failed=$((failed + 1))
+      failed_ports+=("$port")
+      local err
+      err=$(cat "$response_dir/err-${port}.txt" 2>/dev/null || echo "")
+      echo "[publish]   :${port} FAIL rc=${rc} ${meta}  body=${body}  err=${err}" >&2
+    fi
+  done
+
+  echo "[publish] ${ok}/${#PORTS[@]} endpoints OK  wall=$((t_end_s - t_start_s))s  policy_version=${policy_version}"
+  if (( failed > 0 )); then
+    echo "[publish] ABORT: ${failed} endpoint(s) failed: ${failed_ports[*]}" >&2
+    echo "[publish]        mixed-version rollout batches are a correctness bug; operator must investigate before re-running." >&2
+    exit 1
+  fi
+}
+
+# -----------------------------------------------------------------------------
 # dispatch
 # -----------------------------------------------------------------------------
 case "${1:-}" in
   bootstrap) do_bootstrap;;
   start) do_start;;
   stop) do_stop;;
+  publish) shift; do_publish "$@";;
   *) usage;;
 esac

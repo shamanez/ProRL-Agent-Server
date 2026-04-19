@@ -253,6 +253,11 @@ class AsyncLLMServerManager:
         self.config = config.actor_rollout_ref
         self.worker_group = worker_group
 
+        # Trainer-authoritative LoRA policy version stamped on every rollout
+        # job (see plans-n-solutions/stages/weight_sync_lora.md §5). Remains 0
+        # until the trainer's _publish_lora_adapter commits the first publish.
+        self.policy_version = 0
+
         # Calculate parallel topology from worker group
         # tensor_model_parallel_size: Number of GPUs per model instance (for large models)
         # rollout_dp_size: Number of data parallel replicas (for throughput scaling)
@@ -1484,6 +1489,10 @@ class AsyncLLMServerManager:
                 # Create a copy of the original message for each trajectory
                 tmp_message = messages[i].copy()
                 tmp_message['trajectory_id'] = j  # Add trajectory identifier
+                # Stamp the current trainer-authoritative LoRA policy version
+                # so downstream (ProRL + pool child) can filter / debug
+                # mixed-version batches. 0 means "no adapter published yet".
+                tmp_message['policy_version'] = self.policy_version
                 new_messages.append(tmp_message)
 
         return new_messages

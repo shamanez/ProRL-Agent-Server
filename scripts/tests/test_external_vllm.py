@@ -18,7 +18,6 @@ Usage::
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import subprocess
 import sys
@@ -175,26 +174,6 @@ def _check_child_log_traffic(ports: list[int]) -> None:
         logger.info('  %s: POST /generate count=%d', log_path, count)
 
 
-def _check_reload_weights_stub(ports: list[int]) -> None:
-    """Criterion 5: /reload_weights returns 501 + {"detail": "Not implemented in Stage 1"}."""
-    for port in ports:
-        url = f'http://localhost:{port}/reload_weights'
-        r = httpx.post(url, timeout=REQUEST_TIMEOUT_SECONDS)
-        if r.status_code != 501:
-            raise CriterionFailed(
-                f':{port}/reload_weights returned {r.status_code}, expected 501'
-            )
-        try:
-            body = r.json()
-        except json.JSONDecodeError as exc:
-            raise CriterionFailed(
-                f':{port}/reload_weights non-JSON body: {r.text[:200]}'
-            ) from exc
-        if body.get('detail') != 'Not implemented in Stage 1':
-            raise CriterionFailed(f':{port}/reload_weights body mismatch: {body!r}')
-        logger.info('  :%d /reload_weights -> 501 %s', port, body)
-
-
 def _check_trainer_untouched() -> None:
     """Criterion 6: no Stage 1 change has leaked into trainer_integration/."""
     try:
@@ -280,7 +259,6 @@ def main(argv: list[str] | None = None) -> int:
         results.append(('crit 2 — ProRL /status', True, 'skipped (--skip-prorl)'))
     _run('crit 4 — /generate round trip', _check_generate_round_trip, ports)
     _run('crit 4 — child log POST /generate', _check_child_log_traffic, ports)
-    _run('crit 5 — /reload_weights stub', _check_reload_weights_stub, ports)
     _run('crit 6 — trainer_integration untouched', _check_trainer_untouched)
 
     # Criterion 3 (end-to-end SWE-Bench rollout) is covered by the Stage 1 live

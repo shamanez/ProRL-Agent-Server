@@ -61,4 +61,8 @@ exec python "$CHILD" \
   --enable-chunked-prefill \
   --enable-prefix-caching \
   --max-num-batched-tokens 16384 \
-  --max-num-seqs 128
+  --max-num-seqs 128 \
+  --enable-lora \
+  --max-loras 2 \
+  --max-lora-rank 16 \
+  --max-cpu-loras 4
