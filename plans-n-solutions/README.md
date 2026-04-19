@@ -8,6 +8,7 @@ Branch `decoup-weight-sync` carries the decoupled multi-machine baseline (traine
 | [`stages/weight_sync_lora.md`](./stages/weight_sync_lora.md) | DONE | Phase 1 design + run book. Trainer publishes rank-16 LoRA adapters after every `save_freq` steps via `AsyncLLMEngine.add_lora`. |
 | [`stages/progress_stage.md`](./stages/progress_stage.md) | DONE | Phase 1 as-built: what shipped, how to reproduce, what happens inside vLLM during a swap, and the async-ratio / staleness accounting. |
 | [`stages/timing_decoupled_4B.md`](./stages/timing_decoupled_4B.md) | DONE | First empirical timing — Qwen3-4B decoupled, 20 steps, 4 publishes. WandB run `w9nj4akn`. |
+| [`stages/phase1_summary.html`](./stages/phase1_summary.html) | DONE | Visual summary — system diagram, vLLM in-flight reload mechanics, FSDP→PEFT→EC2 pipeline, timing table. Open in a browser. |
 | [`next_approach.md`](./next_approach.md) | NEXT | Phase 2 (full state-dict) + Phase 3 (replay buffer / truly async) scope. |
 
 ## Hard constraints
