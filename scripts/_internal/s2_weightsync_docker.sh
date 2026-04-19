@@ -22,6 +22,14 @@ IMG=verlai/verl:vllm018.dev1
 CNAME=s2-weightsync
 REMOTE_DNS="${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}"
 
+# Trainer scale knobs — overridable per run. Defaults match the 20-step
+# Phase 1 validation run (WandB `w9nj4akn`). Overnight / longer runs set
+# TOTAL_EPOCHS + TOTAL_TRAINING_STEPS in the environment.
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-3}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-20}"
+SAVE_FREQ="${SAVE_FREQ:-5}"
+LOG_PATH="${LOG_PATH:-/tmp/s2-weightsync.log}"
+
 echo "[weightsync/docker] starting $(date -u +%FT%TZ)"
 echo "[weightsync/docker] image: $IMG"
 echo "[weightsync/docker] remote pool: $REMOTE_DNS:8100-8103"
@@ -48,6 +56,9 @@ docker run --rm --name "$CNAME" \
   -e PYTHONPATH=/workspace \
   -e PYTORCH_ALLOC_CONF=expandable_segments:True \
   -e REMOTE_DNS="$REMOTE_DNS" \
+  -e TOTAL_EPOCHS="$TOTAL_EPOCHS" \
+  -e TOTAL_TRAINING_STEPS="$TOTAL_TRAINING_STEPS" \
+  -e SAVE_FREQ="$SAVE_FREQ" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \
@@ -104,10 +115,11 @@ docker run --rm --name "$CNAME" \
     echo "[weightsync/docker] clearing $STAGE1_OUT for a fresh run"
     rm -rf "$STAGE1_OUT"
 
+    echo "[weightsync/docker] scale: epochs=$TOTAL_EPOCHS steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ"
     bash trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh \
-      trainer.total_epochs=3 \
-      ++trainer.total_training_steps=20 \
-      trainer.save_freq=5 \
+      trainer.total_epochs="$TOTAL_EPOCHS" \
+      ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
+      trainer.save_freq="$SAVE_FREQ" \
       trainer.resume_mode=disable \
       data.max_prompt_length=8192 \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
@@ -121,4 +133,4 @@ docker run --rm --name "$CNAME" \
       trainer.default_local_dir="$STAGE1_OUT" \
       ++actor_rollout_ref.rollout.custom.rollout_save_dir=/workspace/outputs/rollout_data_weightsync \
       "$@"
-  ' 2>&1 | tee /tmp/s2-weightsync.log
+  ' 2>&1 | tee "$LOG_PATH"
