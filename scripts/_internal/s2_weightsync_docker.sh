@@ -25,8 +25,8 @@ REMOTE_DNS="${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}"
 # Trainer scale knobs — overridable per run. Defaults match the 20-step
 # Phase 1 validation run (WandB `w9nj4akn`). Overnight / longer runs set
 # TOTAL_EPOCHS + TOTAL_TRAINING_STEPS in the environment.
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-3}"
-TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-20}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 SAVE_FREQ="${SAVE_FREQ:-5}"
 LOG_PATH="${LOG_PATH:-/tmp/s2-weightsync.log}"
 
@@ -121,15 +121,16 @@ docker run --rm --name "$CNAME" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
       trainer.save_freq="$SAVE_FREQ" \
       trainer.resume_mode=disable \
-      data.max_prompt_length=8192 \
+      data.max_prompt_length=16384 \
+      data.max_response_length=2048 \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
       actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
       actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=32768 \
       actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=32768 \
       +actor_rollout_ref.actor.calculate_entropy=false \
       actor_rollout_ref.actor.entropy_checkpointing=true \
-      data.train_files=[/data/SkyRL-v0-293/train.filtered.parquet] \
-      data.val_files=[/data/SkyRL-v0-293/validation.filtered.parquet] \
+      data.train_files=[/data/SkyRL-v0-293/train.parquet] \
+      data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
       trainer.default_local_dir="$STAGE1_OUT" \
       ++actor_rollout_ref.rollout.custom.rollout_save_dir=/workspace/outputs/rollout_data_weightsync \
       "$@"

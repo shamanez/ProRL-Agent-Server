@@ -27,7 +27,7 @@ CKPT_PATH='/path/to/outputs'
 
 BATCH_SIZE=4
 MAX_NUM_ITERS=30
-NUM_TRAJ=4
+NUM_TRAJ=16
 SAVE_FREQ=5
 # See sibling `_remote_decoupled.sh` for the full rationale on worker count.
 OPENHANDS_NUM_WORKERS=32
@@ -62,8 +62,8 @@ python3 -m verl_custom.trainer.main_ppo \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.model.lora_rank=16 \
-    actor_rollout_ref.model.lora_alpha=32 \
+    actor_rollout_ref.model.lora_rank=32 \
+    actor_rollout_ref.model.lora_alpha=64 \
     +actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj] \
     +actor_rollout_ref.model.exclude_modules=null \
     actor_rollout_ref.actor.ppo_mini_batch_size=$BATCH_SIZE \

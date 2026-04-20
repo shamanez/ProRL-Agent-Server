@@ -64,5 +64,5 @@ exec python "$CHILD" \
   --max-num-seqs 128 \
   --enable-lora \
   --max-loras 2 \
-  --max-lora-rank 16 \
+  --max-lora-rank 32 \
   --max-cpu-loras 4
