@@ -1,16 +1,15 @@
 #!/bin/bash
-# Phase 1 sibling of s1_remote_docker.sh. Same decoupled topology
-# (ProRL on host, vLLM pool on EC2 `vllm-instance`, FSDP trainer here)
-# but enables rank-16 LoRA + POST /reload_lora weight-sync. Design sketch:
-# plans-n-solutions/stages/weight_sync_lora.md.
+# Starting-state trainer launcher: decoupled topology (ProRL on host, vLLM
+# pool on EC2 `vllm-instance`, FSDP trainer inside this container) with
+# closed-loop rank-16 LoRA weight-sync via POST /reload_lora.
 #
-# Deltas vs s1_remote_docker.sh:
+# Layout:
 #   - CNAME=s2-weightsync
 #   - STAGE1_OUT points at the weight-sync experiment dir
 #   - Inner Hydra script → run_proagent_qwn3_4B_instruct_weightsync.sh
-#     (enables lora_rank=16, publish_on_save=True)
-#   - trainer.save_freq=5 so /reload_lora fires on steps 5, 10, 15, 20
-#   - tee /tmp/s2-weightsync.log
+#     (lora_rank=16, publish_on_save=True)
+#   - trainer.save_freq controls publish cadence
+#   - tees to /tmp/s2-weightsync.log
 #
 # verl version: 0.8.0.dev (shamanez/verl main branch)
 # Docker image: verlai/verl:vllm018.dev1 (vLLM 0.18, PyTorch 2.6+)
@@ -22,9 +21,8 @@ IMG=verlai/verl:vllm018.dev1
 CNAME=s2-weightsync
 REMOTE_DNS="${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}"
 
-# Trainer scale knobs — overridable per run. Defaults match the 20-step
-# Phase 1 validation run (WandB `w9nj4akn`). Overnight / longer runs set
-# TOTAL_EPOCHS + TOTAL_TRAINING_STEPS in the environment.
+# Trainer scale knobs — overridable per run. Longer runs set TOTAL_EPOCHS
+# + TOTAL_TRAINING_STEPS in the environment.
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 SAVE_FREQ="${SAVE_FREQ:-1}"

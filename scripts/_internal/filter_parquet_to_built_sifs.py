@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Filter a SkyRL-style parquet down to the rows whose SIF already exists.
 
-When Stage 0 launches against a partial SIF build (e.g. only 30/293 images
-are ready), the trainer would otherwise throw `Singularity image not found`
+When the trainer launches against a partial SIF build (e.g. only 30/293
+images are ready), it would otherwise throw `Singularity image not found`
 on every missing one. This helper writes a new parquet containing only the
 rows whose expected .sif file is present in the image cache.
 

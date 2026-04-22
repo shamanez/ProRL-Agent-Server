@@ -168,7 +168,7 @@ def get_config(
 
     # Required: without --fakeroot, `su root -` inside the SIF hits a PAM
     # failure that produces no output, hanging the bash session and tripping
-    # wait_until_alive's 240s deadline. Stage 0 used this same setting.
+    # wait_until_alive's 240s deadline.
     sandbox_config.run_as_fakeroot = True
 
     # Disable browser, stops openhands from spawning 100+ threads

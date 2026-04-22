@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage 0 prerequisite: build Singularity .sif images from the parquet.
+# One-time prerequisite: build Singularity .sif images from the parquet.
 # Invocation: s0_build_sifs.sh <start_idx> <end_idx>
 set -eo pipefail
 START="${1:-1}"

@@ -26,13 +26,13 @@ You are a **planning agent first**, an implementation agent second. Follow Phase
 
 **Deliverable (reply to the user in chat, NOT a file):** a 10-bullet summary of current state + your initial hypothesis for the Phase 2 architecture. Ask any clarifying questions.
 
-### Phase B — Reproduce the Phase 1 baseline
+### Phase B — Reproduce `decoup-weight-sync`
 
-Do not assume the environment works. Prove it.
+Do not assume the environment works. Prove it against the known-good starting state.
 
-1. Start the three processes (§6).
-2. Run a 1-step save-then-reload cycle on branch `decoup-weight-sync` (NOT `full-async` — reproduction must be against known-good). Verify the six Phase 1 gates described in the commit history and in the `run_proagent_qwn3_4B_instruct_weightsync.sh` Hydra config.
-3. Back to `full-async`. Reproduce again — nothing should have changed behaviorally because Phase 2 code doesn't exist yet.
+1. Start the three processes (§6) — ProRL, remote vLLM pool, trainer.
+2. Check out `decoup-weight-sync`. Launch `bash scripts/_internal/s2_weightsync_docker.sh` with a short config (`TOTAL_TRAINING_STEPS=2 SAVE_FREQ=1`). Verify: pool `/health` shows `policy_version` bumps after each save, `weight_sync/*` WandB keys appear on every step, zero 5xx on `/generate` during swaps, `weight_sync/endpoints_failed == 0`.
+3. Back to `full-async`. Reproduce the same 2-step cycle — behavior must be identical because Phase 2 code doesn't exist yet.
 
 **Deliverable:** a short status note with run IDs + gate status. If anything is red, fix it before touching Phase 2 scope.
 
@@ -71,11 +71,9 @@ Update `plans-n-solutions/handsoff.md` (this file) with what shipped, what's def
 
 ## 2. Current state
 
-| Branch | Status | What it carries |
-|---|---|---|
-| `stable` | Baseline topology (trainer FSDP + remote vLLM pool over HTTP, no weight updates). | Frozen reproduction. |
-| `decoup-weight-sync` | **Phase 1 DONE.** Closed-loop LoRA weight-sync, rank-16, `/reload_lora` on pool, trainer-authoritative `policy_version`, DAPO + plain GRPO both wired. | 6/6 Phase 1 gates green. |
-| `full-async` | **THIS BRANCH.** Starting point = `decoup-weight-sync` HEAD. No Phase 2 code yet. | Empty — you write it. |
+**Starting state = `decoup-weight-sync`.** That branch carries the closed-loop Phase 1 LoRA weight-sync: rank-16 adapters, `/reload_lora` on the pool, trainer-authoritative `policy_version`, DAPO + plain GRPO both wired, 6/6 Phase 1 gates green. All running and validation flows originate there. Nothing earlier is in scope — do not reference, reproduce against, or frame anything relative to pre-`decoup-weight-sync` state.
+
+`full-async` (this branch) was cut from `decoup-weight-sync` HEAD. No Phase 2 code yet — you write it.
 
 Phase 1 commits worth reading (from `decoup-weight-sync`): `9191de66 feat: Phase 1 LoRA weight-sync`, `39452b58 feat(phase1): final-run hardening — resume, DAPO, pool headroom`, `bea41a0f Elevate Codex review from optional tooling to a Phase 1 gate`.
 
@@ -114,12 +112,10 @@ The structural fix: **rollout workers run continuously against whatever adapter 
 ```
 
 Frozen files (reproduction-critical — **never edit**, make siblings):
-- `scripts/_internal/s1_remote_docker.sh` (baseline)
-- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh` (baseline)
-- `scripts/_internal/s2_weightsync_docker.sh` (Phase 1)
-- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` (Phase 1)
+- `scripts/_internal/s2_weightsync_docker.sh`
+- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh`
 
-Phase 2 will add `scripts/_internal/s3_fullasync_docker.sh` and `..._fullasync.sh`.
+Phase 2 will add `scripts/_internal/s3_fullasync_docker.sh` and `..._fullasync.sh` as siblings.
 
 ---
 
@@ -153,7 +149,7 @@ bash scripts/serving/launch_remote_vllm_pool.sh start
 # Orchestrator SSH's into vllm-instance, boots 4 children on 8100-8103.
 # Wait for: 4× "ready" from /health.
 
-# Terminal 3 — trainer box (Docker) — Phase 1 trainer  (use as reproduction baseline)
+# Terminal 3 — trainer box (Docker) — GRPO trainer with closed-loop LoRA weight-sync
 bash scripts/_internal/s2_weightsync_docker.sh
 # Env knobs: TOTAL_EPOCHS TOTAL_TRAINING_STEPS SAVE_FREQ LOG_PATH REMOTE_DNS
 

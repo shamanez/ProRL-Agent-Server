@@ -23,10 +23,8 @@ Use the canonical launchers — do not invent new invocations. The topology is *
 | Decoupled GRPO trainer (Docker, 8 × A100 FSDP) | trainer box | `bash scripts/_internal/s2_weightsync_docker.sh` (Phase 1) |
 
 **Frozen files** (reproduction depends on them — make siblings, do not edit):
-- `scripts/_internal/s1_remote_docker.sh` (baseline)
-- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh` (baseline)
-- `scripts/_internal/s2_weightsync_docker.sh` (Phase 1)
-- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` (Phase 1)
+- `scripts/_internal/s2_weightsync_docker.sh`
+- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh`
 
 `WANDB_API_KEY` and other secrets are pinned in `/home/ubuntu/.prorl_creds.env` and sourced by both the ProRL and pool launchers — do not re-export them inline.
 

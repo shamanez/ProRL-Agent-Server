@@ -1,17 +1,16 @@
 #!/bin/bash
-# Phase 1 sibling of run_proagent_qwn3_4B_instruct_remote_decoupled.sh.
-# Same decoupled topology (trainer FSDP local, vLLM pool on EC2, ProRL on
-# host), but turns on rank-16 LoRA training and publishes the adapter to
-# every pool child via POST /reload_lora after each _save_checkpoint. See
-# plans-n-solutions/stages/weight_sync_lora.md.
+# Starting-state Hydra launcher: decoupled topology (trainer FSDP local,
+# vLLM pool on EC2, ProRL on host) with rank-16 LoRA training and adapter
+# publish to every pool child via POST /reload_lora after each
+# _save_checkpoint.
 #
-# Deltas vs run_proagent_qwn3_4B_instruct_remote_decoupled.sh:
-#   - EXPERIMENT_NAME points at the new WandB project slot.
-#   - SAVE_FREQ=5 — publish cadence (design sketch §4).
-#   - +actor_rollout_ref.model.lora_rank=16, lora_alpha=32, target_modules
+# Key overrides:
+#   - EXPERIMENT_NAME=weight-sync-decup-prorl (WandB project slot).
+#   - SAVE_FREQ controls publish cadence.
+#   - +actor_rollout_ref.model.lora_rank=32, lora_alpha=64, target_modules
 #     covers all Qwen3 attention + MLP projections.
-#   - +actor_rollout_ref.rollout.publish_on_save=True flips the ray_trainer
-#     _publish_lora_adapter call on.
+#   - +actor_rollout_ref.rollout.publish_on_save=True arms the ray_trainer
+#     _publish_lora_adapter call.
 #
 # `set -euo pipefail` so the trainer's exit code propagates to the docker
 # launcher (s2_weightsync_docker.sh).
@@ -27,12 +26,11 @@ CKPT_PATH='/path/to/outputs'
 
 BATCH_SIZE=4
 MAX_NUM_ITERS=30
-# DAPO-aligned: stable uses 4; we take 8 as a compromise — more signal per
-# prompt for GRPO group stats with filter_groups on, still halves rollout
-# cost vs the previous 16.
+# DAPO-aligned: 8 samples per prompt balances GRPO group-stat signal
+# (meaningful with filter_groups on) against rollout cost.
 NUM_TRAJ=8
 SAVE_FREQ=5
-# See sibling `_remote_decoupled.sh` for the full rationale on worker count.
+# 32 OpenHands workers saturates the 4-endpoint pool for n=8 × batch_size=4.
 OPENHANDS_NUM_WORKERS=32
 
 # DAPO drops KL loss: RLVR rewards are verifiable, no reward-model drift to
@@ -50,7 +48,7 @@ CLIP_RATIO_HIGH=0.28
 # but kept to avoid Hydra removal noise.
 GPU_MEM_UTIL=0.8
 # rollout_dp_size = world_size / TP_SIZE = 8 / 2 = 4, matching the 4 remote
-# endpoints. SP_SIZE=2 matches the Stage 0 baseline for 8-GPU FSDP.
+# endpoints. SP_SIZE=2 for 8-GPU FSDP.
 TP_SIZE=2
 NNODES=1
 SP_SIZE=2

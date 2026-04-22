@@ -43,7 +43,7 @@ GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 
 # GPU -> port mapping. Must stay aligned with external_llm_endpoints in
-# run_proagent_qwn3_4B_instruct_remote_decoupled.sh.
+# run_proagent_qwn3_4B_instruct_weightsync.sh.
 GPUS=(0 1 2 3)
 PORTS=(8100 8101 8102 8103)
 

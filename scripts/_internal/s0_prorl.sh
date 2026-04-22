@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stage 0: start the ProRL FastAPI server on :8006.
+# Start the ProRL FastAPI server on :8006.
 set -eo pipefail
 source /home/ubuntu/.prorl_creds.env
 cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
