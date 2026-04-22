@@ -6,21 +6,27 @@ Guidance for Claude Code working in this repo.
 
 ProRLAgent Server is a scalable multi-turn rollout service for training/evaluating RL agents. It is a fork of OpenHands — the upstream `openhands/` tree is kept largely intact, and the new RL-serving code lives under `openhands/nvidia/`, `openhands/llm/nvidia/`, `scripts/`, and `trainer_integration/verl/`. Agent jobs flow through a FastAPI server that dispatches to pluggable handlers and talks to vLLM via token-level I/O.
 
+## Start here
+
+If you are a planning / implementation agent landing on this repo in a new session: read **[`plans-n-solutions/handsoff.md`](plans-n-solutions/handsoff.md)** end to end before you touch anything. That doc is the single source of truth for the current phase (fully-async decoupled agentic RL) and includes the launch sequence, credentials, observability, skills/agents to use, gotchas, and success gates.
+
+This file (`CLAUDE.md`) covers the **architectural invariants** that hold across phases. `handsoff.md` covers **what to do this phase**.
+
 ## Running the rollout server or training
 
-Use the canonical launchers — do not invent new invocations. The baseline topology needs **three processes on two machines**:
+Use the canonical launchers — do not invent new invocations. The topology is **three processes on two machines**:
 
 | Role | Machine | Launcher |
 |---|---|---|
 | ProRL FastAPI server | trainer box (host, poetry venv) | `bash scripts/_internal/s0_prorl.sh` |
 | Remote vLLM pool (4 children, ports 8100–8103) | EC2 `vllm-instance` (SSH alias) | `bash scripts/serving/launch_remote_vllm_pool.sh start` |
-| Decoupled GRPO trainer (Docker, 8 × A100 FSDP) | trainer box | `bash scripts/_internal/s1_remote_docker.sh` |
+| Decoupled GRPO trainer (Docker, 8 × A100 FSDP) | trainer box | `bash scripts/_internal/s2_weightsync_docker.sh` (Phase 1) |
 
-Baseline record: [`plans-n-solutions/stages/baseline.md`](plans-n-solutions/stages/baseline.md). Next milestone (LoRA weight sync): [`plans-n-solutions/stages/weight_sync_lora.md`](plans-n-solutions/stages/weight_sync_lora.md).
-
-**Frozen files** (baseline reproduction depends on them — make siblings, do not edit):
-- `scripts/_internal/s1_remote_docker.sh`
-- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh`
+**Frozen files** (reproduction depends on them — make siblings, do not edit):
+- `scripts/_internal/s1_remote_docker.sh` (baseline)
+- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_remote_decoupled.sh` (baseline)
+- `scripts/_internal/s2_weightsync_docker.sh` (Phase 1)
+- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` (Phase 1)
 
 `WANDB_API_KEY` and other secrets are pinned in `/home/ubuntu/.prorl_creds.env` and sourced by both the ProRL and pool launchers — do not re-export them inline.
 
@@ -61,7 +67,7 @@ Default sandbox is **Singularity/Apptainer**, not Docker — rootless single-fil
 
 ### RL trainer integration
 
-`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack:** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. See `plans-n-solutions/stages/baseline.md` for the decoupled-rollout baseline record.
+`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack:** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. Phase 1 (closed-loop rank-16 LoRA weight-sync) is DONE on branch `decoup-weight-sync`; Phase 2 (fully-async, bounded replay store, off-policy correction) is in flight on branch `full-async`. See `plans-n-solutions/handsoff.md` for the current phase spec, topology, and success gates.
 
 ## Conventions
 

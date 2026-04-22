@@ -263,6 +263,10 @@ containers/runtime/code
 # Singularity/Apptainer image cache and artifacts (large, machine-local)
 scripts/_singularity_cache/
 singularity_images/
+singularity_images
+
+# Large reference PDFs under docs/ are kept as local reading material, not committed.
+docs/*.pdf
 
 # Training outputs and experiment tracking
 outputs/
