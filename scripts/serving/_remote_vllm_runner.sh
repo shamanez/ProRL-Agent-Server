@@ -63,6 +63,6 @@ exec python "$CHILD" \
   --max-num-batched-tokens 16384 \
   --max-num-seqs 128 \
   --enable-lora \
-  --max-loras 2 \
+  --max-loras 8 \
   --max-lora-rank 32 \
-  --max-cpu-loras 4
+  --max-cpu-loras 16

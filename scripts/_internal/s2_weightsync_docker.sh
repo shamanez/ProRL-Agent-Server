@@ -27,7 +27,7 @@ REMOTE_DNS="${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}"
 # TOTAL_EPOCHS + TOTAL_TRAINING_STEPS in the environment.
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
-SAVE_FREQ="${SAVE_FREQ:-5}"
+SAVE_FREQ="${SAVE_FREQ:-1}"
 LOG_PATH="${LOG_PATH:-/tmp/s2-weightsync.log}"
 
 echo "[weightsync/docker] starting $(date -u +%FT%TZ)"
@@ -108,23 +108,21 @@ docker run --rm --name "$CNAME" \
 
     cd /workspace
 
-    # Fresh run — a resumed run would skip the initial steps we gate on and
-    # silently reuse old weights/optimizer state + pre-existing LoRA on the
-    # pool would desync from policy_version=0 on the trainer.
+    # Resume path — keep $STAGE1_OUT and rely on trainer.resume_mode=auto to
+    # pick up latest_checkpointed_iteration.txt. Pool must still hold the
+    # adapter at the same policy_version (ray_trainer.py syncs on load).
     STAGE1_OUT=/workspace/outputs/ProAgent/weight-sync-decup-prorl
-    echo "[weightsync/docker] clearing $STAGE1_OUT for a fresh run"
-    rm -rf "$STAGE1_OUT"
 
     echo "[weightsync/docker] scale: epochs=$TOTAL_EPOCHS steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ"
     bash trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh \
       trainer.total_epochs="$TOTAL_EPOCHS" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
       trainer.save_freq="$SAVE_FREQ" \
-      trainer.resume_mode=disable \
-      data.max_prompt_length=16384 \
-      data.max_response_length=2048 \
+      trainer.resume_mode=auto \
+      trainer.val_before_train=True \
+      trainer.test_freq=5 \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
-      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=16384 \
+      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
       actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=32768 \
       actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=32768 \
       +actor_rollout_ref.actor.calculate_entropy=false \

@@ -62,7 +62,10 @@ active_policy_version: int = 0
 _swap_lock: asyncio.Lock | None = None  # created inside event loop in main()
 _inflight: dict[int, int] = {}
 _inflight_cond: asyncio.Condition | None = None  # created inside event loop
-_DRAIN_TIMEOUT_S = 120.0  # upper bound on a single generate; prior-adapter drain
+_DRAIN_TIMEOUT_S = 15.0  # cap on drain wait before falling back to "leak old slot,
+# return 200 degraded" path. Must stay well below the trainer's 60s HTTP timeout
+# so a single straggler never aborts a run. Slot leaks are absorbed by
+# --max-loras=8 headroom in _remote_vllm_runner.sh.
 CHILD_PORT: int = 0
 ADAPTER_STAGING_ROOT = Path('/tmp/lora_adapters')
 
@@ -467,10 +470,15 @@ async def reload_lora(
                 )
 
     reload_wall_ms = int((time.monotonic() - t_start) * 1000)
-    # When either fault path fires, the swap leaves the pool in a degraded
-    # state (prior adapter still loaded / undefined in-flight behaviour).
-    # Return 5xx so the trainer aborts and operators can restart the pool.
-    ok = not (drain_timed_out or remove_lora_failed)
+    # drain_timed_out alone is benign: the swap already committed at line
+    # ~389 (active_lora = new_request) so new generates use the new adapter;
+    # the in-flight straggler finishes safely against its snapshot of the
+    # old LoRARequest; we only skipped remove_lora(old), which means the
+    # old lora_int_id slot leaks until pool restart. max-loras must be
+    # sized with headroom (see _remote_vllm_runner.sh). remove_lora_failed
+    # is different — that's a real engine error; keep returning 502 so the
+    # trainer aborts.
+    ok = not remove_lora_failed
     status_code = 200 if ok else 502
 
     logger.info(

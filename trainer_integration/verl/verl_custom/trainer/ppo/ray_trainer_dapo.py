@@ -300,15 +300,37 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                             dump_path=rollout_data_dir,
                         )
 
+                did_save = False
                 if self.config.trainer.save_freq > 0 and (
                     is_last_step
                     or self.global_steps % self.config.trainer.save_freq == 0
                 ):
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()
+                    did_save = True
                 elif self.timeout.check_save():
                     with _timer('save_checkpoint', timing_raw):
                         self._save_checkpoint()
+                    did_save = True
+
+                # Mirror RayPPOTrainer.fit publish hook: DAPO's filter_groups
+                # path swaps the trainer class, so this block must exist here
+                # too or the decoupled LoRA pool never sees a weight update.
+                if (
+                    did_save
+                    and self.config.actor_rollout_ref.rollout.get(
+                        'publish_on_save', False
+                    )
+                    and self.config.actor_rollout_ref.model.get('lora_rank', 0) > 0
+                ):
+                    import os  # noqa: PLC0415 — autoflake strips top-level if unused at parse time
+
+                    local_global_step_folder = os.path.join(
+                        self.config.trainer.default_local_dir,
+                        f'global_step_{self.global_steps}',
+                    )
+                    with _timer('publish_lora', timing_raw):
+                        self._publish_lora_adapter(local_global_step_folder)
 
                 # validate
                 if (
@@ -338,6 +360,17 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                 )
                 metrics.update(
                     compute_timing_metrics(batch=batch, timing_raw=timing_raw)
+                )
+
+                # LoRA weight-sync metrics: publish keys surface only on steps
+                # that actually published; staleness is every step (steps
+                # since the last successful publish — not policy_version,
+                # which is a cardinal not an ordinal).
+                if self._last_publish_metrics:
+                    metrics.update(self._last_publish_metrics)
+                    self._last_publish_metrics = {}
+                metrics['rollout/staleness_steps'] = max(
+                    0, self.global_steps - self._last_publish_step
                 )
 
                 # TODO: make a canonical logger that supports various backend

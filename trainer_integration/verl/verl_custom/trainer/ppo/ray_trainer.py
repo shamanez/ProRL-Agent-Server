@@ -1507,6 +1507,11 @@ class RayPPOTrainer:
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        if self.global_steps > 0:
+            # Pool keeps its PV across a trainer restart; align trainer to it so
+            # the first post-resume /reload_lora isn't rejected as non-monotonic.
+            self.policy_version = self.global_steps
+            self.async_rollout_manager.policy_version = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.

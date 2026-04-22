@@ -27,17 +27,24 @@ CKPT_PATH='/path/to/outputs'
 
 BATCH_SIZE=4
 MAX_NUM_ITERS=30
-NUM_TRAJ=16
+# DAPO-aligned: stable uses 4; we take 8 as a compromise — more signal per
+# prompt for GRPO group stats with filter_groups on, still halves rollout
+# cost vs the previous 16.
+NUM_TRAJ=8
 SAVE_FREQ=5
 # See sibling `_remote_decoupled.sh` for the full rationale on worker count.
 OPENHANDS_NUM_WORKERS=32
 
-USE_KL_LOSS=True
+# DAPO drops KL loss: RLVR rewards are verifiable, no reward-model drift to
+# anchor against. Coef/type kept as unused sentinels for readability.
+USE_KL_LOSS=False
 KL_LOSS_COEF=0.001
 KL_LOSS_TYPE=low_var_kl
 ENTROPY_COEFF=0
+# DAPO "clip-higher": asymmetric clip preserves low-probability token
+# exploration (papers/DAPO §3.2). Low bound stays at 0.2.
 CLIP_RATIO_LOW=0.2
-CLIP_RATIO_HIGH=0.2
+CLIP_RATIO_HIGH=0.28
 
 # GPU_MEM_UTIL is unused for trainer-side vLLM (external pool owns vLLM memory)
 # but kept to avoid Hydra removal noise.
@@ -55,7 +62,7 @@ python3 -m verl_custom.trainer.main_ppo \
     data.train_files=["$DATA_PATH/train.parquet"] \
     data.val_files=["$DATA_PATH/validation.parquet"] \
     data.train_batch_size=$BATCH_SIZE \
-    +data.gen_batch_size=$BATCH_SIZE \
+    +data.gen_batch_size=1 \
     data.max_prompt_length=31232 \
     data.max_response_length=1536 \
     data.truncation='error' \
@@ -133,7 +140,7 @@ python3 -m verl_custom.trainer.main_ppo \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-    +algorithm.filter_groups.enable=False \
+    +algorithm.filter_groups.enable=True \
     trainer.test_freq=-1 \
     +trainer.enable_pass_k_evaluation=True \
     +trainer.pass_k_problem_id_strategy=input_hash \
