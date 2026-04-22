@@ -1,5 +1,7 @@
 # Handoff — Phase 2: Fully-Async Decoupled Agentic RL
 
+**Core goal:** Retool the RL loop around **experience replay** (Arnal et al. 2026 — see `docs/README.md`). Rollouts stream continuously into a bounded replay buffer; the trainer samples from it on its own cadence with off-policy correction and a staleness budget. Phase 1 already decoupled the *machines* (trainer ≠ vLLM pool); Phase 2 decouples the *clocks*. Both GRPO (`filter_groups=False`) and DAPO (`filter_groups=True`) must keep working.
+
 > This is the **single source of truth** for the next milestone on this repo. Read it top to bottom before you do anything. Do not skip sections. Do not start coding until you have written a plan that references specific files and line numbers.
 
 ---
@@ -12,19 +14,20 @@ Take ProRLAgent Server from **Phase 1 (lock-step LoRA weight-sync, DONE on branc
 
 ## 1. Non-negotiable step-by-step process
 
-You are a **planning agent first**, an implementation agent second. Follow Phases A → F in order. Commit at stage boundaries only.
+You are a **planning agent first**, an implementation agent second. Follow Phases A → F in order. Commit at stage boundaries only. **Scope one session to one unit of work** — `A+C` (planning → stage doc), `B` (reproduction runs), one of D's cuts (implementation), `E` (verification), or `F` (handoff). Do not bundle units; commit at the unit boundary and hand off to a fresh session.
 
 ### Phase A — Orient (no file edits, no destructive commands)
 
 1. Read this doc end to end.
 2. Read `CLAUDE.md` at repo root.
 3. Read every file under `.claude/rules/` (they auto-load but re-read so you know what they say).
-4. Invoke the `repo-architecture` skill (`.claude/skills/repo-architecture/SKILL.md`) to map the fork layout.
-5. `git log --oneline -20` on `full-async`; skim the last 3 commit diffs back to `decoup-weight-sync`.
-6. Read the Phase 1 code sites in the Pointer Table (§11). Do not edit anything.
-7. Verify: the dataset at `/home/ubuntu/data/SkyRL-v0-293/` still has `train.parquet` and `validation.parquet`; `nvidia-smi` shows 8 idle A100s; `/home/ubuntu/.prorl_creds.env` exists.
+4. Read `docs/README.md` — distilled mapping of Arnal et al. "Efficient RL Training for LLMs with Experience Replay" onto this codebase. Names the three-way staleness/diversity/compute trade-off, the minimal `BufferStructure` diff, the `(W,T)` knobs, positive-bias sampling, and how `filter_groups` interacts with a replay buffer. This is the intellectual spec for Phase C — do not skip.
+5. Invoke the `repo-architecture` skill (`.claude/skills/repo-architecture/SKILL.md`) to map the fork layout.
+6. `git log --oneline -20` on `full-async`; skim the last 3 commit diffs back to `decoup-weight-sync`.
+7. Read the Phase 1 code sites in the Pointer Table (§11). Do not edit anything.
+8. Verify: the dataset at `/home/ubuntu/data/SkyRL-v0-293/` still has `train.parquet` and `validation.parquet`; `nvidia-smi` shows 8 idle A100s; `/home/ubuntu/.prorl_creds.env` exists.
 
-**Deliverable (reply to the user in chat, NOT a file):** a 10-bullet summary of current state + your initial hypothesis for the Phase 2 architecture. Ask any clarifying questions.
+**Deliverable (reply to the user in chat, NOT a file):** a 10-bullet summary of current state + your initial hypothesis for the Phase 2 architecture. Ask any clarifying questions. **Do not begin Phase C until the user has answered them** — a half-informed stage doc is worse than none.
 
 ### Phase B — Reproduce `decoup-weight-sync`
 
@@ -280,6 +283,8 @@ Spawn via the `Agent` tool with `subagent_type=<name>`. Independent queries → 
 | Rollout manager | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server.py` | `policy_version` stamping around line 1495, EXTERNAL BYPASS ACTIVE path around 408-425. |
 | Token-level client | `openhands/llm/nvidia/qwen3.py` | INVARIANT. Never modify. |
 | verl upstream (read-only ref) | `/tmp/verl/verl/workers/fsdp_workers.py:1210-1253`, `/tmp/verl/verl/utils/fsdp_utils.py:593` | PEFT save path (`layered_summon_lora_params`). |
+| Experience replay reference | `docs/README.md` | Distilled summary of "Efficient RL Training for LLMs with Experience Replay" (Arnal et al.) mapped onto this codebase — staleness/coupling/compute trade-off, `(W,T)` knobs, positive-bias sampling, minimal `BufferStructure` diff, interaction with Phase 1 `POST /reload_lora` and DAPO `filter_groups`. Read this before designing the Phase 2 trajectory store. |
+| Related upstream (external, read-only) | `NVIDIA-NeMo/ProRL-Agent-Server@polar` (GitHub) | Different stack (Slime + SGLang, co-located GPUs, **NCCL full-weight sync**) — **incompatible** with our decoupled EC2 topology; don't lift code. Borrow conceptually only: (a) commit `bbbfa6c` push-based rollout completion (FastAPI callback + per-task `asyncio.Event` + 60 s fallback poll) as a pattern for Cut 2 producer→buffer writeback; (b) Slime's `--use-tis` + `--use-rollout-logprobs` as upstream precedent for Cut 3 truncated-IS correction; (c) commit `f3e5dc0` "drop failed traces" as a concrete example of ingest-time filtering (option A in `docs/README.md` §8). Polar is primarily a framework-agnostic *harness* proxy — out of Phase 2 scope. |
 | Dataset | `/home/ubuntu/data/SkyRL-v0-293/{train,validation}.parquet` | 293 train / 23 val prompts. Do not re-download. |
 
 ---
@@ -303,6 +308,7 @@ Every gate needs a WandB panel or a log grep. No verbal "looks green".
 
 ## 13. What NOT to do
 
+- Don't touch `/tmp/verl` — pinned read-only upstream reference (shamanez/verl main, v0.8.0.dev; see §4, §11). Fork customizations live in `trainer_integration/verl/verl_custom/` as a patch package on top of the container's `verlai/verl:vllm018.dev1`; edits to `/tmp/verl` are invisible to the trainer.
 - Don't touch `openhands/llm/nvidia/qwen3.py` or `qwen2_5_vl.py`.
 - Don't edit the frozen files in §4. Siblings only.
 - Don't modify `dev_config/python/**`.
