@@ -166,7 +166,15 @@ class ContinuousRolloutProducer:
             raise exc
 
     def check_background_error(self) -> None:
-        """Re-raise any exception captured inside the worker thread."""
+        """Re-raise any exception captured inside the worker thread.
+
+        Single-consumer contract: call only from the trainer thread. The
+        read-then-clear pattern on ``self._exception`` is non-atomic; it's
+        safe here because the worker writes it exactly once (on crash, at
+        thread exit) and both this method and :meth:`stop` run on the
+        trainer thread. Don't call from a signal handler or from inside
+        a background timer.
+        """
         if self._exception is not None:
             exc = self._exception
             self._exception = None
@@ -228,7 +236,13 @@ class ContinuousRolloutProducer:
             return self._store.num_groups() >= self._store_max_size()
         except Exception:  # noqa: BLE001
             # If the store's introspection raises for any reason, err on the
-            # side of generating (not crashing the producer).
+            # side of generating (not crashing the producer). Log it so a
+            # real bug isn't masked by the FIFO-evict safety net.
+            logger.warning(
+                'store.num_groups() raised inside _store_full; continuing to '
+                'generate (FIFO eviction will bound memory)',
+                exc_info=True,
+            )
             return False
 
     def _store_max_size(self) -> int:
