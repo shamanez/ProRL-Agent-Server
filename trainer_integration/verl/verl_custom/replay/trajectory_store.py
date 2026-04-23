@@ -387,11 +387,19 @@ class TrajectoryStore:
         current_step: int,
         rng: random.Random | None = None,
     ) -> SampledMiniBatch:
-        """Sample ``n_groups`` distinct groups uniformly without replacement.
+        """Draw and REMOVE ``n_groups`` groups from the store.
 
-        Within a single call the chosen groups are distinct; across calls
-        the same group may reappear (paper Fig 18 — without-replacement
-        does not beat with-replacement).
+        Consume-on-sample (queue semantics): each group is produced once
+        and consumed once. Drawing removes the group from ``self._groups``
+        so subsequent calls cannot re-sample it. Rationale: when producer
+        throughput < trainer throughput the buffer can shrink to ~1
+        group; with-replacement sampling would then re-train on the same
+        batch K+1 times, which is overfitting, not replay. The paper's
+        with-replacement result (Fig 18) assumes an effective buffer size
+        large relative to the mini-batch — not our SWE-Gym regime.
+        ``staleness_cutoff_k`` stays as a safety drop for groups that
+        sit unused (e.g., producer pushed a group during a validation
+        pause that took > K steps to resume).
 
         Raises :class:`InsufficientTrajectoriesError` if the store holds
         fewer than ``n_groups`` non-stale groups. The caller is expected
@@ -411,7 +419,12 @@ class TrajectoryStore:
                     f'store has {len(self._groups)} groups, asked for {n_groups} '
                     f'(buffer may still be warming up)'
                 )
-            chosen = rng.sample(list(self._groups), n_groups)
+            chosen_idx = set(rng.sample(range(len(self._groups)), n_groups))
+            groups_list = list(self._groups)
+            chosen = [groups_list[i] for i in sorted(chosen_idx)]
+            remaining = [g for i, g in enumerate(groups_list) if i not in chosen_idx]
+            self._groups.clear()
+            self._groups.extend(remaining)
             records: list[TrajectoryRecord] = [r for group in chosen for r in group]
             self._last_sample_ages = [current_step - r.created_at_step for r in records]
         return self._pack(records, current_step)
@@ -549,6 +562,19 @@ class TrajectoryStore:
     def num_groups(self) -> int:
         with self._lock:
             return len(self._groups)
+
+    def num_fresh_groups(self, current_step: int) -> int:
+        """Count groups whose age is within ``staleness_cutoff_k``.
+
+        Used by the trainer as the waiter predicate so it does not
+        unblock on a group that ``sample_mini_batch`` is about to
+        evict as stale — the race that crashed run4 at step 11.
+        """
+        cutoff = self._staleness_cutoff_k
+        with self._lock:
+            return sum(
+                1 for g in self._groups if current_step - g[0].created_at_step <= cutoff
+            )
 
     def num_trajectories(self) -> int:
         with self._lock:

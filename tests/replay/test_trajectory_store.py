@@ -507,8 +507,16 @@ def test_concurrent_push_and_sample_no_race():
     def consumer():
         try:
             local_rng = random.Random(7)
-            for _ in range(50):
-                store.sample_mini_batch(n_groups=4, current_step=0, rng=local_rng)
+            # pop-on-sample: consumer can legitimately outrun producer and
+            # hit InsufficientTrajectoriesError. Retry — the point of the
+            # test is lock correctness, not starvation handling.
+            drawn = 0
+            while drawn < 50:
+                try:
+                    store.sample_mini_batch(n_groups=4, current_step=0, rng=local_rng)
+                    drawn += 1
+                except InsufficientTrajectoriesError:
+                    _time.sleep(0)
         except BaseException as exc:  # pragma: no cover
             errors.append(exc)
 

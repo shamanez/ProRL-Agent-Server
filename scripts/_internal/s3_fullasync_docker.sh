@@ -161,8 +161,8 @@ docker run --rm --name "$CNAME" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
       trainer.save_freq="$SAVE_FREQ" \
       trainer.resume_mode=auto \
-      trainer.val_before_train=True \
-      trainer.test_freq=5 \
+      trainer.val_before_train=False \
+      trainer.test_freq=-1 \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
       actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
       actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=32768 \
@@ -173,12 +173,12 @@ docker run --rm --name "$CNAME" \
       data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
       trainer.default_local_dir="$STAGE2_OUT" \
       ++actor_rollout_ref.rollout.custom.rollout_save_dir=/workspace/outputs/rollout_data_fullasync \
-      +replay.enable="$REPLAY_ENABLE" \
-      +replay.buffer_size="$BUFFER_SIZE" \
-      +replay.staleness_cutoff_k="$STALENESS_CUTOFF_K" \
-      +replay.producer_batch_size="$PRODUCER_BATCH_SIZE" \
-      +replay.use_temporal_is="$USE_TEMPORAL_IS" \
-      +replay.continuous_producer="$CONTINUOUS_PRODUCER" \
+      replay.enable="$REPLAY_ENABLE" \
+      replay.buffer_size="$BUFFER_SIZE" \
+      replay.staleness_cutoff_k="$STALENESS_CUTOFF_K" \
+      replay.producer_batch_size="$PRODUCER_BATCH_SIZE" \
+      replay.use_temporal_is="$USE_TEMPORAL_IS" \
+      replay.continuous_producer="$CONTINUOUS_PRODUCER" \
       +algorithm.filter_groups.enable="$FILTER_GROUPS" \
       "$@"
   ' 2>&1 | tee "$LOG_PATH"

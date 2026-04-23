@@ -1718,21 +1718,34 @@ class RayPPOTrainer:
         """
         if self._producer is not None:
             # Continuous-producer path.
+            from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
+                wait_until,
+            )
+
             self._producer.check_background_error()
             n = int(self.config.actor_rollout_ref.rollout.n)
             n_groups = max(1, int(self.config.data.train_batch_size) // max(1, n))
-            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 300.0))
+            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 1800.0))
             with _timer('gen', timing_raw):
+                # Wait on the *non-stale* group count, not the raw
+                # count. Raw num_groups includes groups that
+                # sample_mini_batch is about to drop as stale — if we
+                # unblock on one of those and the producer hasn't
+                # refreshed, sample_mini_batch raises
+                # InsufficientTrajectoriesError. This is the race that
+                # killed run4 at step 11.
                 filled = wait_until(
-                    lambda: self.trajectory_store.num_groups() >= n_groups,
+                    lambda: self.trajectory_store.num_fresh_groups(self.global_steps)
+                    >= n_groups,
                     timeout=wait_timeout_s,
                 )
             if not filled:
                 self._producer.check_background_error()
                 raise RuntimeError(
-                    f'Replay store did not reach {n_groups} groups within '
+                    f'Replay store did not reach {n_groups} fresh groups within '
                     f'{wait_timeout_s:.1f}s (current='
-                    f'{self.trajectory_store.num_groups()}). '
+                    f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
+                    f'fresh / {self.trajectory_store.num_groups()} total). '
                     'Check producer logs / pool endpoints_failed.'
                 )
             sampled = self.trajectory_store.sample_mini_batch(
@@ -2102,11 +2115,21 @@ class RayPPOTrainer:
                             or self.timeout.last_saved
                         )
                     ):
-                        with _timer('testing', timing_raw):
-                            val_metrics: dict = self._validate()
-                            if is_last_step:
-                                last_val_metrics = val_metrics
-                        metrics.update(val_metrics)
+                        # Producer + validation share one OpenHands session;
+                        # validation's /stop at teardown kills the producer's
+                        # in-flight /process. Pause producer around _validate
+                        # and resume afterwards. Buffer stays warm across the
+                        # pause; K-staleness evicts naturally at next sample.
+                        self._stop_continuous_producer_if_needed()
+                        try:
+                            with _timer('testing', timing_raw):
+                                val_metrics: dict = self._validate()
+                                if is_last_step:
+                                    last_val_metrics = val_metrics
+                            metrics.update(val_metrics)
+                        finally:
+                            if not is_last_step:
+                                self._start_continuous_producer_if_needed()
 
                 # training metrics
                 metrics.update(
