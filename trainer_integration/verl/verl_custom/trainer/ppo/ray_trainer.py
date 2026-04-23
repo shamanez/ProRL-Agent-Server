@@ -1568,6 +1568,239 @@ class RayPPOTrainer:
         metrics.update(self.trajectory_store.metrics(self.global_steps))
         return new_batch
 
+    # ---- Cut 4: continuous-rollout producer --------------------------------
+
+    def _continuous_producer_mode(self) -> bool:
+        replay_cfg = self.config.get('replay', None)
+        if not replay_cfg or not replay_cfg.get('enable', False):
+            return False
+        return bool(replay_cfg.get('continuous_producer', False))
+
+    def _build_grpo_producer_generate_fn(self):
+        """Closure that turns a dataloader batch_dict into a full merged DataProto.
+
+        Mirrors the classic in-line path (pop prompt cols → generate →
+        stamp ``uid`` → repeat by ``n`` → ``union`` responses). Runs in
+        the producer thread; returns the same shape the store expects.
+        """
+        from verl_custom.trainer.ppo.ray_trainer import (
+            AdvantageEstimator,  # noqa: PLC0415
+        )
+
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+            # REMAX needs the baseline-gen pass on the same ``gen_batch``;
+            # it cannot be reconstructed from the store. Fail fast.
+            raise RuntimeError(
+                'replay.continuous_producer=True is incompatible with '
+                'algorithm.adv_estimator=REMAX (requires inline gen_batch).'
+            )
+
+        rollout_manager = self.async_rollout_manager
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        task_type = rollout_cfg.get('task_type', None)
+        n = int(rollout_cfg.n)
+
+        def _generate(batch_dict: dict) -> DataProto:
+            full_batch: DataProto = DataProto.from_single_dict(batch_dict)
+            batch_keys_to_pop = ['input_ids', 'attention_mask', 'position_ids']
+            if task_type == 'swegym':
+                non_tensor_batch_keys_to_pop = ['instance']
+            else:
+                non_tensor_batch_keys_to_pop = ['raw_prompt_ids']
+            if 'multi_modal_data' in full_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append('multi_modal_data')
+            if 'raw_prompt' in full_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append('raw_prompt')
+            if 'tools_kwargs' in full_batch.non_tensor_batch:
+                non_tensor_batch_keys_to_pop.append('tools_kwargs')
+            gen_batch = full_batch.pop(
+                batch_keys=batch_keys_to_pop,
+                non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+            )
+            gen_batch_output = rollout_manager.generate_sequences(gen_batch)
+            # Producer-local timings are not propagated into the trainer's
+            # per-step ``timing_raw``; drop to avoid leaking the field.
+            gen_batch_output.meta_info.pop('timing', None)
+            full_batch.non_tensor_batch['uid'] = np.array(
+                [str(uuid.uuid4()) for _ in range(len(full_batch.batch))],
+                dtype=object,
+            )
+            full_batch = full_batch.repeat(repeat_times=n, interleave=True)
+            full_batch = full_batch.union(gen_batch_output)
+            return full_batch
+
+        return _generate
+
+    def _start_continuous_producer_if_needed(self) -> None:
+        """Wake the pool and spin up the rollout-producer daemon thread.
+
+        No-op unless ``config.replay.enable`` and
+        ``config.replay.continuous_producer`` are both True. Requires
+        ``actor_rollout_ref.rollout.mode == 'async'`` — the producer
+        relies on ``async_rollout_manager.generate_sequences``.
+
+        Subclasses override :meth:`_make_continuous_producer` to swap
+        the ``generate_fn`` (DAPO uses ``generate_sequences_dapo``).
+        """
+        self._producer = None
+        self._step_counter = None
+        if not self._continuous_producer_mode():
+            return
+
+        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
+            StepCounter,
+        )
+
+        if not self.async_rollout_mode:
+            raise RuntimeError(
+                'replay.continuous_producer=True requires '
+                'actor_rollout_ref.rollout.mode=async'
+            )
+        assert self.trajectory_store is not None  # enable=True → store built
+
+        self._step_counter = StepCounter(initial=self.global_steps)
+        self._producer = self._make_continuous_producer()
+        self._producer.start()
+
+    def _make_continuous_producer(self):
+        """Build a ``ContinuousRolloutProducer`` for plain GRPO.
+
+        Uses ``generate_sequences`` over a private dataloader iterator.
+        Override in subclasses (e.g., ``RayPPOTrainerDAPO``) to wire a
+        different ``generate_fn`` / ``prompts_iter_factory``.
+        """
+        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
+            ContinuousRolloutProducer,
+        )
+
+        def _factory():
+            # Infinite iterator: re-iterate the dataloader every epoch.
+            # The trainer's main loop still iterates its own dataloader
+            # view (ignoring batch_dict), but DataLoader creates isolated
+            # worker state per ``iter()`` call so the two iterators do
+            # not share cursors.
+            while True:
+                for batch_dict in self.train_dataloader:
+                    yield batch_dict
+
+        replay_cfg = self.config.replay
+        return ContinuousRolloutProducer(
+            rollout_manager=self.async_rollout_manager,
+            generate_fn=self._build_grpo_producer_generate_fn(),
+            store=self.trajectory_store,
+            step_counter=self._step_counter,
+            prompts_iter_factory=_factory,
+            poll_interval_s=float(replay_cfg.get('poll_interval_s', 0.05)),
+        )
+
+    def _stop_continuous_producer_if_needed(self) -> None:
+        producer = getattr(self, '_producer', None)
+        if producer is None:
+            return
+        try:
+            producer.stop(timeout=float(self.config.replay.get('stop_timeout_s', 10.0)))
+        finally:
+            self._producer = None
+
+    def _acquire_training_batch(
+        self, batch_dict: dict, metrics: dict, timing_raw: dict
+    ) -> DataProto:
+        """Return a fully-merged training batch for the current step.
+
+        In continuous-producer mode, waits for the store to hold
+        ``train_batch_size // n`` non-stale groups, then samples. The
+        producer owns ``wake_up``/``sleep`` and inline ``generate_sequences``
+        so the trainer never blocks on rollout tails. ``batch_dict`` is
+        intentionally ignored — the producer iterates its own dataloader.
+
+        In classic mode, performs the existing pop → generate → stamp
+        uid → repeat → union → push+sample pipeline.
+        """
+        if self._producer is not None:
+            # Continuous-producer path.
+            self._producer.check_background_error()
+            n = int(self.config.actor_rollout_ref.rollout.n)
+            n_groups = max(1, int(self.config.data.train_batch_size) // max(1, n))
+            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 300.0))
+            with _timer('gen', timing_raw):
+                filled = wait_until(
+                    lambda: self.trajectory_store.num_groups() >= n_groups,
+                    timeout=wait_timeout_s,
+                )
+            if not filled:
+                self._producer.check_background_error()
+                raise RuntimeError(
+                    f'Replay store did not reach {n_groups} groups within '
+                    f'{wait_timeout_s:.1f}s (current='
+                    f'{self.trajectory_store.num_groups()}). '
+                    'Check producer logs / pool endpoints_failed.'
+                )
+            sampled = self.trajectory_store.sample_mini_batch(
+                n_groups=n_groups, current_step=self.global_steps
+            )
+            metrics.update(self.trajectory_store.metrics(self.global_steps))
+            return DataProto.from_dict(
+                tensors=sampled.tensors,
+                non_tensors=sampled.non_tensors,
+                meta_info=sampled.meta_info,
+            )
+
+        # Classic path (original fit() gen block).
+        batch: DataProto = DataProto.from_single_dict(batch_dict)
+        batch_keys_to_pop = ['input_ids', 'attention_mask', 'position_ids']
+        if self.config.actor_rollout_ref.rollout.get('task_type', None) == 'swegym':
+            non_tensor_batch_keys_to_pop = ['instance']
+        else:
+            non_tensor_batch_keys_to_pop = ['raw_prompt_ids']
+        if 'multi_modal_data' in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append('multi_modal_data')
+        if 'raw_prompt' in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append('raw_prompt')
+        if 'tools_kwargs' in batch.non_tensor_batch:
+            non_tensor_batch_keys_to_pop.append('tools_kwargs')
+        gen_batch = batch.pop(
+            batch_keys=batch_keys_to_pop,
+            non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
+        )
+
+        with _timer('gen', timing_raw):
+            if not self.async_rollout_mode:
+                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
+            else:
+                self.async_rollout_manager.wake_up()
+                gen_batch_output = self.async_rollout_manager.generate_sequences(
+                    gen_batch
+                )
+                self.async_rollout_manager.sleep()
+            timing_raw.update(gen_batch_output.meta_info['timing'])
+            gen_batch_output.meta_info.pop('timing', None)
+
+        if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
+            with _timer('gen_max', timing_raw):
+                gen_baseline_batch = deepcopy(gen_batch)
+                gen_baseline_batch.meta_info['do_sample'] = False
+                gen_baseline_output = self.actor_rollout_wg.generate_sequences(
+                    gen_baseline_batch
+                )
+                batch = batch.union(gen_baseline_output)
+                reward_baseline_tensor = self.reward_fn(batch)
+                reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
+                batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
+                batch.batch['reward_baselines'] = reward_baseline_tensor
+                del gen_baseline_batch, gen_baseline_output
+
+        batch.non_tensor_batch['uid'] = np.array(
+            [str(uuid.uuid4()) for _ in range(len(batch.batch))],
+            dtype=object,
+        )
+        batch = batch.repeat(
+            repeat_times=self.config.actor_rollout_ref.rollout.n,
+            interleave=True,
+        )
+        batch = batch.union(gen_batch_output)
+        batch = self._push_and_sample_replay(batch, metrics)
+        return batch
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1617,93 +1850,35 @@ class RayPPOTrainer:
 
         # we start from step 1
         self.global_steps += 1
-        last_val_metrics = None
 
+        # Cut 4: spin up the continuous rollout producer when
+        # ``replay.continuous_producer=True``. No-op otherwise. Wrapped in
+        # try/finally so an exception inside the training loop still stops
+        # the daemon thread and releases the pool (``sleep()``).
+        self._start_continuous_producer_if_needed()
+        try:
+            self._run_fit_loop(logger, progress_bar)
+        finally:
+            self._stop_continuous_producer_if_needed()
+
+    def _run_fit_loop(self, logger, progress_bar):
+        last_val_metrics = None
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
-                batch: DataProto = DataProto.from_single_dict(batch_dict)
-
-                # pop those keys for generation
-                batch_keys_to_pop = ['input_ids', 'attention_mask', 'position_ids']
-                if (
-                    self.config.actor_rollout_ref.rollout.get('task_type', None)
-                    == 'swegym'
-                ):
-                    non_tensor_batch_keys_to_pop = ['instance']
-                else:
-                    non_tensor_batch_keys_to_pop = ['raw_prompt_ids']
-                if 'multi_modal_data' in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append('multi_modal_data')
-                if 'raw_prompt' in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append('raw_prompt')
-                if 'tools_kwargs' in batch.non_tensor_batch:
-                    non_tensor_batch_keys_to_pop.append('tools_kwargs')
-                gen_batch = batch.pop(
-                    batch_keys=batch_keys_to_pop,
-                    non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
-                )
 
                 is_last_step = self.global_steps >= self.total_training_steps
 
                 with _timer('step', timing_raw):
-                    # generate a batch
-                    with _timer('gen', timing_raw):
-                        if not self.async_rollout_mode:
-                            gen_batch_output = self.actor_rollout_wg.generate_sequences(
-                                gen_batch
-                            )
-                        else:
-                            self.async_rollout_manager.wake_up()
-                            gen_batch_output = (
-                                self.async_rollout_manager.generate_sequences(gen_batch)
-                            )
-                            self.async_rollout_manager.sleep()
-                        timing_raw.update(gen_batch_output.meta_info['timing'])
-                        gen_batch_output.meta_info.pop('timing', None)
-
-                    if self.config.algorithm.adv_estimator == AdvantageEstimator.REMAX:
-                        with _timer('gen_max', timing_raw):
-                            gen_baseline_batch = deepcopy(gen_batch)
-                            gen_baseline_batch.meta_info['do_sample'] = False
-                            gen_baseline_output = (
-                                self.actor_rollout_wg.generate_sequences(
-                                    gen_baseline_batch
-                                )
-                            )
-
-                            batch = batch.union(gen_baseline_output)
-                            reward_baseline_tensor = self.reward_fn(batch)
-                            reward_baseline_tensor = reward_baseline_tensor.sum(dim=-1)
-
-                            batch.pop(batch_keys=list(gen_baseline_output.batch.keys()))
-
-                            batch.batch['reward_baselines'] = reward_baseline_tensor
-
-                            del gen_baseline_batch, gen_baseline_output
-
-                    batch.non_tensor_batch['uid'] = np.array(
-                        [str(uuid.uuid4()) for _ in range(len(batch.batch))],
-                        dtype=object,
+                    # Cut 4: gen + push + sample is encapsulated here. In
+                    # classic mode this runs inline ``generate_sequences``
+                    # and push-then-samples the store. In continuous-
+                    # producer mode the daemon thread is already filling
+                    # the store and this call just waits + samples.
+                    batch = self._acquire_training_batch(
+                        batch_dict, metrics, timing_raw
                     )
-                    # repeat to align with repeated responses in rollout
-                    batch = batch.repeat(
-                        repeat_times=self.config.actor_rollout_ref.rollout.n,
-                        interleave=True,
-                    )
-                    batch = batch.union(gen_batch_output)
-
-                    # Phase 2 replay seam. When the store is configured, push
-                    # every freshly-generated group into the buffer tagged with
-                    # the current behavior policy version and sample a mini-
-                    # batch back out. In Cut 2 lockstep (buffer_size >= groups
-                    # this step, staleness_cutoff_k >= 1) the sampled set is
-                    # the just-pushed set so downstream semantics are parity-
-                    # preserving. The trainer always recomputes reward /
-                    # old_log_prob / advantage on the sampled batch so this
-                    # seam also works for Cut 4 continuous-producer mode.
-                    batch = self._push_and_sample_replay(batch, metrics)
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
@@ -1973,6 +2148,12 @@ class RayPPOTrainer:
 
                 progress_bar.update(1)
                 self.global_steps += 1
+                # Cut 4: keep the producer's step-tag current so records
+                # pushed from now on carry the new ``created_at_step``.
+                if self._step_counter is not None:
+                    self._step_counter.set(self.global_steps)
+                if self._producer is not None:
+                    self._producer.check_background_error()
                 if is_last_step:
                     pprint(f'Final validation metrics: {last_val_metrics}')
                     progress_bar.close()

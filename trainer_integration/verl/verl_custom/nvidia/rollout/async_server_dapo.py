@@ -77,6 +77,30 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
     def generate_sequences_dapo(self) -> DataProto:
         import time
 
+        # Cut 4 / gotcha #16: under the continuous-producer, this method is
+        # invoked in a loop from a daemon thread. The instance attributes
+        # ``all_input_batch`` and ``last_data_index`` are stateful across
+        # calls in the classic path (unfinished filter_groups rows carry
+        # over into the next call via ``push_remaining_train_data_to_job_queue``).
+        # Under producer mode the buffer absorbs the filtered batch, so
+        # carrying leftover state would cause ``DataProto.concat`` (line
+        # ~225) to fuse prior-call rows into the new call and corrupt the
+        # assert at line ~512 (instance-id conservation). Reset here, and
+        # assert the invariant.
+        replay_cfg = getattr(self.full_config, 'replay', None)
+        producer_mode = bool(
+            replay_cfg is not None
+            and replay_cfg.get('enable', False)
+            and replay_cfg.get('continuous_producer', False)
+        )
+        if producer_mode:
+            self.all_input_batch = None
+            self.last_data_index = 0
+            assert self.job_queue.empty(), (
+                'DAPO producer-mode invariant: job_queue must be drained '
+                'between generate_sequences_dapo calls'
+            )
+
         # Start total timing for performance analysis
         total_start_time = time.time()
         request_start_time = time.time()

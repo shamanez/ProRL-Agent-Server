@@ -264,6 +264,7 @@ Spawn via the `Agent` tool with `subagent_type=<name>`. Independent queries → 
 10. **No `--no-verify`.** No `git push` without explicit approval. No force push. No modifying `dev_config/python/**`. No widening `pyproject.toml` pins without reading the pin comment (some are CVE-related, some are bug-workarounds).
 11. **Untracked artifacts that look like your in-progress work:** `outputs/` (root-owned, `sudo rm -rf`), `wandb/`, `/tmp/s*-*.log`, `singularity_images` (symlink — leave alone). All gitignored.
 12. **`save_freq=1`** means publish every step. Fine during debugging. For a real run, set it so that `publish_latency_s × publishes_per_epoch < step_time × save_freq`.
+13. **DAPO `filter_groups=True` E2E runs take 2–3× the wall-clock of plain GRPO** because `generate_sequences_dapo` waits for `train_batch_size` **surviving** groups, not `train_batch_size` prompts, and SWE-Gym drops ~50 % of groups to sign-shared rewards. **Always run `filter_groups=False` (plain GRPO) as the primary smoke gate first**; only promote to `filter_groups=True` after the plain run is green. Reverse order burns multi-hour debugging on bugs the fast path surfaces in minutes. See `plans-n-solutions/stages/full_async.md §5a` for the test ordering rule. Applies to every Phase 2 E2E run (new branch, resumed branch, post-config-change verification).
 
 ---
 

@@ -326,6 +326,25 @@ Every gate has a WandB panel or a log grep — no verbal "looks green".
 
 ---
 
+## 5a. Testing order — DAPO `filter_groups` wall-clock warning
+
+**Rule: always run the `filter_groups=False` (plain GRPO) gate FIRST.** Use it as the smoke / primary E2E test. Only after it lands clean do you run the `filter_groups=True` (DAPO) gate.
+
+Why:
+
+- DAPO's `generate_sequences_dapo` dispatcher (`async_server_dapo.py:147-523`) **waits until `train_batch_size` groups survive filtering**, not until `train_batch_size` prompts return. On SWE-Gym, ~50 % of groups get dropped because their `n`-sized sibling rewards share a sign (all-solved or all-failed), so the call has to keep pulling fresh prompts and running more rollouts. Per-step wall-clock is ~2× the plain path and highly variable — a DAPO smoke run can easily take 2–3 hours for what looks like "50 steps".
+- Under Phase 2 producer mode the producer thread is the one paying that wait, not the trainer — but the producer has to actually push `buffer_size` surviving groups before the trainer gets past warm-up, so the first-fill latency still hurts. `replay/store_fill_ratio` will sit near zero for an extended period.
+- Plain GRPO has none of this: every group is pushed, the store warms in minutes, and most Phase 2 invariants (temporal IS, clock separation, staleness) are already exercised. The DAPO run only adds coverage of the Option A ingest filter + bug #16 path.
+
+Concrete order for every Phase 2 E2E run (including resumes after config changes, before merging a branch, and after any producer-path edit):
+
+1. **E1 — plain GRPO smoke** (`s3_fullasync_docker.sh` with `+algorithm.filter_groups.enable=False`). 50 steps. ~30–60 min expected. Blocks all other gates.
+2. **E2 — DAPO gate** (`...enable=True`). Only after E1 is clean. Expect 2–3× wall-clock. Run unattended with `run_in_background` / `nohup`, monitor WandB.
+
+If E1 fails, **never** promote to E2 — diagnose on the fast path first. Reverse order has historically burnt multi-hour investigations on infra bugs that E1 surfaces in minutes.
+
+---
+
 ## 6. Failure modes
 
 Named ahead-of-time so Phase E verification knows what to look for.

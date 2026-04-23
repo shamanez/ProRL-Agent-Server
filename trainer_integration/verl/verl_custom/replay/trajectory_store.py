@@ -332,19 +332,26 @@ class TrajectoryStore:
                 rec = replace(rec, error='error_mask_set')
             groups.setdefault(uid, []).append(rec)
 
-        # NOTE (Cut 4 prerequisite): `push_group` takes and releases
-        # `self._lock` once per group. Cut 2 is single-threaded — trainer
-        # calls push and sample sequentially on the same thread — so a
-        # partial read is impossible. Under Cut 4 the
-        # ``ContinuousRolloutProducer`` pushes from a daemon thread while
-        # the trainer samples from the main thread; a sampling call could
-        # then observe a half-pushed DataProto batch (e.g., 3 of 8 groups).
-        # Before Cut 4 lands: replace this per-group loop with a single
-        # locked append (or a ``push_groups_atomic`` helper) so the entire
-        # DataProto becomes visible atomically.
-        for group_records in groups.values():
-            self.push_group(group_records)
-        return len(groups)
+        # Atomicity: Cut 4 runs the producer in a daemon thread while the
+        # trainer samples from the main thread. If we called ``push_group``
+        # once per uid here, a concurrent ``sample_mini_batch`` could
+        # observe a half-pushed DataProto batch (e.g., 3 of 8 groups).
+        # Acquire the lock once and append all groups as a unit.
+        group_list = [
+            records for records in groups.values() if records
+        ]  # drop empties defensively
+        for records in group_list:
+            group_uid = records[0].group_uid
+            for r in records[1:]:
+                if r.group_uid != group_uid:
+                    raise ValueError(
+                        f'all records in a group must share group_uid; '
+                        f"got '{group_uid}' and '{r.group_uid}'"
+                    )
+        with self._lock:
+            for records in group_list:
+                self._groups.append(list(records))
+        return len(group_list)
 
     # ---- eviction -----------------------------------------------------------
 
