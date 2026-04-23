@@ -636,3 +636,195 @@ def test_prompt_length_cap_truncates_keeps_tail():
     attn = mb.tensors['attention_mask'][0, :prompt_len]
     unpad = prompt[attn == 1].tolist()
     assert unpad == [4, 5]
+
+
+# --- push_from_dataproto round-trip (host-runnable via SimpleNamespace) ------
+
+
+def _stub_dataproto(
+    *,
+    input_ids: torch.Tensor,
+    responses: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    loss_mask: torch.Tensor | None = None,
+    rollout_log_probs: torch.Tensor | None = None,
+    is_padded: torch.Tensor | None = None,
+    error_mask: torch.Tensor | None = None,
+    uids: list[str] | None = None,
+    **extra_non_tensors,
+):
+    """Build a ``DataProto``-shaped stub with only the attrs the store reads.
+
+    ``push_from_dataproto`` accesses ``dp.batch`` (dict[str, Tensor]) and
+    ``dp.non_tensor_batch`` (dict[str, np.ndarray]), so a bare namespace
+    is enough.
+    """
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    batch_size = input_ids.shape[0]
+    response_len = responses.shape[1]
+    prompt_len = input_ids.shape[1] - response_len
+
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids)
+    if loss_mask is None:
+        loss_mask = torch.ones((batch_size, response_len), dtype=torch.long)
+    if rollout_log_probs is None:
+        rollout_log_probs = torch.full((batch_size, response_len), -0.1)
+    if is_padded is None:
+        is_padded = torch.zeros(batch_size, dtype=torch.bool)
+    if error_mask is None:
+        error_mask = torch.zeros(batch_size, dtype=torch.bool)
+    if uids is None:
+        uids = [f'u-{i}' for i in range(batch_size)]
+
+    tensors = {
+        'input_ids': input_ids,
+        'responses': responses,
+        'attention_mask': attention_mask,
+        'loss_mask': loss_mask,
+        'rollout_log_probs': rollout_log_probs,
+        'is_padded': is_padded,
+        'error_mask': error_mask,
+    }
+    non_tensors = {'uid': np.array(uids, dtype=object)}
+    for k, v in extra_non_tensors.items():
+        non_tensors[k] = np.array(v, dtype=object)
+    # prompt_len is derived from input_ids.shape[1] - responses.shape[1],
+    # so this assertion keeps the fixture honest.
+    assert prompt_len >= 0
+    return SimpleNamespace(batch=tensors, non_tensor_batch=non_tensors)
+
+
+class TestPushFromDataProtoRoundTrip:
+    """Host-runnable parity for ``TrajectoryStore.push_from_dataproto``."""
+
+    def _store(self, **kw) -> TrajectoryStore:
+        return TrajectoryStore(
+            max_size=kw.pop('max_size', 8),
+            staleness_cutoff_k=kw.pop('staleness_cutoff_k', 10),
+            pad_token_id=PAD_ID,
+            **kw,
+        )
+
+    def test_prompt_extras_roundtrip_dict_string_none(self) -> None:
+        """Reward-model dict, ability string, None-valued extra all survive."""
+        store = self._store()
+        # 2 prompts, 2 siblings each.
+        batch = 4
+        prompt_len, response_len = 3, 2
+        input_ids = torch.zeros((batch, prompt_len + response_len), dtype=torch.long)
+        responses = torch.zeros((batch, response_len), dtype=torch.long)
+        uids = ['p0', 'p0', 'p1', 'p1']
+        rewards_model = [{'style': 'rule', 'ground_truth': 'x'}] * batch
+        abilities = ['math', 'math', 'code', 'code']
+        extras_none = [None, None, None, None]
+        dp = _stub_dataproto(
+            input_ids=input_ids,
+            responses=responses,
+            uids=uids,
+            reward_model=rewards_model,
+            ability=abilities,
+            extra_info=extras_none,
+        )
+        pushed = store.push_from_dataproto(
+            dp, behavior_policy_version=5, current_step=0
+        )
+        assert pushed == 2  # two distinct uids → two groups
+        mb = store.sample_mini_batch(n_groups=2, current_step=0, rng=random.Random(0))
+        # Extras round-trip to the sampled non_tensors.
+        for key in ('reward_model', 'ability', 'extra_info'):
+            assert key in mb.non_tensors, f'{key} missing from sampled non_tensors'
+        assert set(mb.non_tensors['ability'].tolist()) == {'math', 'code'}
+        # Reward model is a dict — copies, not aliases.
+        for rm in mb.non_tensors['reward_model']:
+            assert isinstance(rm, dict)
+            assert rm == {'style': 'rule', 'ground_truth': 'x'}
+
+    def test_reward_model_dict_is_copied_not_aliased(self) -> None:
+        """Mutating the caller's dict must NOT mutate the stored record."""
+        import numpy as np
+
+        store = self._store()
+        shared_rm = {'style': 'rule', 'ground_truth': 'original'}
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((2, 5), dtype=torch.long),
+            responses=torch.zeros((2, 2), dtype=torch.long),
+            uids=['p0', 'p0'],
+            reward_model=np.array([shared_rm, shared_rm], dtype=object),
+        )
+        store.push_from_dataproto(dp, behavior_policy_version=0, current_step=0)
+        shared_rm['ground_truth'] = 'mutated_after_push'
+        mb = store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
+        for rm in mb.non_tensors['reward_model']:
+            assert rm['ground_truth'] == 'original', (
+                'caller mutation leaked into stored record'
+            )
+
+    def test_error_mask_sets_error_field(self) -> None:
+        """When error_mask=1 but non_tensor 'error' is absent, record.error='error_mask_set'."""
+        store = self._store()
+        em = torch.zeros(2, dtype=torch.bool)
+        em[1] = True
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((2, 5), dtype=torch.long),
+            responses=torch.zeros((2, 2), dtype=torch.long),
+            uids=['p0', 'p0'],
+            error_mask=em,
+        )
+        store.push_from_dataproto(dp, behavior_policy_version=0, current_step=0)
+        groups = store._snapshot_groups()
+        assert len(groups) == 1
+        errs = [r.error for r in groups[0]]
+        assert errs[0] is None
+        assert errs[1] == 'error_mask_set'
+
+    def test_singleton_group_uid_kept_whole(self) -> None:
+        """A uid that appears only once still forms a valid singleton group."""
+        store = self._store()
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((3, 5), dtype=torch.long),
+            responses=torch.zeros((3, 2), dtype=torch.long),
+            uids=['solo', 'pair', 'pair'],
+        )
+        pushed = store.push_from_dataproto(
+            dp, behavior_policy_version=0, current_step=0
+        )
+        assert pushed == 2
+        groups = store._snapshot_groups()
+        # Grouped by uid — one singleton, one pair.
+        sizes = sorted(len(g) for g in groups)
+        assert sizes == [1, 2]
+
+    def test_missing_optional_non_tensors_default_gracefully(self) -> None:
+        """Absent ``success``/``error``/``resolved``/``finish``/``instance`` → safe defaults."""
+        store = self._store()
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((2, 5), dtype=torch.long),
+            responses=torch.zeros((2, 2), dtype=torch.long),
+            uids=['p0', 'p0'],
+        )
+        store.push_from_dataproto(dp, behavior_policy_version=0, current_step=0)
+        groups = store._snapshot_groups()
+        rec = groups[0][0]
+        assert rec.success is True
+        assert rec.error is None
+        assert rec.resolved is False
+        assert rec.finish is True
+        assert rec.instance == {}
+
+    def test_raises_on_missing_uid(self) -> None:
+        """uid is required — push should raise KeyError pointing at the seam."""
+        store = self._store()
+        # Stub a DataProto with no uid.
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((1, 3), dtype=torch.long),
+            responses=torch.zeros((1, 1), dtype=torch.long),
+            uids=['keep'],  # present
+        )
+        # Drop uid from the stub to trigger the KeyError branch.
+        del dp.non_tensor_batch['uid']
+        with pytest.raises(KeyError, match='uid'):
+            store.push_from_dataproto(dp, behavior_policy_version=0, current_step=0)

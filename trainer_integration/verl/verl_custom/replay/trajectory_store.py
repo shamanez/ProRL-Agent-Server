@@ -29,7 +29,7 @@ import random
 import threading
 from collections import deque
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -292,7 +292,12 @@ class TrajectoryStore:
 
             prompt_extras: dict[str, Any] = {}
             for k in extra_keys:
-                prompt_extras[k] = non_tensors[k][i]
+                v = non_tensors[k][i]
+                # Shallow-copy dict values (e.g., ``reward_model``) so the
+                # store does not alias mutable state with the caller; the
+                # DataProto's dict entries may be reused elsewhere and
+                # mutation after push would silently corrupt stored records.
+                prompt_extras[k] = dict(v) if isinstance(v, dict) else v
 
             rec = TrajectoryRecord(
                 prompt_ids=tuple(int(x) for x in prompt_tokens),
@@ -324,27 +329,19 @@ class TrajectoryStore:
             # Gate error_mask so the record's `error` surfaces transport
             # failures; don't double-stamp if the non_tensor already flagged it.
             if not rec.error and bool(error_mask[i].item()):
-                rec = TrajectoryRecord(
-                    prompt_ids=rec.prompt_ids,
-                    response_ids=rec.response_ids,
-                    response_loss_mask=rec.response_loss_mask,
-                    response_log_probs=rec.response_log_probs,
-                    reward=rec.reward,
-                    advantage=rec.advantage,
-                    behavior_policy_version=rec.behavior_policy_version,
-                    created_at_step=rec.created_at_step,
-                    prompt_uid=rec.prompt_uid,
-                    group_uid=rec.group_uid,
-                    resolved=rec.resolved,
-                    success=rec.success,
-                    finish=rec.finish,
-                    is_padded=rec.is_padded,
-                    error='error_mask_set',
-                    instance=rec.instance,
-                    prompt_extras=rec.prompt_extras,
-                )
+                rec = replace(rec, error='error_mask_set')
             groups.setdefault(uid, []).append(rec)
 
+        # NOTE (Cut 4 prerequisite): `push_group` takes and releases
+        # `self._lock` once per group. Cut 2 is single-threaded — trainer
+        # calls push and sample sequentially on the same thread — so a
+        # partial read is impossible. Under Cut 4 the
+        # ``ContinuousRolloutProducer`` pushes from a daemon thread while
+        # the trainer samples from the main thread; a sampling call could
+        # then observe a half-pushed DataProto batch (e.g., 3 of 8 groups).
+        # Before Cut 4 lands: replace this per-group loop with a single
+        # locked append (or a ``push_groups_atomic`` helper) so the entire
+        # DataProto becomes visible atomically.
         for group_records in groups.values():
             self.push_group(group_records)
         return len(groups)
