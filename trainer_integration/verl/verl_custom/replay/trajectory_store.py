@@ -65,6 +65,13 @@ class TrajectoryRecord:
     is_padded: bool
     error: str | None
     instance: dict[str, Any]
+    # Per-row non-tensor fields that reward managers and downstream logic
+    # depend on (``data_source``, ``ability``, ``reward_model``, ``extra_info``,
+    # ``index``, ...). Captured at push time and re-emitted at sample time so
+    # the sampled DataProto is semantically equivalent to the pushed one.
+    # Stored as a plain dict — frozenness is for field reassignment, not
+    # transitive immutability. Do not mutate after construction.
+    prompt_extras: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if len(self.response_ids) != len(self.response_loss_mask):
@@ -165,6 +172,182 @@ class TrajectoryStore:
                 )
         with self._lock:
             self._groups.append(group)
+
+    def push_from_dataproto(
+        self,
+        dp: Any,
+        *,
+        behavior_policy_version: int,
+        current_step: int,
+    ) -> int:
+        """Unpack a verl :class:`DataProto`, bin rows by ``uid``, push each bin.
+
+        The DataProto is expected to match the shape emitted by the
+        async-rollout pipeline at the seam where the trainer first has a
+        batch of completed rollouts: tensor keys ``input_ids``, ``responses``,
+        ``attention_mask``, ``loss_mask``, ``rollout_log_probs``,
+        ``is_padded``, ``error_mask`` and non-tensor keys ``uid``,
+        ``success``, ``error``, ``resolved``, ``finish``, ``instance``.
+
+        Under Option A the producer pushes every group whole (all ``n``
+        siblings of a prompt arrive together), so grouping by ``uid``
+        recovers the GRPO/DAPO advantage groups intact. Rows whose ``uid``
+        appears only once still form a singleton group; the advantage
+        computation will treat them as a degenerate group with mean=0 std=1.
+
+        Returns the number of groups appended.
+        """
+        tensors = dp.batch
+        non_tensors = dp.non_tensor_batch
+        if 'uid' not in non_tensors:
+            raise KeyError(
+                "push_from_dataproto: DataProto is missing the 'uid' "
+                'non-tensor; ray_trainer.py stamps it at line 1603 before '
+                'union — is the seam placed before that?'
+            )
+        batch_size = int(tensors['responses'].shape[0])
+        prompt_len = int(tensors['input_ids'].shape[1] - tensors['responses'].shape[1])
+
+        input_ids = tensors['input_ids'].cpu()
+        responses = tensors['responses'].cpu()
+        attention_mask = tensors['attention_mask'].cpu()
+        loss_mask = tensors['loss_mask'].cpu()
+        rollout_log_probs = tensors['rollout_log_probs'].cpu()
+        is_padded = tensors['is_padded'].cpu()
+        error_mask = tensors['error_mask'].cpu()
+
+        # Optional reward / advantage — populated when the push happens
+        # downstream of compute_reward / compute_advantage. For the Cut 2
+        # lockstep seam (push right after union) these keys don't exist yet
+        # and the record carries the 0.0 defaults; the trainer recomputes
+        # them on the sampled batch.
+        if 'token_level_rewards' in tensors:
+            per_row_reward = tensors['token_level_rewards'].cpu().sum(dim=-1).tolist()
+        elif 'reward' in tensors and tensors['reward'].ndim == 1:
+            per_row_reward = tensors['reward'].cpu().tolist()
+        else:
+            per_row_reward = [0.0] * batch_size
+        if 'advantages' in tensors:
+            # advantages is broadcast over response_mask → recover scalar as
+            # the max magnitude across the response (all positions share the
+            # same scalar up to masking).
+            adv_tensor = tensors['advantages'].cpu()
+            if adv_tensor.ndim == 2:
+                abs_t = adv_tensor.abs()
+                idx = abs_t.argmax(dim=-1, keepdim=True)
+                per_row_advantage = adv_tensor.gather(-1, idx).squeeze(-1).tolist()
+            else:
+                per_row_advantage = adv_tensor.tolist()
+        else:
+            per_row_advantage = [0.0] * batch_size
+
+        def _bool_scalar(arr: Any, i: int) -> bool:
+            v = arr[i]
+            if hasattr(v, 'item'):
+                return bool(v.item())
+            return bool(v)
+
+        def _opt_str(arr: Any, i: int) -> str | None:
+            v = arr[i] if arr is not None else None
+            if v is None:
+                return None
+            s = str(v)
+            return s if s else None
+
+        uids = non_tensors['uid']
+        success_arr = non_tensors.get('success')
+        error_arr = non_tensors.get('error')
+        resolved_arr = non_tensors.get('resolved')
+        finish_arr = non_tensors.get('finish')
+        instance_arr = non_tensors.get('instance')
+
+        # Any non_tensor key the record doesn't already have a typed slot for
+        # is preserved verbatim in `prompt_extras`. Reward managers depend on
+        # ``data_source``, ``ability``, ``reward_model``, ``extra_info``,
+        # ``index`` and similar fields that originate from the prompt-side of
+        # the dataloader. Capturing them here keeps the Cut-2 lockstep seam
+        # bit-identical for the downstream reward / advantage path.
+        known_non_tensors = {
+            'uid',
+            'success',
+            'error',
+            'resolved',
+            'finish',
+            'instance',
+        }
+        extra_keys = [k for k in non_tensors if k not in known_non_tensors]
+
+        groups: dict[str, list[TrajectoryRecord]] = {}
+        for i in range(batch_size):
+            uid = str(uids[i])
+            full_attn_row = attention_mask[i]
+            prompt_attn = full_attn_row[:prompt_len]
+            response_attn = full_attn_row[prompt_len:]
+
+            prompt_tokens = input_ids[i, :prompt_len][prompt_attn.bool()].tolist()
+            response_valid_len = int(response_attn.sum().item())
+            response_tokens = responses[i, :response_valid_len].tolist()
+            response_lp = rollout_log_probs[i, :response_valid_len].tolist()
+            response_lm = loss_mask[i, :response_valid_len].tolist()
+
+            prompt_extras: dict[str, Any] = {}
+            for k in extra_keys:
+                prompt_extras[k] = non_tensors[k][i]
+
+            rec = TrajectoryRecord(
+                prompt_ids=tuple(int(x) for x in prompt_tokens),
+                response_ids=tuple(int(x) for x in response_tokens),
+                response_loss_mask=tuple(int(x) for x in response_lm),
+                response_log_probs=tuple(float(x) for x in response_lp),
+                reward=float(per_row_reward[i]),
+                advantage=float(per_row_advantage[i]),
+                behavior_policy_version=behavior_policy_version,
+                created_at_step=current_step,
+                prompt_uid=uid,
+                group_uid=uid,
+                resolved=_bool_scalar(resolved_arr, i)
+                if resolved_arr is not None
+                else False,
+                success=_bool_scalar(success_arr, i)
+                if success_arr is not None
+                else True,
+                finish=_bool_scalar(finish_arr, i) if finish_arr is not None else True,
+                is_padded=bool(is_padded[i].item()),
+                error=_opt_str(error_arr, i) if error_arr is not None else None,
+                instance=(
+                    dict(instance_arr[i])
+                    if instance_arr is not None and isinstance(instance_arr[i], dict)
+                    else {}
+                ),
+                prompt_extras=prompt_extras,
+            )
+            # Gate error_mask so the record's `error` surfaces transport
+            # failures; don't double-stamp if the non_tensor already flagged it.
+            if not rec.error and bool(error_mask[i].item()):
+                rec = TrajectoryRecord(
+                    prompt_ids=rec.prompt_ids,
+                    response_ids=rec.response_ids,
+                    response_loss_mask=rec.response_loss_mask,
+                    response_log_probs=rec.response_log_probs,
+                    reward=rec.reward,
+                    advantage=rec.advantage,
+                    behavior_policy_version=rec.behavior_policy_version,
+                    created_at_step=rec.created_at_step,
+                    prompt_uid=rec.prompt_uid,
+                    group_uid=rec.group_uid,
+                    resolved=rec.resolved,
+                    success=rec.success,
+                    finish=rec.finish,
+                    is_padded=rec.is_padded,
+                    error='error_mask_set',
+                    instance=rec.instance,
+                    prompt_extras=rec.prompt_extras,
+                )
+            groups.setdefault(uid, []).append(rec)
+
+        for group_records in groups.values():
+            self.push_group(group_records)
+        return len(groups)
 
     # ---- eviction -----------------------------------------------------------
 
@@ -277,6 +460,13 @@ class TrajectoryStore:
         behavior_versions: list[int] = []
         created_steps: list[int] = []
         sample_ages: list[int] = []
+        # Rebuild per-column lists for every extra non-tensor key that
+        # appeared on any record. Keys that are missing on some records are
+        # filled with None so dim-0 stays uniform.
+        extra_keys: set[str] = set()
+        for rec in records:
+            extra_keys.update(rec.prompt_extras.keys())
+        extras_by_key: dict[str, list[Any]] = {k: [] for k in extra_keys}
 
         for i, rec in enumerate(records):
             # Right-truncate prompts and responses to their caps. Prompts
@@ -312,6 +502,8 @@ class TrajectoryStore:
             behavior_versions.append(rec.behavior_policy_version)
             created_steps.append(rec.created_at_step)
             sample_ages.append(current_step - rec.created_at_step)
+            for k in extra_keys:
+                extras_by_key[k].append(rec.prompt_extras.get(k, None))
 
         input_ids = torch.cat([prompt_ids, responses], dim=1)
         attention_mask = torch.cat([prompt_attn, response_attn], dim=1)
@@ -337,6 +529,8 @@ class TrajectoryStore:
             'finish': np.array(finishes, dtype=object),
             'instance': np.array(instances, dtype=object),
         }
+        for k, values in extras_by_key.items():
+            non_tensors[k] = np.array(values, dtype=object)
         meta_info = {
             'behavior_policy_versions': behavior_versions,
             'created_at_steps': created_steps,

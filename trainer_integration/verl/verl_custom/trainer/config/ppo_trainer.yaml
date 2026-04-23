@@ -908,3 +908,33 @@ ray_init:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+# Phase 2 fully-async replay buffer. See plans-n-solutions/stages/full_async.md.
+# With enable=False the trainer path is identical to Phase 1 (lock-step).
+replay:
+
+  # Master gate: when False the trajectory store is not instantiated and
+  # the training loop is unchanged from Phase 1.
+  enable: False
+
+  # Max number of groups (one "group" = actor_rollout_ref.rollout.n siblings)
+  # retained in the buffer. Default 32 ≈ 4 × (train_batch_size // n) for a
+  # typical train_batch_size=32, n=4 config (four mini-batches of headroom).
+  buffer_size: 32
+
+  # Hard staleness cutoff K measured in trainer steps. Groups older than K
+  # are evicted at the top of every sample call. K=1 → lockstep parity with
+  # Phase 1 (buffer holds only the current step's groups).
+  staleness_cutoff_k: 1
+
+  # Producer batch size in groups (for Cut 4 continuous producer; unused in
+  # lockstep). Default matches train_batch_size // n.
+  producer_batch_size: 8
+
+  # Gate for the temporal importance-sampling correction in Cut 3.
+  # When False, Phase 1 per-step TIS semantics are preserved.
+  use_temporal_is: False
+
+  # Gate for the Cut 4 continuous producer thread. When False, the trainer
+  # runs push+sample inline in fit() (lockstep passthrough, Cut 2 mode).
+  continuous_producer: False

@@ -72,6 +72,14 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             self.async_rollout_manager.sleep()
         # load checkpoint before doing anything
         self._load_checkpoint()
+        if self.global_steps > 0:
+            # Phase 1 bug fix #18: DAPO path was missing the resume-time
+            # policy_version sync. The vLLM pool retains its active PV across
+            # a trainer restart; without this align, the first post-resume
+            # ``/reload_lora`` is rejected as non-monotonic and weight-sync
+            # stalls silently. Mirrors ``ray_trainer.py`` fit-time block.
+            self.policy_version = self.global_steps
+            self.async_rollout_manager.policy_version = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.
@@ -114,6 +122,14 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
 
                     timing_raw.update(batch.meta_info['timing'])
                     batch.meta_info.pop('timing', None)
+
+                # Phase 2 replay seam (Option A — DAPO's filter_groups has
+                # already thinned the batch to "surviving" sibling groups).
+                # Push-then-sample before reward/KL/advantage so Cut 2
+                # lockstep mode leaves downstream semantics untouched, and
+                # Cut 4 continuous-producer mode sees behavior-version-tagged
+                # rollouts flow through the same seam.
+                batch = self._push_and_sample_replay(batch, metrics)
 
                 with _timer('reward', timing_raw):
                     # compute scores. Support both model and function-based.

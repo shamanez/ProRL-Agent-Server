@@ -60,6 +60,10 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 from verl_custom.nvidia.reward_manager.length_penalty import LengthPenalty
 from verl_custom.nvidia.utils.timer import TimeoutChecker
+from verl_custom.replay.trajectory_store import (
+    InsufficientTrajectoriesError,
+    TrajectoryStore,
+)
 from verl_custom.trainer.ppo import core_algos
 from verl_custom.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl_custom.trainer.ppo.metric_utils import (
@@ -394,6 +398,29 @@ class RayPPOTrainer:
         self.policy_version = 0
         self._last_publish_step = 0
         self._last_publish_metrics: dict = {}
+
+        # Phase 2 replay buffer. None when `config.replay.enable=False`, so
+        # Cut 2 is a strict no-op for existing Phase 1 runs. When enabled,
+        # the store holds full GRPO groups keyed by `uid` and re-emits a
+        # sampled mini-batch at the push+sample seam in `fit()`. See
+        # `plans-n-solutions/stages/full_async.md`.
+        replay_cfg = config.get('replay', None)
+        if replay_cfg is not None and replay_cfg.get('enable', False):
+            pad_token_id = (
+                tokenizer.pad_token_id
+                if tokenizer.pad_token_id is not None
+                else tokenizer.eos_token_id
+            )
+            self.trajectory_store: TrajectoryStore | None = TrajectoryStore(
+                max_size=int(replay_cfg.buffer_size),
+                staleness_cutoff_k=int(replay_cfg.staleness_cutoff_k),
+                pad_token_id=int(pad_token_id),
+                prompt_length_cap=int(config.data.get('max_prompt_length', 0)) or None,
+                response_length_cap=int(config.data.get('max_response_length', 0))
+                or None,
+            )
+        else:
+            self.trajectory_store = None
 
         # define in-reward KL control
         # kl loss control currently not suppoorted
@@ -1485,6 +1512,62 @@ class RayPPOTrainer:
         )
         metrics.update(global_balance_stats)
 
+    def _push_and_sample_replay(self, batch: DataProto, metrics: dict) -> DataProto:
+        """Push the freshly-generated batch through the replay store and sample.
+
+        This is a no-op when ``config.replay.enable`` is False (store is
+        None). When enabled:
+
+        1. Every group (``n`` sibling rollouts per prompt, identified by
+           ``uid``) is pushed into the bounded FIFO store tagged with the
+           current behavior ``policy_version`` and ``global_steps``.
+        2. We immediately sample ``n_groups`` groups back out; with
+           ``buffer_size`` >= ``n_groups`` and
+           ``staleness_cutoff_k`` >= 1 this is the Cut-2 lockstep pass-
+           through mode.
+        3. The sampled :class:`SampledMiniBatch` is wrapped in a fresh
+           :class:`DataProto`. Downstream stages recompute
+           ``response_mask`` / reward / ``old_log_prob`` / advantage on
+           the sampled batch, which keeps this seam compatible with Cut-4
+           continuous-producer mode where ``rollout_log_probs`` is the
+           stored behavior value and ``old_log_prob`` is the current-
+           policy value — making the existing TIS ratio at
+           ``core_algos.py:586-590`` temporal by construction.
+
+        If the store is warming up and has fewer than ``n_groups`` non-
+        stale groups, we fall back to the just-pushed ``batch`` unchanged
+        so the trainer never stalls. In Cut 2 lockstep the store always
+        holds at least the groups we pushed this step.
+        """
+        if self.trajectory_store is None:
+            return batch
+
+        self.trajectory_store.push_from_dataproto(
+            batch,
+            behavior_policy_version=self.policy_version,
+            current_step=self.global_steps,
+        )
+
+        n = int(self.config.actor_rollout_ref.rollout.n)
+        n_groups = max(1, len(batch.batch) // n)
+
+        try:
+            sampled = self.trajectory_store.sample_mini_batch(
+                n_groups=n_groups,
+                current_step=self.global_steps,
+            )
+        except InsufficientTrajectoriesError:
+            metrics.update(self.trajectory_store.metrics(self.global_steps))
+            return batch
+
+        new_batch = DataProto.from_dict(
+            tensors=sampled.tensors,
+            non_tensors=sampled.non_tensors,
+            meta_info=sampled.meta_info,
+        )
+        metrics.update(self.trajectory_store.metrics(self.global_steps))
+        return new_batch
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1610,6 +1693,17 @@ class RayPPOTrainer:
                         interleave=True,
                     )
                     batch = batch.union(gen_batch_output)
+
+                    # Phase 2 replay seam. When the store is configured, push
+                    # every freshly-generated group into the buffer tagged with
+                    # the current behavior policy version and sample a mini-
+                    # batch back out. In Cut 2 lockstep (buffer_size >= groups
+                    # this step, staleness_cutoff_k >= 1) the sampled set is
+                    # the just-pushed set so downstream semantics are parity-
+                    # preserving. The trainer always recomputes reward /
+                    # old_log_prob / advantage on the sampled batch so this
+                    # seam also works for Cut 4 continuous-producer mode.
+                    batch = self._push_and_sample_replay(batch, metrics)
 
                     batch.batch['response_mask'] = compute_response_mask(batch)
                     # Balance the number of valid tokens across DP ranks.
