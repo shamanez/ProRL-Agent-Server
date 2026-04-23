@@ -34,14 +34,13 @@ MAX_NUM_ITERS=30
 # (meaningful with filter_groups on) against rollout cost.
 NUM_TRAJ=8
 SAVE_FREQ=5
-# 64 OpenHands workers: matches PRODUCER_BATCH_SIZE=8 × n=8 so one
-# producer call dispatches 64 concurrent trajectories. Under DAPO
-# filter_groups=True this yields ~8 groups per call, ~4 surviving the
-# ~50 % sign-shared filter on SWE-Gym — exactly train_batch_size=4,
-# so the first generate_sequences_dapo return unblocks the trainer.
-# Host has ~1 TB RAM; 64 Singularity containers at ~3 GB ≈ 200 GB.
-# ProRL FastAPI already sized to --max-run-workers 64.
-OPENHANDS_NUM_WORKERS=64
+# 32 OpenHands workers is the sweet spot for a 4-child vLLM pool on
+# 4× H100. Empirically the pool saturates to ~100 % GPU util at ~32
+# concurrent clients; bumping to 64 made every client-turn slower
+# (queue depth on a pool-bound workload, not a host-bound one) and
+# regressed first-step wall-clock from 17 min → 47 min (filter=True,
+# Progress 3/4 → 0/4). See gotcha §17 in handsoff.md.
+OPENHANDS_NUM_WORKERS=32
 
 # DAPO drops KL loss: RLVR rewards are verifiable, no reward-model drift to
 # anchor against. Coef/type kept as unused sentinels for readability.

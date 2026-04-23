@@ -927,8 +927,11 @@ replay:
   # Phase 1 (buffer holds only the current step's groups).
   staleness_cutoff_k: 1
 
-  # Producer batch size in groups (for Cut 4 continuous producer; unused in
-  # lockstep). Default matches train_batch_size // n.
+  # Dead config — kept for back-compat with launcher env knobs. The actual
+  # prompts-per-producer-call comes from data.train_batch_size (plain GRPO)
+  # or DAPO's internal dataloader (filter_groups=True). See gotcha §17 in
+  # handsoff.md — wiring this key into continuous_producer.py would require
+  # a separate producer-side dataloader, which Phase 2 does not add.
   producer_batch_size: 8
 
   # Gate for the temporal importance-sampling correction in Cut 3.
