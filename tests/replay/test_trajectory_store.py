@@ -55,6 +55,7 @@ def _record(
     loss_mask: tuple[int, ...] | None = None,
     log_probs: tuple[float, ...] | None = None,
     reward: float = 0.0,
+    advantage: float = 0.0,
     behavior_policy_version: int = 0,
     created_at_step: int = 0,
     prompt_uid: str | None = None,
@@ -81,6 +82,7 @@ def _record(
         response_loss_mask=loss_mask,
         response_log_probs=log_probs,
         reward=reward,
+        advantage=advantage,
         behavior_policy_version=behavior_policy_version,
         created_at_step=created_at_step,
         prompt_uid=prompt_uid,
@@ -132,6 +134,7 @@ def _golden_group(created_at_step: int = 0) -> list[TrajectoryRecord]:
             response_loss_mask=spec['loss_mask'],
             response_log_probs=spec['log_probs'],
             reward=0.0,
+            advantage=0.0,
             behavior_policy_version=1,
             created_at_step=created_at_step,
             prompt_uid=spec['prompt_uid'],
@@ -170,6 +173,7 @@ def test_record_rejects_length_mismatch_response_vs_loss_mask():
             response_loss_mask=(1,),  # wrong length
             response_log_probs=(0.0, 0.0),
             reward=0.0,
+            advantage=0.0,
             behavior_policy_version=0,
             created_at_step=0,
             prompt_uid='x',
@@ -191,6 +195,7 @@ def test_record_rejects_length_mismatch_response_vs_log_probs():
             response_loss_mask=(1, 1),
             response_log_probs=(0.0,),  # wrong length
             reward=0.0,
+            advantage=0.0,
             behavior_policy_version=0,
             created_at_step=0,
             prompt_uid='x',
@@ -327,30 +332,23 @@ def test_sample_emits_consistent_tensor_shapes():
     assert mb.meta_info['behavior_policy_versions'] == [1, 1, 1]
 
 
-def test_two_sampled_batches_can_concat_by_dim1_equality():
-    """The contract that motivates raw-tuple storage: two independent
-    sample_mini_batch calls produce tensors with the **same** dim-1 as long
-    as the underlying records fit within the same caps. The verl
-    ``DataProto.concat`` gate (``torch.cat(..., dim=0)``) only works when
-    dim-1 matches; we mimic it here with torch.cat directly so the test
-    doesn't need verl."""
-    # Cap both batches to the same fixed width; this is how the live
-    # trainer will operate (using config.data.max_prompt_length /
-    # actor_rollout_ref.rollout.response_length).
-    store_a = TrajectoryStore(
+def test_two_sampled_batches_can_torch_cat_dim0():
+    """Two independent sample_mini_batch calls on stores configured with
+    the same caps produce tensors with **identical** dim-1, so
+    ``torch.cat(..., dim=0)`` — the primitive under ``DataProto.concat``
+    at ``/tmp/verl/verl/protocol.py:930`` — succeeds even though the two
+    populations carry different raw token lengths. This is the design
+    contract that motivates storing raw unpadded tuples and padding to a
+    fixed cap at sample time."""
+    kwargs = dict(
         max_size=4,
         staleness_cutoff_k=1000,
         pad_token_id=PAD_ID,
         prompt_length_cap=8,
         response_length_cap=8,
     )
-    store_b = TrajectoryStore(
-        max_size=4,
-        staleness_cutoff_k=1000,
-        pad_token_id=PAD_ID,
-        prompt_length_cap=8,
-        response_length_cap=8,
-    )
+    store_a = TrajectoryStore(**kwargs)
+    store_b = TrajectoryStore(**kwargs)
     store_a.push_group(
         [
             _record(
@@ -373,18 +371,59 @@ def test_two_sampled_batches_can_concat_by_dim1_equality():
             )
         ]
     )
-    mb_a = store_a.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
-    mb_b = store_b.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
-    # Both pad to their own local max (which is <= cap). Use pad-to-cap
-    # semantics so the two can cat: pad to cap explicitly in the store
-    # when caps are set? Currently we only cap, we don't pad up. Verify
-    # that the dim-1 can be reconciled by padding to the cap at concat
-    # time (callers do this with explicit torch.nn.functional.pad).
-    # For this test we just sanity-check that the caps bound the shape.
-    assert mb_a.tensors['responses'].shape[1] <= 8
-    assert mb_b.tensors['responses'].shape[1] <= 8
-    assert mb_a.tensors['input_ids'].shape[1] <= 8 + 8
-    assert mb_b.tensors['input_ids'].shape[1] <= 8 + 8
+    mb_a = store_a.sample_mini_batch(n_groups=1, current_step=0)
+    mb_b = store_b.sample_mini_batch(n_groups=1, current_step=0)
+
+    for key in (
+        'input_ids',
+        'responses',
+        'attention_mask',
+        'position_ids',
+        'loss_mask',
+        'rollout_log_probs',
+    ):
+        assert mb_a.tensors[key].shape[1] == mb_b.tensors[key].shape[1], (
+            f'{key} dim-1 must match across samples: '
+            f'{mb_a.tensors[key].shape} vs {mb_b.tensors[key].shape}'
+        )
+        concatted = torch.cat([mb_a.tensors[key], mb_b.tensors[key]], dim=0)
+        assert concatted.shape[0] == 2
+
+
+def test_num_trajectories_counts_records_across_groups():
+    store = TrajectoryStore(max_size=4, staleness_cutoff_k=100, pad_token_id=PAD_ID)
+    store.push_group(
+        [
+            _record(seed=0, group_uid='g', prompt_uid='p0'),
+            _record(seed=1, group_uid='g', prompt_uid='p1'),
+            _record(seed=2, group_uid='g', prompt_uid='p2'),
+        ]
+    )
+    store.push_group([_record(seed=3, group_uid='h', prompt_uid='p3')])
+    assert store.num_groups() == 2
+    assert store.num_trajectories() == 4
+
+
+def test_sample_emits_reward_and_advantage_tensors():
+    """Store ≠ opaque blob — reward/advantage must come out as tensors
+    so downstream loss code can consume them directly."""
+    store = TrajectoryStore(max_size=4, staleness_cutoff_k=100, pad_token_id=PAD_ID)
+    store.push_group(
+        [
+            _record(seed=0, group_uid='g', reward=0.75, advantage=-0.25),
+            _record(seed=1, group_uid='g', reward=-0.5, advantage=0.5),
+        ]
+    )
+    mb = store.sample_mini_batch(n_groups=1, current_step=0)
+    assert mb.tensors['reward'].dtype == torch.float
+    assert mb.tensors['advantage'].dtype == torch.float
+    assert mb.tensors['reward'].shape == (2,)
+    assert mb.tensors['advantage'].shape == (2,)
+    # Exact values round-trip.
+    rewards = sorted(mb.tensors['reward'].tolist())
+    advantages = sorted(mb.tensors['advantage'].tolist())
+    assert rewards == pytest.approx([-0.5, 0.75])
+    assert advantages == pytest.approx([-0.25, 0.5])
 
 
 # --- golden round-trip (CLAUDE.md token-in/token-out INVARIANT) -------------

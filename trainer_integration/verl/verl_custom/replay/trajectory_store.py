@@ -54,6 +54,7 @@ class TrajectoryRecord:
     response_loss_mask: tuple[int, ...]
     response_log_probs: tuple[float, ...]
     reward: float
+    advantage: float
     behavior_policy_version: int
     created_at_step: int
     prompt_uid: str
@@ -211,7 +212,11 @@ class TrajectoryStore:
         """
         if n_groups <= 0:
             raise ValueError(f'n_groups must be > 0, got {n_groups}')
-        rng = rng or random
+        # Fall back to a fresh Random() instance rather than the module-level
+        # singleton — concurrent .sample() on the shared singleton from two
+        # threads is not guaranteed thread-safe in CPython and has been
+        # reported to corrupt Mersenne Twister state under contention.
+        rng = rng or random.Random()
         with self._lock:
             self._evict_stale_locked(current_step)
             if len(self._groups) < n_groups:
@@ -230,12 +235,19 @@ class TrajectoryStore:
         current_step: int,
     ) -> SampledMiniBatch:
         batch = len(records)
-        max_prompt = max(len(r.prompt_ids) for r in records)
-        max_response = max(len(r.response_ids) for r in records)
+        # When a cap is configured, pad to the cap (not the per-sample max)
+        # so dim-1 is stable across every sample_mini_batch call. This is
+        # what lets the caller DataProto.concat samples taken at different
+        # trainer steps. When the cap is None, fall back to a local max so
+        # tests and small configurations don't pay for unnecessary padding.
         if self._prompt_cap is not None:
-            max_prompt = min(max_prompt, self._prompt_cap)
+            max_prompt = self._prompt_cap
+        else:
+            max_prompt = max(len(r.prompt_ids) for r in records)
         if self._response_cap is not None:
-            max_response = min(max_response, self._response_cap)
+            max_response = self._response_cap
+        else:
+            max_response = max(len(r.response_ids) for r in records)
         # Guard against all-empty prompts / responses producing a zero-width
         # tensor (which would blow up downstream attention). Min 1.
         max_prompt = max(max_prompt, 1)
@@ -253,6 +265,8 @@ class TrajectoryStore:
         rollout_log_probs = torch.zeros((batch, max_response), dtype=torch.float)
         is_padded = torch.zeros(batch, dtype=torch.bool)
         error_mask = torch.zeros(batch, dtype=torch.bool)
+        rewards = torch.zeros(batch, dtype=torch.float)
+        advantages_scalar = torch.zeros(batch, dtype=torch.float)
 
         uids: list[str] = []
         successes: list[bool] = []
@@ -287,6 +301,8 @@ class TrajectoryStore:
 
             is_padded[i] = bool(rec.is_padded)
             error_mask[i] = bool(rec.error)
+            rewards[i] = float(rec.reward)
+            advantages_scalar[i] = float(rec.advantage)
             uids.append(rec.prompt_uid)
             successes.append(rec.success)
             errors.append(rec.error)
@@ -310,6 +326,8 @@ class TrajectoryStore:
             'rollout_log_probs': rollout_log_probs,
             'is_padded': is_padded,
             'error_mask': error_mask,
+            'reward': rewards,
+            'advantage': advantages_scalar,
         }
         non_tensors = {
             'uid': np.array(uids, dtype=object),
