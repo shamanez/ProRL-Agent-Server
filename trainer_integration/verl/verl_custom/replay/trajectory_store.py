@@ -1,0 +1,380 @@
+# Copyright 2025 NVIDIA CORPORATION & AFFILIATES
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""In-process trajectory replay store for Phase 2 fully-async agentic RL.
+
+The store holds variable-length trajectories as raw token tuples and re-pads
+them to a sample-local max at ``sample_mini_batch`` time. Padding is deferred
+because individual producer batches have different ``max_len_prompt`` and
+``max_len_response`` (padding is batch-local in
+``_convert_results_to_dataproto_token``); ``DataProto.concat`` requires
+matching dim-1, so pre-padded entries from different producer batches cannot
+be concatenated.
+
+See ``plans-n-solutions/stages/full_async.md`` §3 for the record shape and
+§4 cut 1 for the scope of this module. The downstream caller (Cut 2) wraps
+the :class:`SampledMiniBatch` output in a :class:`verl.DataProto`.
+"""
+
+from __future__ import annotations
+
+import random
+import threading
+from collections import deque
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
+import torch
+
+
+class InsufficientTrajectoriesError(RuntimeError):
+    """Raised when ``sample_mini_batch`` is called with fewer stored groups."""
+
+
+@dataclass(slots=True, frozen=True)
+class TrajectoryRecord:
+    """One agentic trajectory, tagged with the version that produced it.
+
+    All token sequences are stored unpadded. The store re-pads at sample
+    time to a sample-local maximum so that ``DataProto.concat`` sees
+    dim-1-matching tensors across producer batches.
+    """
+
+    prompt_ids: tuple[int, ...]
+    response_ids: tuple[int, ...]
+    response_loss_mask: tuple[int, ...]
+    response_log_probs: tuple[float, ...]
+    reward: float
+    behavior_policy_version: int
+    created_at_step: int
+    prompt_uid: str
+    group_uid: str
+    resolved: bool
+    success: bool
+    finish: bool
+    is_padded: bool
+    error: str | None
+    instance: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if len(self.response_ids) != len(self.response_loss_mask):
+            raise ValueError(
+                'response_ids and response_loss_mask must have equal length; '
+                f'got {len(self.response_ids)} vs {len(self.response_loss_mask)}'
+            )
+        if len(self.response_ids) != len(self.response_log_probs):
+            raise ValueError(
+                'response_ids and response_log_probs must have equal length; '
+                f'got {len(self.response_ids)} vs {len(self.response_log_probs)}'
+            )
+
+
+@dataclass(slots=True)
+class SampledMiniBatch:
+    """Tensor/non-tensor payload returned by :meth:`TrajectoryStore.sample_mini_batch`.
+
+    The caller wraps this in a :class:`verl.DataProto` via ``DataProto.from_dict``.
+    Separating the pack step from ``DataProto`` keeps this module free of
+    the heavy verl dependency so it can be unit-tested on host.
+    """
+
+    tensors: dict[str, torch.Tensor]
+    non_tensors: dict[str, np.ndarray]
+    meta_info: dict[str, Any] = field(default_factory=dict)
+
+
+class TrajectoryStore:
+    """FIFO bounded replay buffer of *groups* of trajectories.
+
+    One "group" is the set of ``n`` sibling rollouts from the same prompt
+    (GRPO groups). The store guarantees groups are never split — all ``n``
+    siblings arrive together via :meth:`push_group` and stay together in
+    the buffer. This is load-bearing for GRPO / DAPO advantage computation
+    which groups by ``uid``.
+
+    Parameters
+    ----------
+    max_size:
+        Maximum number of groups held in the buffer. Older groups are
+        evicted FIFO when ``push_group`` exceeds capacity.
+    staleness_cutoff_k:
+        Hard staleness cap measured in trainer steps. At sample time,
+        groups whose ``current_step - created_at_step > staleness_cutoff_k``
+        are dropped from the buffer.
+    pad_token_id:
+        The tokenizer pad id used to right-pad responses and left-pad
+        prompts at sample time.
+    prompt_length_cap, response_length_cap:
+        Optional hard caps mirroring the trainer's
+        ``max_starting_message_length`` / ``total_len``. Trajectories
+        longer than the cap are right-truncated (prompts keep the tail,
+        responses keep the head).
+    """
+
+    def __init__(
+        self,
+        max_size: int,
+        staleness_cutoff_k: int,
+        pad_token_id: int,
+        prompt_length_cap: int | None = None,
+        response_length_cap: int | None = None,
+    ) -> None:
+        if max_size <= 0:
+            raise ValueError(f'max_size must be > 0, got {max_size}')
+        if staleness_cutoff_k < 0:
+            raise ValueError(
+                f'staleness_cutoff_k must be >= 0, got {staleness_cutoff_k}'
+            )
+        self._max_size = max_size
+        self._staleness_cutoff_k = staleness_cutoff_k
+        self._pad_token_id = pad_token_id
+        self._prompt_cap = prompt_length_cap
+        self._response_cap = response_length_cap
+        self._groups: deque[list[TrajectoryRecord]] = deque(maxlen=max_size)
+        self._lock = threading.Lock()
+        self._dropped_by_staleness_total = 0
+        self._last_sample_ages: list[int] = []
+
+    # ---- ingest -------------------------------------------------------------
+
+    def push_group(self, records: Sequence[TrajectoryRecord]) -> None:
+        """Append one group of trajectories.
+
+        The group is appended as a unit; FIFO eviction drops the oldest
+        *group* (not individual records) when capacity is exceeded.
+        """
+        if not records:
+            raise ValueError('push_group requires at least one record')
+        group = list(records)
+        group_uid = group[0].group_uid
+        for r in group[1:]:
+            if r.group_uid != group_uid:
+                raise ValueError(
+                    f'all records in a group must share group_uid; '
+                    f"got '{group_uid}' and '{r.group_uid}'"
+                )
+        with self._lock:
+            self._groups.append(group)
+
+    # ---- eviction -----------------------------------------------------------
+
+    def evict_stale(self, current_step: int) -> int:
+        """Drop groups whose age exceeds ``staleness_cutoff_k``.
+
+        Returns the count of evicted groups. Age is measured from the
+        first record's ``created_at_step`` (all records in a group share
+        a step under the Option A producer contract).
+        """
+        with self._lock:
+            return self._evict_stale_locked(current_step)
+
+    def _evict_stale_locked(self, current_step: int) -> int:
+        cutoff = self._staleness_cutoff_k
+        surviving: deque[list[TrajectoryRecord]] = deque(maxlen=self._max_size)
+        dropped = 0
+        for group in self._groups:
+            age = current_step - group[0].created_at_step
+            if age > cutoff:
+                dropped += 1
+            else:
+                surviving.append(group)
+        self._groups = surviving
+        self._dropped_by_staleness_total += dropped
+        return dropped
+
+    # ---- sampling -----------------------------------------------------------
+
+    def sample_mini_batch(
+        self,
+        n_groups: int,
+        current_step: int,
+        rng: random.Random | None = None,
+    ) -> SampledMiniBatch:
+        """Sample ``n_groups`` distinct groups uniformly without replacement.
+
+        Within a single call the chosen groups are distinct; across calls
+        the same group may reappear (paper Fig 18 — without-replacement
+        does not beat with-replacement).
+
+        Raises :class:`InsufficientTrajectoriesError` if the store holds
+        fewer than ``n_groups`` non-stale groups. The caller is expected
+        to poll the buffer until it warms up.
+        """
+        if n_groups <= 0:
+            raise ValueError(f'n_groups must be > 0, got {n_groups}')
+        rng = rng or random
+        with self._lock:
+            self._evict_stale_locked(current_step)
+            if len(self._groups) < n_groups:
+                raise InsufficientTrajectoriesError(
+                    f'store has {len(self._groups)} groups, asked for {n_groups} '
+                    f'(buffer may still be warming up)'
+                )
+            chosen = rng.sample(list(self._groups), n_groups)
+            records: list[TrajectoryRecord] = [r for group in chosen for r in group]
+            self._last_sample_ages = [current_step - r.created_at_step for r in records]
+        return self._pack(records, current_step)
+
+    def _pack(
+        self,
+        records: Sequence[TrajectoryRecord],
+        current_step: int,
+    ) -> SampledMiniBatch:
+        batch = len(records)
+        max_prompt = max(len(r.prompt_ids) for r in records)
+        max_response = max(len(r.response_ids) for r in records)
+        if self._prompt_cap is not None:
+            max_prompt = min(max_prompt, self._prompt_cap)
+        if self._response_cap is not None:
+            max_response = min(max_response, self._response_cap)
+        # Guard against all-empty prompts / responses producing a zero-width
+        # tensor (which would blow up downstream attention). Min 1.
+        max_prompt = max(max_prompt, 1)
+        max_response = max(max_response, 1)
+
+        prompt_ids = torch.full(
+            (batch, max_prompt), self._pad_token_id, dtype=torch.long
+        )
+        prompt_attn = torch.zeros((batch, max_prompt), dtype=torch.long)
+        responses = torch.full(
+            (batch, max_response), self._pad_token_id, dtype=torch.long
+        )
+        response_attn = torch.zeros((batch, max_response), dtype=torch.long)
+        loss_mask = torch.zeros((batch, max_response), dtype=torch.long)
+        rollout_log_probs = torch.zeros((batch, max_response), dtype=torch.float)
+        is_padded = torch.zeros(batch, dtype=torch.bool)
+        error_mask = torch.zeros(batch, dtype=torch.bool)
+
+        uids: list[str] = []
+        successes: list[bool] = []
+        errors: list[str | None] = []
+        resolveds: list[bool] = []
+        finishes: list[bool] = []
+        instances: list[dict[str, Any]] = []
+        behavior_versions: list[int] = []
+        created_steps: list[int] = []
+        sample_ages: list[int] = []
+
+        for i, rec in enumerate(records):
+            # Right-truncate prompts and responses to their caps. Prompts
+            # keep their tail (the most recent context) so left-pad-offset
+            # arithmetic stays right; responses keep their head.
+            p_ids = rec.prompt_ids[-max_prompt:]
+            offset = max_prompt - len(p_ids)
+            prompt_ids[i, offset : offset + len(p_ids)] = torch.tensor(
+                p_ids, dtype=torch.long
+            )
+            prompt_attn[i, offset : offset + len(p_ids)] = 1
+
+            r_ids = rec.response_ids[:max_response]
+            r_lm = rec.response_loss_mask[:max_response]
+            r_lp = rec.response_log_probs[:max_response]
+            r_len = len(r_ids)
+            if r_len > 0:
+                responses[i, :r_len] = torch.tensor(r_ids, dtype=torch.long)
+                response_attn[i, :r_len] = 1
+                loss_mask[i, :r_len] = torch.tensor(r_lm, dtype=torch.long)
+                rollout_log_probs[i, :r_len] = torch.tensor(r_lp, dtype=torch.float)
+
+            is_padded[i] = bool(rec.is_padded)
+            error_mask[i] = bool(rec.error)
+            uids.append(rec.prompt_uid)
+            successes.append(rec.success)
+            errors.append(rec.error)
+            resolveds.append(rec.resolved)
+            finishes.append(rec.finish)
+            instances.append(rec.instance)
+            behavior_versions.append(rec.behavior_policy_version)
+            created_steps.append(rec.created_at_step)
+            sample_ages.append(current_step - rec.created_at_step)
+
+        input_ids = torch.cat([prompt_ids, responses], dim=1)
+        attention_mask = torch.cat([prompt_attn, response_attn], dim=1)
+        position_ids = torch.clip(attention_mask.cumsum(dim=-1) - 1, min=0)
+
+        tensors = {
+            'input_ids': input_ids,
+            'responses': responses,
+            'attention_mask': attention_mask,
+            'position_ids': position_ids,
+            'loss_mask': loss_mask,
+            'rollout_log_probs': rollout_log_probs,
+            'is_padded': is_padded,
+            'error_mask': error_mask,
+        }
+        non_tensors = {
+            'uid': np.array(uids, dtype=object),
+            'success': np.array(successes, dtype=object),
+            'error': np.array(errors, dtype=object),
+            'resolved': np.array(resolveds, dtype=object),
+            'finish': np.array(finishes, dtype=object),
+            'instance': np.array(instances, dtype=object),
+        }
+        meta_info = {
+            'behavior_policy_versions': behavior_versions,
+            'created_at_steps': created_steps,
+            'sample_ages': sample_ages,
+        }
+        return SampledMiniBatch(
+            tensors=tensors, non_tensors=non_tensors, meta_info=meta_info
+        )
+
+    # ---- introspection -----------------------------------------------------
+
+    def num_groups(self) -> int:
+        with self._lock:
+            return len(self._groups)
+
+    def num_trajectories(self) -> int:
+        with self._lock:
+            return sum(len(g) for g in self._groups)
+
+    def metrics(self, current_step: int) -> dict[str, float]:
+        """Return ``replay/*`` WandB metrics for this store.
+
+        The keys follow the Phase 2 stage-doc naming (``full_async.md`` §5).
+        """
+        with self._lock:
+            groups = [list(g) for g in self._groups]
+            last_sample_ages = list(self._last_sample_ages)
+            dropped_total = self._dropped_by_staleness_total
+        base: dict[str, float] = {
+            'replay/store_size': float(len(groups)),
+            'replay/store_fill_ratio': float(len(groups)) / float(self._max_size),
+            'replay/store_num_trajectories': float(sum(len(g) for g in groups)),
+            'replay/dropped_by_staleness_total': float(dropped_total),
+        }
+        if groups:
+            ages = np.array(
+                [current_step - g[0].created_at_step for g in groups],
+                dtype=np.float64,
+            )
+            base['replay/store_age_p50'] = float(np.percentile(ages, 50))
+            base['replay/store_age_p95'] = float(np.percentile(ages, 95))
+        else:
+            base['replay/store_age_p50'] = 0.0
+            base['replay/store_age_p95'] = 0.0
+        if last_sample_ages:
+            sa = np.array(last_sample_ages, dtype=np.float64)
+            base['replay/sample_age_steps_p50'] = float(np.percentile(sa, 50))
+            base['replay/sample_age_steps_p95'] = float(np.percentile(sa, 95))
+        else:
+            base['replay/sample_age_steps_p50'] = 0.0
+            base['replay/sample_age_steps_p95'] = 0.0
+        return base
+
+    # ---- test helpers -------------------------------------------------------
+
+    def _snapshot_groups(self) -> list[list[TrajectoryRecord]]:
+        """Test-only deep-ish snapshot of the current groups list."""
+        with self._lock:
+            return [list(g) for g in self._groups]
