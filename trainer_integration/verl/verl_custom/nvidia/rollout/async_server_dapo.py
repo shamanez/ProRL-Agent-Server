@@ -85,8 +85,17 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
         # Under producer mode the buffer absorbs the filtered batch, so
         # carrying leftover state would cause ``DataProto.concat`` (line
         # ~225) to fuse prior-call rows into the new call and corrupt the
-        # assert at line ~512 (instance-id conservation). Reset here, and
-        # assert the invariant.
+        # assert at line ~512 (instance-id conservation). Reset here.
+        #
+        # job_queue leftovers: the result loop (line ~472) breaks as soon as
+        # ``num_completed_instances >= requested_batch_size``, with up to N
+        # un-dispatched jobs still in ``self.job_queue``. The classic path
+        # keeps them — they're the head of the next call's batch. Producer
+        # mode can't, because we just reset ``all_input_batch`` above, so
+        # those jobs reference forgotten prompts. Additionally, each call
+        # runs inside its own ``asyncio.run`` event loop (line ~107), and a
+        # PriorityQueue constructed against a now-closed loop can raise
+        # from ``put``/``get`` in Python 3.12. Rebuild the queue each call.
         replay_cfg = getattr(self.full_config, 'replay', None)
         producer_mode = bool(
             replay_cfg is not None
@@ -96,10 +105,14 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
         if producer_mode:
             self.all_input_batch = None
             self.last_data_index = 0
-            assert self.job_queue.empty(), (
-                'DAPO producer-mode invariant: job_queue must be drained '
-                'between generate_sequences_dapo calls'
-            )
+            leftover_jobs = self.job_queue.qsize()
+            self.job_queue = asyncio.PriorityQueue()
+            if leftover_jobs:
+                logger.info(
+                    'DAPO producer-mode: dropped %d leftover jobs from prior '
+                    'generate_sequences_dapo call (rebuilt job_queue)',
+                    leftover_jobs,
+                )
 
         # Start total timing for performance analysis
         total_start_time = time.time()
