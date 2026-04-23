@@ -82,7 +82,7 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             self._producer.check_background_error()
             n = int(self.config.actor_rollout_ref.rollout.n)
             n_groups = max(1, int(self.config.data.train_batch_size) // max(1, n))
-            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 1800.0))
+            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 7200.0))
             with _timer('gen', timing_raw):
                 # Wait on non-stale group count — raw num_groups
                 # counts groups sample_mini_batch will drop as stale.

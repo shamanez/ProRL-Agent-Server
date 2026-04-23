@@ -156,6 +156,9 @@ docker run --rm --name "$CNAME" \
     STAGE2_OUT=/workspace/outputs/ProAgent/fullasync
 
     echo "[fullasync/docker] scale: epochs=$TOTAL_EPOCHS steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ"
+    if (( $# > 0 )); then
+      echo "[fullasync/docker] extra hydra overrides: $*"
+    fi
     bash trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh \
       trainer.total_epochs="$TOTAL_EPOCHS" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
@@ -181,4 +184,4 @@ docker run --rm --name "$CNAME" \
       replay.continuous_producer="$CONTINUOUS_PRODUCER" \
       +algorithm.filter_groups.enable="$FILTER_GROUPS" \
       "$@"
-  ' 2>&1 | tee "$LOG_PATH"
+  ' _ "$@" 2>&1 | tee "$LOG_PATH"

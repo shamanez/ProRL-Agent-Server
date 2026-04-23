@@ -938,3 +938,10 @@ replay:
   # Gate for the Cut 4 continuous producer thread. When False, the trainer
   # runs push+sample inline in fit() (lockstep passthrough, Cut 2 mode).
   continuous_producer: False
+
+  # How long the trainer waits for the producer to push at least one fresh
+  # group before aborting. Default 7200s (2h) covers DAPO filter_groups=True
+  # worst-case where a single generate_sequences_dapo call can take ~1h to
+  # accumulate train_batch_size surviving (non-zero-variance) groups on
+  # SWE-Gym. Plain GRPO runs land in ~90s and are unaffected.
+  wait_timeout_s: 7200.0
