@@ -19,6 +19,7 @@ This trainer supports model-agonistic model initialization with huggingface
 """
 
 import json
+import logging
 import os
 import uuid
 from collections import defaultdict
@@ -26,7 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Optional, Type
+from typing import Optional
 
 import numpy as np
 import ray
@@ -74,7 +75,9 @@ from verl_custom.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 
-WorkerType = Type[Worker]
+_logger = logging.getLogger(__name__)
+
+WorkerType = type[Worker]
 
 
 class Role(Enum):
@@ -1693,14 +1696,25 @@ class RayPPOTrainer:
             poll_interval_s=float(replay_cfg.get('poll_interval_s', 0.05)),
         )
 
-    def _stop_continuous_producer_if_needed(self) -> None:
+    def _stop_continuous_producer_if_needed(self) -> bool:
+        """Stop the producer and drop the reference on clean exit.
+
+        Returns ``True`` if the producer thread exited within the
+        configured ``replay.stop_timeout_s`` (default 10 s), ``False``
+        otherwise. A ``False`` return means the producer is still
+        dispatching against the shared OpenHands session; the caller
+        must not start validation or any other OH-bound work on top of
+        it (gotcha §19).
+        """
         producer = getattr(self, '_producer', None)
         if producer is None:
-            return
-        try:
-            producer.stop(timeout=float(self.config.replay.get('stop_timeout_s', 10.0)))
-        finally:
+            return True
+        stopped = producer.stop(
+            timeout=float(self.config.replay.get('stop_timeout_s', 10.0))
+        )
+        if stopped:
             self._producer = None
+        return stopped
 
     def _acquire_training_batch(
         self, batch_dict: dict, metrics: dict, timing_raw: dict
@@ -2120,16 +2134,28 @@ class RayPPOTrainer:
                         # in-flight /process. Pause producer around _validate
                         # and resume afterwards. Buffer stays warm across the
                         # pause; K-staleness evicts naturally at next sample.
-                        self._stop_continuous_producer_if_needed()
-                        try:
-                            with _timer('testing', timing_raw):
-                                val_metrics: dict = self._validate()
-                                if is_last_step:
-                                    last_val_metrics = val_metrics
-                            metrics.update(val_metrics)
-                        finally:
-                            if not is_last_step:
-                                self._start_continuous_producer_if_needed()
+                        # Gotcha §19: if the producer is mid-asyncio.run the
+                        # stop() timeout fires without the thread exiting —
+                        # skip validate to avoid concurrent OH dispatch and
+                        # let the producer finish its call; retry on the next
+                        # save boundary.
+                        if self._stop_continuous_producer_if_needed():
+                            try:
+                                with _timer('testing', timing_raw):
+                                    val_metrics: dict = self._validate()
+                                    if is_last_step:
+                                        last_val_metrics = val_metrics
+                                metrics.update(val_metrics)
+                            finally:
+                                if not is_last_step:
+                                    self._start_continuous_producer_if_needed()
+                        else:
+                            _logger.warning(
+                                'step=%d skipping _validate: producer stop '
+                                'timed out (still mid-generate_sequences); '
+                                'will retry on next save boundary',
+                                self.global_steps,
+                            )
 
                 # training metrics
                 metrics.update(

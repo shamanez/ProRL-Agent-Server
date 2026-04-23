@@ -18,6 +18,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import logging  # noqa: E402 — module logger declared after verl_custom imports
 from collections import defaultdict
 from pprint import pprint
 
@@ -42,6 +43,8 @@ from verl_custom.trainer.ppo.ray_trainer import (
     compute_advantage,
     compute_response_mask,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class RayPPOTrainerDAPO(RayPPOTrainer):
@@ -434,16 +437,28 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                         # in-flight /process. Pause producer around _validate
                         # and resume afterwards. Buffer stays warm across the
                         # pause; K-staleness evicts naturally at next sample.
-                        self._stop_continuous_producer_if_needed()
-                        try:
-                            with _timer('testing', timing_raw):
-                                val_metrics: dict = self._validate()
-                                if is_last_step:
-                                    last_val_metrics = val_metrics
-                            metrics.update(val_metrics)
-                        finally:
-                            if not is_last_step:
-                                self._start_continuous_producer_if_needed()
+                        # Gotcha §19: if the producer is mid-asyncio.run the
+                        # stop() timeout fires without the thread exiting —
+                        # skip validate to avoid concurrent OH dispatch and
+                        # let the producer finish its call; retry on the next
+                        # save boundary.
+                        if self._stop_continuous_producer_if_needed():
+                            try:
+                                with _timer('testing', timing_raw):
+                                    val_metrics: dict = self._validate()
+                                    if is_last_step:
+                                        last_val_metrics = val_metrics
+                                metrics.update(val_metrics)
+                            finally:
+                                if not is_last_step:
+                                    self._start_continuous_producer_if_needed()
+                        else:
+                            _logger.warning(
+                                'step=%d skipping _validate: producer stop '
+                                'timed out (still mid-generate_sequences); '
+                                'will retry on next save boundary',
+                                self.global_steps,
+                            )
 
                     # training metrics
                     metrics.update(
