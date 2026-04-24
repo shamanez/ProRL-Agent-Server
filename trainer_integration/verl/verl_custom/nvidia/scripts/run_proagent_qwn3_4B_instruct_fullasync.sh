@@ -71,7 +71,7 @@ python3 -m verl_custom.trainer.main_ppo \
     data.train_batch_size=$BATCH_SIZE \
     +data.gen_batch_size=1 \
     data.max_prompt_length=31232 \
-    data.max_response_length=1536 \
+    data.max_response_length=4096 \
     data.truncation='error' \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \

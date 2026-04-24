@@ -40,7 +40,7 @@ REMOTE_POOL_DIR="${REMOTE_POOL_DIR:-/home/ec2-user/vllm-pool}"
 REMOTE_PYTHON="${REMOTE_PYTHON:-/usr/local/bin/python3.12}"
 MODEL="${MODEL:-Qwen/Qwen3-4B-Instruct-2507}"
 GPU_MEM_UTIL="${GPU_MEM_UTIL:-0.85}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-36864}"
 
 # GPU -> port mapping. Must stay aligned with external_llm_endpoints in
 # run_proagent_qwn3_4B_instruct_weightsync.sh.
@@ -70,8 +70,9 @@ Environment overrides:
   REMOTE_PYTHON   Remote python3.12 path (default: /usr/local/bin/python3.12)
   MODEL           HF repo id (default: Qwen/Qwen3-4B-Instruct-2507)
   GPU_MEM_UTIL    vLLM --gpu-memory-utilization (default: 0.85)
-  MAX_MODEL_LEN   vLLM --max-model-len (default: 32768; matches trainer
-                  data.max_prompt_length + data.max_response_length budget)
+  MAX_MODEL_LEN   vLLM --max-model-len (default: 36864; covers trainer
+                  data.max_prompt_length (31232) + data.max_response_length
+                  (4096) = 35328 with slack)
 EOF
   exit 2
 }
