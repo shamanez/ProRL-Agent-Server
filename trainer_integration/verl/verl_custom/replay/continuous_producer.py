@@ -234,11 +234,23 @@ class ContinuousRolloutProducer:
                     getattr(self._rollout_manager, 'policy_version', 0)
                 )
                 current_step = self._step_counter.get()
-                self._store.push_from_dataproto(
-                    batch,
-                    behavior_policy_version=policy_version,
-                    current_step=current_step,
-                )
+                # Cut 5: when the DAPO manager has already eagerly pushed
+                # every survivor into the store mid-call, skip the terminal
+                # push to keep the pop-on-sample invariant (gotcha §15).
+                # meta_info may be None on classic paths that never stamp it.
+                eager_pushed_all = False
+                try:
+                    eager_pushed_all = bool(
+                        batch.meta_info.get('eager_pushed_all', False)
+                    )
+                except AttributeError:
+                    eager_pushed_all = False
+                if not eager_pushed_all:
+                    self._store.push_from_dataproto(
+                        batch,
+                        behavior_policy_version=policy_version,
+                        current_step=current_step,
+                    )
                 # latencies.md §5 addition #2 — emit one line per producer
                 # iteration so the log can reconstruct producer throughput
                 # independent of the DAPO-internal metrics.
@@ -252,6 +264,7 @@ class ContinuousRolloutProducer:
                             'policy_version': policy_version,
                             'current_step': current_step,
                             'store_num_groups': int(self._store.num_groups()),
+                            'eager_pushed_all': eager_pushed_all,
                         }
                     ),
                 )

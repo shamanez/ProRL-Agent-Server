@@ -83,8 +83,13 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
 
         if self._producer is not None:
             self._producer.check_background_error()
-            n = int(self.config.actor_rollout_ref.rollout.n)
-            n_groups = max(1, int(self.config.data.train_batch_size) // max(1, n))
+            # Cut 5: ``train_batch_size`` is now groups-per-step. The old
+            # ``max(1, tbs // n)`` floor collapsed to 1 when ``n >= tbs``
+            # (e.g. n=8, tbs=4 → n_groups=1), wasting 7 of every 8 FSDP
+            # GPUs per step. With eager-push + zero-variance ingest filter
+            # the buffer always holds gradient-bearing groups, so the
+            # trainer simply draws ``train_batch_size`` groups per step.
+            n_groups = int(self.config.data.train_batch_size)
             wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 7200.0))
             with _timer('gen', timing_raw):
                 # Wait on non-stale group count — raw num_groups

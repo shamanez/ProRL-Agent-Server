@@ -31,6 +31,7 @@ import asyncio
 import logging
 import os
 import uuid
+from collections.abc import Callable
 
 import numpy as np
 
@@ -70,9 +71,21 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
         """
         super().__init__(config, worker_group)
         self.data_loader = None
-        self.all_input_batch = None
+        self.all_input_batch: DataProto | None = None
         self.last_data_index = 0
         self.job_queue = asyncio.PriorityQueue()
+        # Cut 5: eager-push seam. The trainer wires a closure here in
+        # continuous-producer mode (see ray_trainer.py
+        # ``_start_continuous_producer_if_needed``). When set, every DAPO
+        # survivor is pushed into the replay store the moment it clears
+        # ``filter_easy_hard_instance`` — not at the end of the call — so the
+        # trainer stops stalling on the 53 min iteration tail. Left None in
+        # classic (lockstep) mode.
+        self._push_fn: Callable[[DataProto], None] | None = None
+        # True iff every survivor of the most recent ``generate_sequences_dapo``
+        # call was pushed eagerly. Consumed by the continuous producer to skip
+        # the terminal ``push_from_dataproto`` and avoid double-entry.
+        self._eager_pushed_all_this_call: bool = False
 
     def generate_sequences_dapo(self) -> DataProto:
         import time
@@ -155,6 +168,13 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
             'generate_sequences': total_end_time
             - total_start_time,  # Main timing metric
         }
+        # Cut 5: propagate the eager-push state up to the continuous
+        # producer. True means every survivor is already in the store;
+        # the producer skips its terminal ``push_from_dataproto`` to
+        # preserve pop-on-sample (gotcha §15).
+        out_batch.meta_info['eager_pushed_all'] = bool(
+            getattr(self, '_eager_pushed_all_this_call', False)
+        )
 
         # latencies.md §5 addition #1 — single JSON event summarizing this
         # producer call. Consumers: log-scraper in stages/replay_dynamics.md
@@ -183,6 +203,10 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
                     'groups_drawn': stats.get('groups_drawn', 0),
                     'groups_survived': stats.get('groups_survived', 0),
                     'groups_dropped_filter': stats.get('groups_dropped_filter', 0),
+                    'groups_pushed_eager': stats.get('groups_pushed_eager', 0),
+                    'eager_pushed_all': bool(
+                        getattr(self, '_eager_pushed_all_this_call', False)
+                    ),
                     'trajectories_out': trajectories_out,
                     'tokens_out': tokens_out,
                     'effective_tps': round(effective_tps, 2),
@@ -231,6 +255,13 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
         )
 
         self.existing_ids = set()
+
+        # Cut 5: eager-push bookkeeping. ``eager_pushed_instance_ids`` tracks
+        # the survivors the manager has already handed to the replay store
+        # mid-call; used at end-of-call to decide whether the continuous
+        # producer's terminal push should fire at all.
+        eager_pushed_instance_ids: set = set()
+        self._eager_pushed_all_this_call = False
 
         try:
             # Initialize result storage
@@ -459,6 +490,56 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
                 )
                 filtered_instance_ids.extend(filtered_instance_ids_tmp)
 
+                # Cut 5: eager-push hook. Any instance_id that just reached
+                # ``num_trajectories`` complete trajectories AND survived the
+                # easy/hard filter is a gradient-bearing group ready to
+                # ship. Build a single-group DataProto and hand it to the
+                # store immediately, so the trainer has content to sample
+                # within the 53 min iteration — not only after it.
+                # ``filter_easy_hard_instance`` already pops zero-variance
+                # groups, so nothing that enters the store is wasteful.
+                # Conversion + store push are offloaded via
+                # ``asyncio.to_thread`` because they are sync and can take
+                # a few hundred ms; running them inline would stall the
+                # dispatcher / result-collection loop.
+                if self._push_fn is not None:
+                    for ready_instance_id in list(all_responses.keys()):
+                        if ready_instance_id in eager_pushed_instance_ids:
+                            continue
+                        if (
+                            len(all_responses[ready_instance_id])
+                            != self.num_trajectories
+                        ):
+                            continue
+                        single_group_dp = await asyncio.to_thread(
+                            self._build_single_group_dataproto,
+                            ready_instance_id,
+                            all_responses[ready_instance_id],
+                        )
+                        if single_group_dp is None:
+                            logger.warning(
+                                'Eager-push skipped for %s: could not build '
+                                'single-group DataProto (input-batch row missing).',
+                                ready_instance_id,
+                            )
+                            continue
+                        try:
+                            await asyncio.to_thread(self._push_fn, single_group_dp)
+                        except Exception:
+                            logger.exception(
+                                'Eager-push of instance %s into replay store '
+                                'raised; propagating to producer thread.',
+                                ready_instance_id,
+                            )
+                            raise
+                        eager_pushed_instance_ids.add(ready_instance_id)
+                        logger.info(
+                            'DAPO eager-push: instance %s pushed into replay '
+                            'store (%d survivors pushed this call)',
+                            ready_instance_id,
+                            len(eager_pushed_instance_ids),
+                        )
+
                 for instance_id in all_responses:
                     if len(all_responses[instance_id]) == self.num_trajectories:
                         num_completed_instances += 1
@@ -594,7 +675,18 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
                 'groups_drawn': len(instance_ids_before_filtering),
                 'groups_survived': len(instance_ids_in_output_batch),
                 'groups_dropped_filter': len(instance_ids_in_filtered_instance_ids),
+                'groups_pushed_eager': len(eager_pushed_instance_ids),
             }
+
+            # Cut 5: if every surviving instance was pushed mid-loop, the
+            # continuous producer must skip the terminal ``push_from_dataproto``
+            # to avoid duplicate entries (gotcha §15 — pop-on-sample assumes
+            # each group is in the store at most once).
+            self._eager_pushed_all_this_call = bool(
+                self._push_fn is not None
+                and eager_pushed_instance_ids >= instance_ids_in_output_batch
+                and len(instance_ids_in_output_batch) > 0
+            )
 
             return all_responses, output_batch
         except Exception as e:
@@ -674,6 +766,46 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
                         f'Filtered instance {instance_id} with resolved ratio {resolved_count}/{self.num_trajectories}'
                     )
         return all_responses, filtered_instance_ids
+
+    def _build_single_group_dataproto(self, instance_id, trajectory_results):
+        """Cut 5: materialise a single-group training DataProto mid-call.
+
+        Mirrors the terminal path in :meth:`generate_sequences_dapo`
+        (uid stamp → repeat-n → union with conversion output) but on
+        exactly one instance's ``num_trajectories`` rollouts so the
+        replay store can ingest the group the moment it lands — not at
+        end of call.
+
+        Returns ``None`` if the matching row is not in
+        ``self.all_input_batch`` (race with ``push_remaining_train_data_to_job_queue``
+        / filter-leftover rebuild). The caller logs + skips; the group
+        will land in the terminal batch as usual.
+        """
+        input_batch = self.all_input_batch
+        if input_batch is None:
+            return None
+        batch_idx: int | None = None
+        for i, instance in enumerate(input_batch.non_tensor_batch['instance']):
+            if instance['instance_id'] == instance_id:
+                batch_idx = i
+                break
+        if batch_idx is None:
+            return None
+
+        single_row = input_batch.select_idxs([batch_idx])
+        single_results = {instance_id: trajectory_results}
+        if self.config.rollout.get('token_level_generation', False):
+            response = self._convert_results_to_dataproto_token(
+                single_results, single_row
+            )
+        else:
+            response = self._convert_results_to_dataproto(single_results)
+
+        single_row.non_tensor_batch['uid'] = np.array([str(uuid.uuid4())], dtype=object)
+        single_row = single_row.repeat(
+            repeat_times=self.config.rollout.n, interleave=True
+        )
+        return single_row.union(response)
 
     async def _send_single_message_to_openhands_dapo(
         self, message: dict, message_index: int, openhands_base_url: str, val_mode=False

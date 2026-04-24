@@ -1662,6 +1662,27 @@ class RayPPOTrainer:
         assert self.trajectory_store is not None  # enable=True → store built
 
         self._step_counter = StepCounter(initial=self.global_steps)
+        # Cut 5: wire the eager-push closure into the DAPO manager (no-op
+        # for plain GRPO, whose manager has no ``_push_fn`` attribute).
+        # The manager calls this once per survivor as soon as
+        # ``filter_easy_hard_instance`` clears it — the trainer sees
+        # content in the store during the 53 min DAPO iteration, not
+        # only after it.
+        if hasattr(self.async_rollout_manager, '_push_fn'):
+            store = self.trajectory_store
+            manager = self.async_rollout_manager
+            step_counter = self._step_counter
+
+            def _eager_push(single_group_dp):
+                policy_version = int(getattr(manager, 'policy_version', 0))
+                current_step = step_counter.get()
+                store.push_from_dataproto(
+                    single_group_dp,
+                    behavior_policy_version=policy_version,
+                    current_step=current_step,
+                )
+
+            self.async_rollout_manager._push_fn = _eager_push
         self._producer = self._make_continuous_producer()
         self._producer.start()
 
@@ -1714,6 +1735,11 @@ class RayPPOTrainer:
         )
         if stopped:
             self._producer = None
+            # Cut 5: drop the eager-push closure so the manager goes
+            # back to lockstep/terminal-push semantics in any subsequent
+            # classic path. Preserved only while a producer is active.
+            if hasattr(self.async_rollout_manager, '_push_fn'):
+                self.async_rollout_manager._push_fn = None
         return stopped
 
     def _acquire_training_batch(
@@ -1737,8 +1763,12 @@ class RayPPOTrainer:
             )
 
             self._producer.check_background_error()
-            n = int(self.config.actor_rollout_ref.rollout.n)
-            n_groups = max(1, int(self.config.data.train_batch_size) // max(1, n))
+            # Cut 5: ``train_batch_size`` is now groups-per-step (mirror of
+            # ray_trainer_dapo.py change). The old ``max(1, tbs // n)``
+            # floor collapsed to 1 whenever ``n >= tbs``, starving the
+            # FSDP trainer. The replay buffer + ingest filter already
+            # guarantee every sampled group has gradient content.
+            n_groups = int(self.config.data.train_batch_size)
             wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 7200.0))
             with _timer('gen', timing_raw):
                 # Wait on the *non-stale* group count, not the raw
