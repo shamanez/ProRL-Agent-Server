@@ -182,6 +182,7 @@ docker run --rm --name "$CNAME" \
       replay.producer_batch_size="$PRODUCER_BATCH_SIZE" \
       replay.use_temporal_is="$USE_TEMPORAL_IS" \
       replay.continuous_producer="$CONTINUOUS_PRODUCER" \
+      +replay.stop_timeout_s=300 \
       +algorithm.filter_groups.enable="$FILTER_GROUPS" \
       "$@"
   ' _ "$@" 2>&1 | tee "$LOG_PATH"
