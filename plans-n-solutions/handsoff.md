@@ -95,13 +95,13 @@ EC2 security group must allow inbound TCP 8100–8103 from the trainer box's pub
 |---|---|---|
 | Trainer entrypoint (host) — ProRL | `scripts/_internal/s0_prorl.sh` | FastAPI on :8006, 64 init / 64 run workers, 1000s job timeout. |
 | Trainer entrypoint (Docker) — fully-async | `scripts/_internal/s3_fullasync_docker.sh` | Default PRIMARY launcher. Env knobs: `TOTAL_TRAINING_STEPS`, `SAVE_FREQ`, `NUM_TRAJ`, `FILTER_GROUPS`, `TEST_FREQ`, `VAL_BEFORE_TRAIN`, `LOG_PATH`, `REMOTE_DNS`. |
-| Hydra launcher | `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh` | Baked config: `lora_rank=32`, `lora_alpha=64`, `publish_on_save=True`, `replay.*`, `tis_imp_ratio_cap=2`, hardcoded EC2 DNS. |
+| Hydra launcher | `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh` | Baked config: `lora_rank=32`, `lora_alpha=64`, `publish_on_save=True`, `replay.*`, `tis_imp_ratio_cap=5`, hardcoded EC2 DNS. |
 | Replay store | `trainer_integration/verl/verl_custom/replay/trajectory_store.py` | FIFO deque max 128, K=4 staleness cap, pop-on-sample, single `threading.Lock`. |
 | Continuous producer (daemon thread) | `trainer_integration/verl/verl_custom/replay/continuous_producer.py` | `start`/`stop(timeout)` cooperative exit (gotcha #19 fix). |
 | GRPO trainer | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` | `_publish_lora_adapter` after `_save_checkpoint`, policy_version sync at 1506-1515, metrics hook ~1685. |
 | DAPO trainer | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer_dapo.py` | Same publish hook wired. `n_groups = max(1, train_batch_size // n)` at lines 86-87 (see problem #1). |
 | Trainer class selector | `trainer_integration/verl/verl_custom/trainer/main_ppo.py:232-236` | `filter_groups.enable=True` → `RayPPOTrainerDAPO`, else plain. |
-| Temporal IS correction | `trainer_integration/verl/verl_custom/trainer/ppo/core_algos.py:586-590` | Gated on `replay.use_temporal_is`. Ratio = `exp(old_log_prob − rollout_log_probs)`, clamped at `tis_imp_ratio_cap=2`. |
+| Temporal IS correction | `trainer_integration/verl/verl_custom/trainer/ppo/core_algos.py:586-590` | Gated on `replay.use_temporal_is`. Ratio = `exp(old_log_prob − rollout_log_probs)`, clamped at `tis_imp_ratio_cap=5`. |
 | Actor forward | `trainer_integration/verl/verl_custom/workers/actor/dp_actor.py` | `compute_log_prob` at T=1.0 (rollout at T=1.4 — see problem #3). |
 | Rollout manager | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server.py` | `policy_version` stamping ~1495, EXTERNAL BYPASS ACTIVE path 408-425. |
 | DAPO rollout dispatcher | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | Producer-mode rebuild of `job_queue` (bug #16 fix). |
@@ -226,7 +226,7 @@ Evidence sheet: [`stages/current_bottlenecks_and_problems.md`](stages/current_bo
     - **~0.05** LoRA load path at float16/bfloat16.
     - **~0.15** genuine policy drift from the adapter difference between push-time pv and trainer-update-time pv.
 
-    **Cheapest fix: align the trainer's `old_log_prob` pass temperature to the rollout temperature** (single-line patch in `dp_actor.py`'s `compute_log_prob` — scale logits by `1/T` before log-softmax). Not a bug in the fork — the path assumes on-policy, where T-scaling cancels. With stored `rollout_log_probs`, the ratio is `exp(old − rollout)` and T-mismatch no longer cancels. Do NOT widen `tis_imp_ratio_cap` as the first move — masks the symptom, not the cause. See problem #3.
+    **Phase-2.5 Cut 2 raises `tis_imp_ratio_cap` 2 → 5** so the clamp bounds genuine drift (~0.15 of the 0.55 mean log-ratio) rather than the T=1.4 / T=1.0 + kernel numerical floor (~0.55 − 0.15 = ~0.40) that is not a correctness bug. Principled followup (deferred): align the trainer's `old_log_prob` pass temperature to rollout temperature (single-line patch in `dp_actor.py`'s `compute_log_prob` — scale logits by `1/T` before log-softmax). Not a bug in the fork — the path assumes on-policy, where T-scaling cancels. With stored `rollout_log_probs`, the ratio is `exp(old − rollout)` and T-mismatch no longer cancels. See problem #3.
 28. **Producer-wall outliers (80 min vs 53 min typical) are not yet instrumented to the prompt level.** Run9 iter 3 regressed completion 40 % → 27 %, wall 53 → 80 min; iter 4 recovered to 58 min. Plausible causes: dataset difficulty drift, post-publish policy regression, pool KV-cache fragmentation over long uptimes. Cannot distinguish without emitting per-prompt `(uid, resolved_ratio, wall_s)` in `DAPO_PRODUCER_CALL`. Also: publish #2 `transfer_latency_s` was 1.84× publish #1 (19.0 s vs 4.0 s); if publish #3 also > 30 s, systemic network contention. See problems #8, #9.
 
 ---

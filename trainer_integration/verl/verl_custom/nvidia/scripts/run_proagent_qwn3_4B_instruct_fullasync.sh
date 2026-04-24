@@ -92,7 +92,7 @@ python3 -m verl_custom.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.actor.clip_ratio_low=$CLIP_RATIO_LOW \
     actor_rollout_ref.actor.clip_ratio_high=$CLIP_RATIO_HIGH \
-    actor_rollout_ref.actor.tis_imp_ratio_cap=2 \
+    actor_rollout_ref.actor.tis_imp_ratio_cap=5 \
     +actor_rollout_ref.actor.use_error_mask=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$TP_SIZE \
