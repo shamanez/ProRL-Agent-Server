@@ -74,9 +74,24 @@ Update `plans-n-solutions/handsoff.md` (this file) with what shipped, what's def
 
 ## 2. Current state
 
-**Phase 2 shipped on `full-async`** — closed-loop rank-16 LoRA weight-sync PLUS continuous-producer replay store + clipped temporal IS correction. All 10 merge-blocking gates pass (see §15 ship summary). Next work: Phase 2.5 (positive-bias sampling + AsymRE loss — `docs/README.md §9`) and run9 (n=16) tuning study.
+**Phase 2 is CONCLUDED on `full-async`** — closed-loop rank-16 LoRA weight-sync PLUS continuous-producer replay store + clipped temporal IS correction. The core plumbing (§15 ship summary) holds: 10-gate scorecard at Run8 (n=8, `filter_groups=True`, 50 steps) passed its plumbing obligations. Run9 (n=16) then surfaced three distinct Phase 2.5 signals that motivate the next branch (§16 and `plans-n-solutions/stages/run9_n16_report.md`).
 
-Phase 2 key commits on `full-async`: `dd9e4f3a final-run metrics`, `590f8281` cooperative producer-stop, Cut 4 replay store + continuous producer, Cut 5 sibling launchers. Also `12c0e170 chore: anchor starting state at decoup-weight-sync`, `846432d0 docs(phase2): collapse plans-n-solutions into a single handsoff doc`, `f726a876 docs(phase2): add replay paper digest + link from handsoff`.
+**Branch-off point for Phase 2.5: commit `55e94122`** on `full-async`. That commit reverts a tuning experiment back to the baseline config (`MAX_NUM_ITERS=30`, `openhands_timeout=1000`). Base any Phase 2.5 work off this SHA and keep the n=16 launcher overrides (`test_freq=10`, `val_before_train=True`, `NUM_TRAJ=16`) as the observation harness.
+
+Phase 2 key commits on `full-async`:
+- `55e94122` — revert phase2 tuning; baseline values locked in (**Phase 2.5 starts here**)
+- `f5adb456` — Phase 2 + 3 instrumentation log events (`PRODUCER_ITER`, `DAPO_PRODUCER_CALL`, `RELOAD_LORA`)
+- `590f8281` — cooperative producer-stop (§19 fix: skip `_validate` on stop timeout)
+- `af07c28b` — DAPO bug #16 rebuild of `job_queue` on producer-mode re-entry
+- `dd9e4f3a` — final-run metrics
+- Cut 4 (replay store + continuous producer), Cut 5 (sibling launchers)
+- `12c0e170`, `846432d0`, `f726a876` — scaffolding and docs
+
+**Branch-off guidance for the next session:**
+1. `git checkout -b phase2.5-<topic> 55e94122` off `full-async`.
+2. Read §16 for the ranked fix list. Pick one lever per branch — don't stack.
+3. Keep the run9 observation scripts (`/tmp/replay_monitor.py`, `plans-n-solutions/stages/run9_n16_report.md` schema) for comparability.
+4. Re-read gotchas §10 items **19, 20, 22, plus the new 25–28 below** before touching the producer thread or the IS path.
 
 **Prior starting state = `decoup-weight-sync`.** That branch carries Phase 1 only (lock-step LoRA weight-sync): rank-16 adapters, `/reload_lora` on the pool, trainer-authoritative `policy_version`, DAPO + plain GRPO both wired, 6/6 Phase 1 gates green. All running and validation flows originate there. Nothing earlier is in scope — do not reference, reproduce against, or frame anything relative to pre-`decoup-weight-sync` state.
 
@@ -278,6 +293,16 @@ Spawn via the `Agent` tool with `subagent_type=<name>`. Independent queries → 
 22. **`/reload_lora` drain (`_vllm_child.py:163-166`) stamps `policy_version` atomically per `/generate` call.** In-flight agentic trajectories (tool-use loops) that straddle a publish still see the *old* version because each turn's `/generate` completes against whichever version was active at that turn's arrival — correct behavior (a mid-rollout version switch would mix logprobs across two policies in one trajectory). **The replay store then stamps `behavior_policy_version = rollout_manager.policy_version_at_push_time`**, which is the version at the *end* of the OpenHands session, not per-turn. For temporal IS this is a slight approximation; for rank-16 adapters with publish_latency ≈ 30s and turn-time ≈ 20s the difference is within TIS clip and has not caused pathological `is_weight` in run8. If you ever see `clip_fraction > 0.5` with K=4 staleness, investigate per-turn version stamping as a possible fix.
 23. **`endpoints_failed > 0` abort contract (`ray_trainer.py:1348-1352`) is preserved in producer mode.** A warm buffer does not mask a broken pool: publish failure raises from the trainer's `_publish_lora_adapter` and the producer thread is stopped as part of trainer exit. If `endpoints_failed` bubbles up *inside* the producer's `generate_sequences` call (shouldn't happen — publishes are trainer-driven), `check_background_error` re-raises on the next trainer-side call.
 24. **Buffer is ephemeral — not checkpointed.** On trainer resume (`trainer.resume_mode=auto`), the store starts empty and re-warms from scratch. Pre-resume entries would be maximally stale anyway (pre-`global_steps`-reset), so discarding them is correct. Warm-up time ≈ `N / producer_throughput` steps; in the current producer-bound regime, that's a few steps of no-op `wait_until` at start-up.
+25. **§19 cooperative skip can fire during `fit()` — not just at shutdown.** Run9 / step 10 hit it for the first time at a scheduled validation boundary: `_validate()` wanted an exclusive pool, called `producer.stop(timeout=10s)`, the producer was mid-`generate_sequences_dapo` (53+ min call), timeout elapsed → validation **skipped** (no corruption, no traceback). With `save_freq=5` and `test_freq=10`, this slips the first in-training pass@k datapoint from step 10 to step 20 — **3× worse time-to-first-eval** than the gate assumed. Direct fix: pass `timeout=7200` at validation boundaries (zero-code knob flip — `ContinuousRolloutProducer.stop(timeout=…)` already parameterised). Principled fix: add `producer.pause()` / `producer.resume()` that lets the worker finish its current call then pauses between calls (~40 LOC in `continuous_producer.py`). Keep §19 for shutdown; use pause/resume for planned sampler-exclusive windows.
+26. **Pool-adapter-age (`rollout/staleness_steps`) and buffer-age (`replay/sample_age_steps`) diverge whenever producer-wall > `save_freq × burst_duration`.** Run9 step 9: `sample_age_p50=0` (iter 3's groups were just pushed) but `staleness_steps=4` (pool had been at pv=1 for 4 steps because no publish landed between step 5 and step 9). The paper's "buffer age" intuition and the fork's "pool-adapter age" invariant measure **different things**. IS clipping correlates with pool-adapter-age, not buffer-age. Don't claim "staleness bounded" from `sample_age_p95 ≤ K` alone — add a companion gate `rollout/staleness_steps_p95 ≤ K + save_freq`. Consider tying buffer eviction to pool-adapter-age rather than buffer-age in Phase 2.5.
+27. **`is_weight/clip_fraction` is ~60 % in n=16 regime, of which only ~20 % is real policy drift.** Run9 `rollout_corr/log_ppl_diff` oscillates 0.49–0.79 across all 10 steps (clip threshold `log(tis_imp_ratio_cap=2) ≈ 0.69`). Decomposition of the divergence source:
+    - **~0.35** temperature mismatch: rollout sampling at `T=1.4 top_p=0.95`, trainer's `old_log_prob` / `ref_log_prob` forward pass at `T=1.0` (dp_actor.py default).
+    - **~0.20** vLLM ↔ FSDP numerical divergence: different kernels (FlashAttention vs FA-with-paged-KV), different fused ops, slightly different softmax paths. Systematic, not random.
+    - **~0.05** LoRA load path: rank-16 merge vs adapter-applied forward can drift at float16/bfloat16.
+    - **~0.15** genuine policy drift from the adapter difference between push-time pv and trainer-update-time pv.
+
+    **Cheapest fix: align the trainer's `old_log_prob` pass temperature to the rollout temperature.** Single-line patch in `dp_actor.py`'s `compute_log_prob` (scale logits by `1/T` before log-softmax). Not a bug in the fork — the existing path assumes on-policy, where T-scaling cancels in the ratio. With Phase 2's stored `rollout_log_probs`, the ratio is `exp(old − rollout)` and the T-mismatch no longer cancels. Do NOT widen `tis_imp_ratio_cap` as the first move — that masks the symptom, not the cause.
+28. **Producer-wall outliers happen (80 min vs 53 min typical) and are not yet instrumented to the prompt level.** Run9 iter 3 regressed completion 40 %→27 %, effective TPS 664→435, wall 53→80 min; iter 4 recovered to 58 min. Plausible causes: dataset difficulty drift (iter 3's first 10 prompts were harder), post-publish-1 policy regression (pv=1 worse than pv=0 on some prompts at 4-step LR=1e-6), pool KV-cache fragmentation over long uptimes. Cannot distinguish without emitting per-prompt `(uid, resolved_ratio, wall_s)` in `DAPO_PRODUCER_CALL`. Priority Phase 2.5 instrumentation. Also flag: publish-latency on publish #2 was **1.84× publish #1** (33.6 s vs 18.2 s, `transfer_s` 4.0→19.0); correlates with iter-4 dispatcher startup competing for pool bandwidth. If publish #3 is also > 30 s, systemic. Mitigation: gate publish-push on a low-activity window, or move transfer onto a dedicated HTTP client.
 
 ---
 
@@ -347,7 +372,7 @@ Every gate needs a WandB panel or a log grep. No verbal "looks green".
 
 ## 15. Phase F ship summary (Phase 2)
 
-**Shipped:** 2026-04-24 on branch `full-async`. Phase 2 = fully-async decoupled agentic RL with bounded in-process replay store + clipped temporal IS correction. All 10 merge-blocking gates in §12 pass on the final run (run8, DAPO `filter_groups=True`, 50 steps, 9h04m, log `/tmp/s3-fullasync.log`).
+**Shipped:** 2026-04-24 on branch `full-async`. Phase 2 = fully-async decoupled agentic RL with bounded in-process replay store + clipped temporal IS correction. The 10 merge-blocking plumbing gates in §12 pass on Run8 (DAPO `filter_groups=True`, n=8, 50 steps, 9h04m, log `/tmp/s3-fullasync.log`). Run9 (n=16, paper-aligned) reproduces the plumbing cleanly and surfaces three Phase 2.5 signals — see **§16** for the roadmap and `plans-n-solutions/stages/run9_n16_report.md` for evidence.
 
 ### What landed
 
@@ -418,3 +443,108 @@ See `plans-n-solutions/stages/replay_dynamics.md` for the full producer/store/tr
 Change one knob per run. Don't stack knob changes with code changes.
 
 Last updated at the end of Phase 2 shipping. Keep this file current — it is the next agent's starting point after you.
+
+---
+
+## 16. Phase 2.5 kickoff — what the measurements say, what to do next
+
+Phase 2's plumbing works. The Run9 (n=16, paper-aligned) measurements show the clock-separation benefit **does not yet engage** in this regime — trainer utilisation 1.1–4.3 %, buffer at `store_size=0` for 50+ % of wall-clock — and surface three signals that a follow-up phase must address. This section is the **plan-of-record entry point** for Phase 2.5.
+
+**Source of truth for evidence:** `plans-n-solutions/stages/run9_n16_report.md`. Read it before branching.
+
+### 16.1 Phase 2 verdict
+
+| Dimension | Verdict |
+|---|---|
+| Plumbing (store, producer thread, publish, TIS) | **PASS** — no fit()-time tracebacks, no `endpoints_failed`, no stale-drop events |
+| Trainer–rollout clock separation (`trainer_update_time_s` ≪ `rollout_wait_time_s`) | **NOT ACTIVE** — producer is the strict bottleneck at n=16 |
+| IS weight sanity (`clip_fraction < 0.2`) | **FAIL** — ~60 % clipping, dominated by non-drift sources (gotcha #27) |
+| Pool-adapter-age vs buffer-age invariant | **NEEDS a second gate** (gotcha #26) |
+| Validation-during-fit | **RACE SURFACED** — step-10 pass@k skipped via §19 (gotcha #25) |
+| Gradient signal per step (n=16) | 1 surviving group × 16 trajectories = 1 group per gradient step (vs Phase-1-style 4 prompts × 8). 4× fewer unique prompts per 10 steps. |
+
+Phase 2 ships **not because learning was demonstrated in 10 steps on a 4B + rank-16 LoRA @ LR=1e-6** (it can't be), but because the infrastructure is measurably correct and every gap has a concrete, measurement-backed fix.
+
+### 16.2 Ranked Phase 2.5 roadmap
+
+Ordered by **(expected lift × cheapness) / blast radius**. Pick one per branch.
+
+#### Tier 1 — one-line / config-only fixes (ship first, cheap)
+
+| # | Fix | File | Expected |
+|---|---|---|---|
+| T1.a | **Validation-race fix**: pass `timeout=7200` to `producer.stop()` at validation boundaries | `ray_trainer.py` + `ray_trainer_dapo.py` `fit()` — look for `_stop_continuous_producer_if_needed` callers tied to `_validate()` | Restores scheduled pass@k. Trade-off: validation delayed up to 1 h (one producer iter) at each `test_freq` boundary. No new race. |
+| T1.b | **Temperature-match IS fix**: scale trainer's `old_log_prob` logits by `1/T_rollout` before log-softmax, only on the Phase 2 path | `trainer_integration/verl/verl_custom/workers/actor/dp_actor.py` `compute_log_prob` | `clip_fraction` ~60% → ~25% (removes the ~0.35 of the 0.55 mean log-ratio that is pure T-mismatch). Unblocks gate 5. |
+| T1.c | **Second staleness gate**: log and alert on `rollout/staleness_steps_p95` (pool-adapter-age), not just `replay/sample_age_steps_p95` | `ray_trainer.py` metrics hook ~line 1685 | Makes gotcha #26 visible in WandB. Zero risk. |
+
+#### Tier 2 — small code changes (~50 LOC each)
+
+| # | Fix | File | Expected |
+|---|---|---|---|
+| T2.a | **`producer.pause()` / `producer.resume()`** — worker finishes current call, pushes, then blocks on a `threading.Event` instead of entering next iter. Validation path pauses/resumes instead of stop/restart. | `trainer_integration/verl/verl_custom/replay/continuous_producer.py` + both `fit()`s | Principled fix for gotcha #25. Replaces T1.a's "big timeout" with proper semantics. Still no async-cancel needed. |
+| T2.b | **Per-prompt producer instrumentation**: emit `(prompt_uid, resolved_ratio, wall_s)` list in `DAPO_PRODUCER_CALL` event | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` near the existing event emit | Distinguish iter-3-style regressions (pool drift vs dataset difficulty vs post-publish policy regression — gotcha #28). |
+| T2.c | **`is_weight/*` emitted unconditionally** (currently skipped when store near-empty / stats degenerate) | `core_algos.py` + `ray_trainer.py` metrics | Gate 5 measurable in all regimes; no more "SKIP" verdicts. |
+
+#### Tier 3 — architectural — highest lift, biggest blast radius
+
+| # | Fix | File / subsystem | Expected |
+|---|---|---|---|
+| T3.a | **Parallel DAPO producers** (N concurrent worker threads pulling from one dataloader, all pushing into the same store). Paper's Option A ingest filter is already per-producer; the store already has thread-safe push. | New multi-producer orchestration class; `continuous_producer.py` generalised to a pool | **Highest single lever.** Arrival rate ~N×, staleness holds ≤ K, trainer bursts overlap producer idle. Paper's clock-separation benefit engages. Main risk: pool saturation (4-child `OPENHANDS_NUM_WORKERS=32` is already at sweet spot — see gotcha #17; parallel producers will push past it). Expect to re-tune `OPENHANDS_NUM_WORKERS` down per producer, or add more pool children. |
+| T3.b | **Positive-bias sampling + AsymRE loss** (`docs/README.md §9`). Reclaims the 60 % filter-drop wall-clock as sparse-but-real gradient signal. | `TrajectoryStore.sample_mini_batch` (add positive-bias override), `core_algos.py` (AsymRE loss variant) | Converts 4 survivors → ~8 effective gradient-carrying groups per iter at n=8 (stronger at n=16). Orthogonal to T3.a. |
+| T3.c | **Pool-adapter-age-based eviction** (vs buffer-age). More conservative, aligns with what IS clipping actually operates on. | `TrajectoryStore.evict_stale` | Fixes the gotcha #26 divergence by making both metrics collapse to one. Small risk of over-eviction during slow-producer windows. |
+| T3.d | **Re-size `train_batch_size` at n=16**. At `train_batch_size=4, n=16`, each gradient step sees 1 group × 16 trajectories = 1 unique prompt. At `train_batch_size=8, n=16`, each step sees 2 unique prompts, 32 trajectories. Batch cost is the same tokens-per-step; diversity doubles. | `run_proagent_qwn3_4B_instruct_fullasync.sh` | Partial compensation for the Phase-1-vs-Phase-2 semantic shift. Only do this after T3.a lands — current producer can't feed 8 surviving groups per call in reasonable wall-clock. |
+
+### 16.3 Recommended branching order
+
+1. **Branch `phase2.5-t1-cheap`** off `55e94122`: T1.a + T1.b + T1.c in one commit each (three commits). Run a short n=16 smoke to verify `clip_fraction` drops and validation fires at step 10. Merge back to `full-async` as a patch release.
+2. **Branch `phase2.5-t2-pause`** off the updated `full-async`: T2.a (pause/resume), then T2.b (instrumentation). Re-run Run9 with matched config; expect iter-3-style regressions to become diagnosable.
+3. **Branch `phase2.5-t3a-parallel-producers`**: the big one. Keep as its own branch; merge only after a 100-step smoke demonstrates trainer utilisation > 20 %.
+4. **Branch `phase2.5-t3b-positive-bias`**: can proceed in parallel with T3.a — different code paths.
+
+Don't stack T1/T2 fixes into the same branch as T3.a — you want to attribute the clock-separation lift cleanly.
+
+### 16.4 Out of scope for Phase 2.5 (revisit after a learning run lands)
+
+- Sharded buffer (paper Appendix D.4 — no measured benefit at current scale).
+- Out-of-process buffer service (no multi-trainer use case).
+- Upstream `rollout_corr_helper.py` rebase / ESS metrics / IcePop — fork's TIS + temporal extension is sufficient through Phase 2.5.
+- Changing the LR / rank / SAVE_FREQ sweep until after T3.a — anything before it confounds the clock-separation measurement.
+
+### 16.5 Verification recipe for any Phase 2.5 branch
+
+```
+# Minimum smoke (~4 hours wall-clock)
+TOTAL_TRAINING_STEPS=20 SAVE_FREQ=5 NUM_TRAJ=16 bash scripts/_internal/s3_fullasync_docker.sh
+```
+
+Verify against Run9 baseline numbers in `run9_n16_report.md`:
+- `is_weight/clip_fraction` trend (T1.b gate)
+- `replay/sample_age_steps_p95` vs `rollout/staleness_steps_p95` divergence (T1.c gate)
+- step-10 and step-20 validation fire without §19 skip (T1.a / T2.a gate)
+- trainer utilisation (active-burst-time / wall-clock) (T3.a gate)
+- DAPO iter wall-clock distribution across 4+ iters (T3.a / T2.b)
+
+For larger runs (50+ steps), rerun the full 10-gate scorecard in §12 and add gate 4b from gotcha #26.
+
+### 16.6 Quick reference — files a Phase 2.5 agent touches
+
+| Area | Primary file |
+|---|---|
+| Producer thread, stop/pause semantics | `trainer_integration/verl/verl_custom/replay/continuous_producer.py` |
+| Store, sampling, eviction | `trainer_integration/verl/verl_custom/replay/trajectory_store.py` |
+| Plain GRPO trainer integration | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` |
+| DAPO trainer integration | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer_dapo.py` |
+| DAPO producer-mode reset + per-prompt instrumentation | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` |
+| TIS correction, is_weight metrics | `trainer_integration/verl/verl_custom/trainer/ppo/core_algos.py` |
+| Temperature match in log-prob forward | `trainer_integration/verl/verl_custom/workers/actor/dp_actor.py` |
+| Phase 2.5 launcher siblings | `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh`, `scripts/_internal/s3_fullasync_docker.sh` |
+
+### 16.7 Monitoring infra to carry forward
+
+- `/tmp/replay_monitor.py` — aggregates `PRODUCER_ITER` + `DAPO_PRODUCER_CALL` + pool `/health` into JSONL. Keep running across branches for comparable producer timing data.
+- `/tmp/replay-monitor.jsonl` — rotating log; 60 s cadence; safe to wipe between runs.
+- Log path convention: `/tmp/s3-fullasync-<run-label>.log` so multiple runs don't overwrite each other.
+
+---
+
+Last updated at the end of Phase 2 / start of Phase 2.5. Keep this file current — it is the next agent's starting point after you.

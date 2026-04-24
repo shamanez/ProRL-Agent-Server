@@ -212,6 +212,26 @@ Levers that probably need matched adjustment:
 - `wait_timeout_s=7200` should still be enough (one producer call cycle ~1h max).
 - **Do not** also raise `BATCH_SIZE` at the same time as `n` — change one variable per run.
 
+### Run9 actual results — read `run9_n16_report.md` for full data
+
+Shipped 2026-04-24 (baseline config + `NUM_TRAJ=16`, `test_freq=10`, `val_before_train=True`). Key deltas vs predictions:
+
+| Metric | Predicted | Observed (iters 1–4) | Delta |
+|---|---|---|---|
+| Producer wall per iter | 50–70 min | **53, 53, 80, 58 min** (iter 3 outlier) | Matches mean; iter-3 regression unexplained |
+| DAPO hard-filter drop rate | 30–50 % lower than n=8 | **18–40 %** (vs ~50 % at n=8) | Confirmed |
+| Per-gradient-step group count | Expected "1 group (16 traj) popped per step" | **1 group (16 traj)** | Confirmed |
+| Staleness cap | K=4 dormant | K=4 hit **twice** (step 4, step 9) | Tighter than expected — producer-bound worse at n=16 |
+| Trainer utilisation | — | **1–4 %** of wall-clock (steady-state bursty) | Producer-bound *worse* at n=16 |
+
+**Three new Phase 2.5 signals surfaced by Run9** (summary, see `run9_n16_report.md` for full evidence):
+
+1. **`is_weight/clip_fraction ≈ 60 %`** (proxy via `rollout_corr/log_ppl_diff > log 2`) — far above the < 20 % gate. Decomposition: temperature mismatch (rollout T=1.4 vs trainer T=1.0 forward) ≈ 0.35, vLLM↔FSDP numerical divergence ≈ 0.20, LoRA load path ≈ 0.05, actual policy drift ≈ 0.15. Only ~20 % of clipping is real drift. Cheapest fix: align the trainer's `old_log_prob` pass temperature to the rollout temperature (single-line patch in `dp_actor.py`). Expensive fix: lower T or speed producer.
+2. **Pool-adapter-age (`rollout/staleness_steps`) ≠ buffer-age (`replay/sample_age_steps`)** — can diverge by K or more whenever producer-wall > `save_freq × burst_duration`. New gate 4b needed: `rollout/staleness_steps_p95 ≤ K + save_freq`. Run9 hits K on pool-adapter-age at steps 4 and 9.
+3. **First fit()-time §19 skip during validation** — step 10 pass@k aborted because `producer.stop(timeout=10s)` cannot interrupt mid-`generate_sequences_dapo`. Direct fix: pass `timeout=7200` at validation boundaries. Principled fix: `producer.pause()` / `resume()` that lets the worker finish its current call then pauses between calls (~40 LOC).
+
+These replace the "expected on first full n=16 run" guesses above and are the measurement base for Phase 2.5.
+
 ## 11. Gotchas called out in previous work (applied here)
 
 - **§19 (cooperative producer stop)**: when `fit()` exits mid-producer-call, the daemon thread is left alive and the interpreter reclaims it. Benign; shows up as exactly 1 `§19 skip` at shutdown.
