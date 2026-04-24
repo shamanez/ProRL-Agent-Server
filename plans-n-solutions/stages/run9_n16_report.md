@@ -1,15 +1,15 @@
-# Run9 — n=16 + filter_groups=True + fully-async replay (Phase 2, baseline config)
+# Run9 — n=16 + filter_groups=True + fully-async replay (baseline config)
 
-Branch: `full-async`. Container: `s3-fullasync`. Launcher: `scripts/_internal/s3_fullasync_docker.sh`. Launched 2026-04-24T03:09:16Z. Log: `/tmp/s3-fullasync-n16-baseline.log`. Monitor JSONL: `/tmp/replay-monitor.jsonl`.
+Branch: `full-async-optimization`. Container: `s3-fullasync`. Launcher: `scripts/_internal/s3_fullasync_docker.sh`. Launched 2026-04-24T03:09:16Z. Log: `/tmp/s3-fullasync-n16-baseline.log`. Monitor JSONL: `/tmp/replay-monitor.jsonl`.
 
-**Purpose.** Observe clock-separation dynamics of the Phase 2 fully-async topology under the paper-aligned config (`n=16` trajectories per prompt, DAPO `filter_groups=True`, K=4 staleness cap, FIFO 128-group replay) to size Phase 2.5 priorities from measurement, not intuition.
+**Purpose.** Observe clock-separation dynamics of the fully-async topology under the paper-aligned config (`n=16` trajectories per prompt, DAPO `filter_groups=True`, K=4 staleness cap, FIFO 128-group replay) and drive the problem sheet from measurement, not intuition.
 
-**Config deltas vs Run8** (`s3_fullasync_docker.sh FILTER_GROUPS=True`, 50-step):
+**Config deltas vs the earlier n=8 A/B** (`s3_fullasync_docker.sh FILTER_GROUPS=True`, 50-step):
 
 - `actor_rollout_ref.rollout.n`: 8 → **16** (paper §5.1 for meaningful group-stat signal)
-- `trainer.test_freq`: -1 → **10** (validation every 10 steps — user directive)
+- `trainer.test_freq`: -1 → **10** (validation every 10 steps)
 - `trainer.val_before_train`: False → **True** (capture pass@k baseline at pv=0)
-- All other knobs unchanged — per user "stick to base, do not change the code".
+- All other knobs unchanged — "stick to base, do not change the code".
 
 ## Progress snapshot (as of 2026-04-24T06:55Z, +3 h 46 min wall-clock)
 
@@ -86,7 +86,7 @@ T+03:28:02*  DAPO iter 4 expected end (>= 54 min, likely 70–80 min based on it
 
 Observations:
 
-1. **`sample_age` (group-age) vs `staleness_steps` (pool-adapter-age) diverge when producer-wall exceeds save_freq.** Step 9 shows `sample_age_p50=0` (iter 3 groups are fresh) but `staleness_steps=4` (pool is 4 steps behind current trainer because there was no publish between step 5 and step 9). This is a new insight vs Run8 — the paper's "buffer age" intuition and the fork's "pool-adapter age" invariant measure **different things** and will diverge whenever iters last longer than `save_freq × burst_duration`.
+1. **`sample_age` (group-age) vs `staleness_steps` (pool-adapter-age) diverge when producer-wall exceeds save_freq.** Step 9 shows `sample_age_p50=0` (iter 3 groups are fresh) but `staleness_steps=4` (pool is 4 steps behind current trainer because there was no publish between step 5 and step 9). The paper's "buffer age" intuition and the fork's "pool-adapter age" invariant measure **different things** and will diverge whenever iters last longer than `save_freq × burst_duration`.
 2. **`log_ppl_diff` (log IS weight) oscillates 0.49–0.79 across all 10 steps** with no clear drift. With `tis_imp_ratio_cap=2`, the clip threshold is `log(2) ≈ 0.69`. **Steps 2, 3, 4, 5, 8, 10 all exceed this** → clipping is firing on roughly 60 % of steps.
 3. **K=4 hit twice** (step 4 and step 9) — both times rescued by a fresh publish on the next step. Had iter 3 been even 1 step longer, step 10's buffer draw would have been stale-evicted and trainer would have blocked on the `wait_for_fresh_group` path.
 
@@ -109,7 +109,7 @@ Two plausible causes (not yet instrumented):
 - **Dataset difficulty drift.** Iter 3's first 10 prompts happened to be harder (more zero-variance groups → more drops). DAPO drew 5 extras to compensate.
 - **Pool drift after publish 1.** pv=1 is the first *actual* trained policy (pv=0 = pristine SFT). If pv=1 regresses on some prompts (noise at 4-step LR=1e-6, plausible), the completion rate naturally dips. Publish 2's `publish_latency_s=33.6` (vs 18.2 at publish 1, `transfer_latency_s` jumped 4.0 → 19.0) adds independent evidence the pool was under unusual load during this window.
 
-Phase 2.5 needs per-iter per-prompt success rate logged to distinguish (would change `async_server_dapo.py` DAPO_PRODUCER_CALL event to emit list of `(prompt_uid, resolved_ratio)`).
+Needed: per-iter per-prompt success rate logged to distinguish (would change `async_server_dapo.py` DAPO_PRODUCER_CALL event to emit list of `(prompt_uid, resolved_ratio)`).
 
 ## Publish cadence
 
@@ -118,7 +118,7 @@ Phase 2.5 needs per-iter per-prompt success rate logged to distinguish (would ch
 | 1 | 5 | 0 → 1 | 18.21 | 4.03 | 14.19 | 4 | 232.61 |
 | 2 | 10 | 1 → 2 | **33.59** | **19.00** | 14.59 | 4 | 231.91 |
 
-Publish 2's `transfer_latency_s` is **4.7× publish 1** (19.0 vs 4.0 s). `vllm_load_latency_s` is stable (14.6 vs 14.2). The extra 15 s of wire-time correlates with iter 4 concurrent startup (dispatcher rebuild, 32 OpenHands workers re-initialising sessions) competing for the pool's inbound bandwidth. **Non-fatal but flags a Phase 2.5 follow-up**: consider gating publish-push on a low-activity window, or moving publish-transfer onto a dedicated HTTP client.
+Publish 2's `transfer_latency_s` is **4.7× publish 1** (19.0 vs 4.0 s). `vllm_load_latency_s` is stable (14.6 vs 14.2). The extra 15 s of wire-time correlates with iter 4 concurrent startup (dispatcher rebuild, 32 OpenHands workers re-initialising sessions) competing for the pool's inbound bandwidth. **Non-fatal** — flags a follow-up: consider gating publish-push on a low-activity window, or moving publish-transfer onto a dedicated HTTP client.
 
 ## Validation trajectory
 
@@ -144,21 +144,21 @@ val-aux/swe-gym/reward_metrics/max_turn_ratio/mean@2: 0.000
   (still mid-generate_sequences); will retry on next save boundary
 ```
 
-**This is the cooperative-skip path from fix `590f8281` engaging for the first time during fit() in any Phase 2 run.** Run8 saw 1 §19 at shutdown (expected benign). This run has 1 **during fit()** — at step 10, with `val_before_train=True + test_freq=10` we expected a pass@k datapoint here; instead the trainer chose safety over contention with the producer.
+**This is the cooperative-skip path from fix `590f8281` engaging for the first time during fit().** One §19 **during fit()** — at step 10, with `val_before_train=True + test_freq=10` we expected a pass@k datapoint here; instead the trainer chose safety over contention with the producer.
 
 **Root cause.** Step 10's sequence is: sample → update_actor → adv → save_checkpoint → publish_lora (pv=2) → `_validate()` called. `_validate()` wants an exclusive pool, so it calls `producer.stop(timeout=10.0)`. The producer is mid-`generate_sequences_dapo(iter=4)` — a 53+ min call. Stop's cooperative-flag check only happens at the *top* of the worker loop (between iters), so the flag lands but the worker is deep in an async IO wait. Timeout elapses → producer stays alive → `_validate()` skips to avoid double-drain-on-pool semantics.
 
 **Next validation opportunity.** `save_freq=5` triggers at step 15 and publish happens. `_validate()` retries at the next save boundary, which is step 15. But `test_freq=10` means only step 10, 20, 30… are validation-eligible. So the next real attempt is step 20 (~7 h from now at current pace). At step 20, the same race recurs unless either (a) iter 5 happens to be between generate_calls when step 20 hits — highly dependent on alignment — or (b) we fix the race.
 
-**Phase 2.5 fix candidates** (ordered by least-invasive):
+**Fix candidates** (ordered by least-invasive):
 
 1. **Increase `producer.stop` timeout at validation boundary to a large value** (e.g. 300 s). The worst case is that `_validate()` waits for the in-flight DAPO iter to finish (~53–80 min) before running. Slow, but deterministic. — simple config change.
 2. **Add a `producer.pause()` / `producer.resume()` path** that lets the worker finish its current `generate_sequences_dapo` call, pushes results to the buffer as normal, then pauses instead of re-entering the next iter. `_validate()` runs during the pause window. — ~40 LOC in `continuous_producer.py`.
-3. **Reserve pool child #3 for validation** — permanent split, validation always has dedicated capacity. — infra change (4-way → 3+1 pool topology), affects both Phase 1 and 2. **Do not do.**
+3. **Reserve pool child #3 for validation** — permanent split, validation always has dedicated capacity. — infra change (4-way → 3+1 pool topology). **Do not do.**
 
 Option **1** is a zero-code knob flip — `ContinuousRolloutProducer.stop(timeout=…)` is already a parameter. Let the validation path pass `timeout=7200` (2 h). Simple fix, ships with report.
 
-Option **2** is the principled Phase 2.5 answer — it's the correct semantic for clock separation. Defer unless Option 1 proves flaky.
+Option **2** is the principled answer — it's the correct semantic for clock separation. Defer unless Option 1 proves flaky.
 
 ## Reward signal (steps 1–10)
 
@@ -175,9 +175,9 @@ Option **2** is the principled Phase 2.5 answer — it's the correct semantic fo
 | 9 | 0.0625 | 0.014 | 0.81 | 1 (then publish) |
 | 10 | 0.8125 | -0.023 | 0.42 | 2 |
 
-Pattern: **within each iter's burst, rewards tend to rank-correlate with which prompts DAPO happened to draw** — first two bursts are "easy at head, hard at tail" (iter 1: 0.06 → 0.19 → 0.37 → 0.44; iter 2: 0.93 → 0.87 → 0.12 → 0.06). No cross-iter trend yet — 10 steps on 4B + rank-16 LoRA @ 1e-6 is nowhere near the paper's 5k-50k step learning window. **This is consistent with Run8** and is expected.
+Pattern: **within each iter's burst, rewards rank-correlate with which prompts DAPO happened to draw** — first two bursts are "easy at head, hard at tail" (iter 1: 0.06 → 0.19 → 0.37 → 0.44; iter 2: 0.93 → 0.87 → 0.12 → 0.06). No cross-iter trend yet — 10 steps on 4B + rank-16 LoRA @ 1e-6 is nowhere near the paper's 5k-50k step learning window. Expected.
 
-## Headline Phase 2.5 signals (ranked, updated after 10 steps)
+## Headline signals (ranked, updated after 10 steps)
 
 ### 1. Trainer starves ~99 % of the time at n=16
 
@@ -185,13 +185,13 @@ Pattern: **within each iter's burst, rewards tend to rank-correlate with which p
 
 **Leverage, ranked:**
 
-- **a. Parallel DAPO producers** (Phase 2.5 Cut A). At 2 concurrent workers: arrival rate ~2× → staleness holds ≤ K, trainer bursts overlap producer idle. **Highest expected lift.**
-- **b. Positive-bias + AsymRE loss** (Phase 2.5 §2). Reclaims the 60 % filter-drop wall-clock as sparse-but-real gradient signal. Doesn't speed up iter wall, but converts 4 survivors → ~8 effective "gradient-carrying" groups per iter.
-- **c. Producer wall-time instrumentation**. Iter 3's 80-min slowdown is unexplained. Emit per-prompt `(uid, resolved_ratio, wall_s)` in DAPO_PRODUCER_CALL. Cheap.
+- **a. Parallel DAPO producers.** At 2 concurrent workers: arrival rate ~2× → staleness holds ≤ K, trainer bursts overlap producer idle. **Highest expected lift.**
+- **b. Bigger buffer + positive-bias sampling.** Keep every rollout (survived or not) and let the trainer sample uniformly from a large pool of pre-computed `(logprobs, advantages)`. Reclaims the 60 % filter-drop wall-clock as sparse-but-real gradient signal. Doesn't speed up iter wall, but converts 4 survivors → ~8 effective "gradient-carrying" groups per iter.
+- **c. Producer wall-time instrumentation.** Iter 3's 80-min slowdown is unexplained. Emit per-prompt `(uid, resolved_ratio, wall_s)` in DAPO_PRODUCER_CALL. Cheap.
 
 ### 2. Pool-adapter-age ≠ buffer-age when iters are slow
 
-New insight from step 9: `rollout/staleness_steps=4` (pool-adapter-age) while `replay/sample_age_steps=0` (buffer-age). The clip mechanism operates on trainer-vs-pool logprob divergence, which correlates with pool-adapter-age. But the buffer's eviction policy uses buffer-age. **They can diverge by K or more in this regime.** This means `replay/sample_age_steps_p95 ≤ K=4` (success gate 4) is *not sufficient* evidence the IS weights are healthy — we need both metrics tracked. Phase 2.5 should:
+From step 9: `rollout/staleness_steps=4` (pool-adapter-age) while `replay/sample_age_steps=0` (buffer-age). The clip mechanism operates on trainer-vs-pool logprob divergence, which correlates with pool-adapter-age. But the buffer's eviction policy uses buffer-age. **They can diverge by K or more in this regime.** Meaning `replay/sample_age_steps_p95 ≤ K=4` (success gate 4) is *not sufficient* evidence the IS weights are healthy — we need both metrics tracked.
 
 - Rename/clarify the two metrics in handsoff.
 - Add `gate 4b`: `rollout/staleness_steps_p95 ≤ some-bound` (probably K + save_freq = 9 for current config).
@@ -199,11 +199,11 @@ New insight from step 9: `rollout/staleness_steps=4` (pool-adapter-age) while `r
 
 ### 3. Validation-vs-producer race (NEW)
 
-First-fit()-time §19 skip. The fix is straightforward (option 1 or 2 above) and does not block the current run. But it means **we will not get a step-10 pass@k datapoint** — the first in-training transfer measurement slips to step 20, more than tripling the time-to-first-eval. Priority fix for Phase 2.5 Cut 0.
+First-fit()-time §19 skip. The fix is straightforward (option 1 or 2 above) and does not block the current run. But it means **we will not get a step-10 pass@k datapoint** — the first in-training transfer measurement slips to step 20, more than tripling the time-to-first-eval. Priority fix.
 
 ### 4. Iter-3 wall-clock regression is a signal to watch
 
-Iter 3 = 80 min vs expected 53 min. Iter 4 may or may not recover. If a trend (iter 5, 6 also long), it's a pool-degradation signal (vLLM child memory pressure, KV cache fragmentation over time). Cheap mitigation: scheduled pool `/sleep` + `/wake_up` at each publish boundary. Expensive mitigation: restart children every N publishes.
+Iter 3 = 80 min vs expected 53 min. Iter 4 recovered to 58 min — likely dataset noise, not pool degradation (see addendum). Still worth instrumenting so future regressions can be diagnosed without waiting for another outlier.
 
 ### 5. Publish latency jumped 1.84× on second publish
 
@@ -221,13 +221,13 @@ Iter 3 = 80 min vs expected 53 min. Iter 4 may or may not recover. If a trend (i
 | 5 | `is_weight/p99 < 10`, `clip_fraction < 0.2` | **FAIL (proxy)** | `log_ppl_diff` > `log(2)=0.69` on 6 of 10 steps → clip fraction ~60 % (well above 20 % cap). Mechanism working correctly; **K=4 + iter-length combination is too tight.** |
 | 6 | `critic/rewards/mean` trends up | inconclusive | mean per burst: 0.27, 0.50, 0.30 — flat with noise (expected for 10 steps on 4B LoRA) |
 | 7 | Offline A/B on validation.parquet | **BLOCKED** | step-10 validation skipped via §19; next attempt step 20 |
-| 8 | Both `filter_groups={False,True}` land clean | in-progress | Run8 (True) and task #22 (False) PASS; this run PASS-so-far |
+| 8 | Both `filter_groups={False,True}` land clean | in-progress | `filter_groups=True` PASS-so-far; `filter_groups=False` task still pending |
 | 9 | Zero fit()-time tracebacks / §19 skips | **FAIL (new)** | 1 fit()-time §19 skip at step 10 — validation skipped, no corruption |
-| 10 | Token-in/token-out preserved | **PASS** | Cut 1 golden test holds; no re-tokenization drift observed |
+| 10 | Token-in/token-out preserved | **PASS** | golden test holds; no re-tokenization drift observed |
 
-**Gates 5, 7, 9 failing.** Each has a concrete Phase 2.5 fix identified:
+**Gates 5, 7, 9 failing.** Each has a concrete fix identified:
 
-- Gate 5 (`clip_fraction > 0.2`): raise K from 4 to 6–8 *or* speed producer to keep staleness ≤ 2. Lever (a) above.
+- Gate 5 (`clip_fraction > 0.2`): raise `tis_imp_ratio_cap` (the dominant ~0.55 log-ratio is T=1.4 vs T=1.0 numerical mismatch, not real drift — see `current_bottlenecks_and_problems.md` #3). Lever (a) above also helps by shrinking pool-adapter age.
 - Gate 7 (validation blocked): fix §19 validation race. Lever (3) above.
 - Gate 9 (fit()-time §19): same fix as gate 7.
 
@@ -243,13 +243,13 @@ Iter 3 = 80 min vs expected 53 min. Iter 4 may or may not recover. If a trend (i
 
 ## Bottom line
 
-The n=16 config hits **three distinct Phase 2.5 signals in 10 steps** that Run8 (n=8) did not surface:
+The n=16 config surfaces **three distinct signals in 10 steps** that the earlier n=8 A/B did not:
 
-1. **Clip fraction ~60 %** (vs paper target < 20 %) — the clip mechanism is working but saturated, which means the gradient signal is being heavily biased by the clamp. Needs either faster producer (lever a) or larger K + deeper understanding of `tis_imp_ratio_cap` behaviour.
+1. **Clip fraction ~60 %** (vs paper target < 20 %) — clip mechanism is working but saturated, meaning the gradient signal is being heavily biased by the clamp. Dominant term is T=1.4 vs T=1.0 numerical mismatch, not real off-policy drift. Fix: raise `tis_imp_ratio_cap` (cheap) or shrink pool-adapter age via parallel producers.
 2. **Pool-adapter-age vs buffer-age decoupling** — metric-semantics issue, needs disambiguation in docs + a second gate.
-3. **Validation-vs-producer race** — first real fit()-time §19 skip, gated path to first pv > 0 pass@k datapoint. Direct fix identified.
+3. **Validation-vs-producer race** — first real fit()-time §19 skip, gates the path to first pv > 0 pass@k datapoint. Direct fix identified.
 
-These are the measurements to drive the Phase 2.5 brainstorm. All three are actionable, all three have concrete proposed fixes, none require the paper's positive-bias/AsymRE extension (which is still the right long-term target).
+All three are actionable and have concrete proposed fixes.
 
 ## Addendum — iter 4 recovery (2026-04-24T08:00Z, +4h 51m)
 
@@ -262,6 +262,6 @@ Iter 4 completed: `wall_s=3497.6, drawn=11, survived=4, dropped_filter=2, effect
 | **3** | **4824** | **15** | **4** | **6** | **434.7** |
 | 4 | 3498 | 11 | 4 | 2 | 599.6 |
 
-Mean (excluding iter 3 as outlier): 3285.7 s / 653 eff_tps. Iter 3 remains unexplained — pool noise, dataset difficulty drift, or post-publish-1 policy regression. Priority: emit per-prompt `(uid, resolved_ratio, wall_s)` in DAPO_PRODUCER_CALL so Phase 2.5 can distinguish.
+Mean (excluding iter 3 as outlier): 3285.7 s / 653 eff_tps. Iter 3 remains unexplained — pool noise, dataset difficulty drift, or post-publish-1 policy regression. Priority: emit per-prompt `(uid, resolved_ratio, wall_s)` in DAPO_PRODUCER_CALL so we can distinguish.
 
 **Gate 9 (no fit()-time §19)** still FAIL as documented (step 10 validation skipped). **Gate 5 (`clip_fraction < 0.2`)** still FAIL — `log_ppl_diff` has not trended below log(2) in 16 steps. Gates unchanged overall.

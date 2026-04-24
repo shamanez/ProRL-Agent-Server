@@ -8,9 +8,9 @@ ProRLAgent Server is a scalable multi-turn rollout service for training/evaluati
 
 ## Start here
 
-If you are a planning / implementation agent landing on this repo in a new session: read **[`plans-n-solutions/handsoff.md`](plans-n-solutions/handsoff.md)** end to end before you touch anything. That doc is the single source of truth for the current phase (fully-async decoupled agentic RL) and includes the launch sequence, credentials, observability, skills/agents to use, gotchas, and success gates.
+If you are a planning / implementation agent landing on this repo in a new session: read **[`plans-n-solutions/handsoff.md`](plans-n-solutions/handsoff.md)** end to end before you touch anything. That doc is the single source of truth for the current system (fully-async decoupled agentic RL) — topology, launch sequence, credentials, observability, pointer table, gotchas. The open problem sheet is **[`plans-n-solutions/stages/current_bottlenecks_and_problems.md`](plans-n-solutions/stages/current_bottlenecks_and_problems.md)** — that's the work queue.
 
-This file (`CLAUDE.md`) covers the **architectural invariants** that hold across phases. `handsoff.md` covers **what to do this phase**.
+This file (`CLAUDE.md`) covers the **architectural invariants**. `handsoff.md` covers how to run, debug, and extend the live system.
 
 ## Running the rollout server or training
 
@@ -20,7 +20,7 @@ Use the canonical launchers — do not invent new invocations. The topology is *
 |---|---|---|
 | ProRL FastAPI server | trainer box (host, poetry venv) | `bash scripts/_internal/s0_prorl.sh` |
 | Remote vLLM pool (4 children, ports 8100–8103) | EC2 `vllm-instance` (SSH alias) | `bash scripts/serving/launch_remote_vllm_pool.sh start` |
-| Decoupled GRPO trainer (Docker, 8 × A100 FSDP) | trainer box | `bash scripts/_internal/s2_weightsync_docker.sh` (Phase 1) |
+| Decoupled GRPO trainer (Docker, 8 × A100 FSDP) | trainer box | `bash scripts/_internal/s3_fullasync_docker.sh` |
 
 **Frozen files** (reproduction depends on them — make siblings, do not edit):
 - `scripts/_internal/s2_weightsync_docker.sh`
@@ -65,7 +65,7 @@ Default sandbox is **Singularity/Apptainer**, not Docker — rootless single-fil
 
 ### RL trainer integration
 
-`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack:** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. Phase 1 (closed-loop rank-16 LoRA weight-sync) is DONE on branch `decoup-weight-sync`; Phase 2 (fully-async, bounded replay store, off-policy correction) is in flight on branch `full-async`. See `plans-n-solutions/handsoff.md` for the current phase spec, topology, and success gates.
+`trainer_integration/verl/` is a patch package on top of a pinned verl checkout. **Current stack:** `shamanez/verl` main (v0.8.0.dev, commit `910ba344`) at `/tmp/verl` + Docker image `verlai/verl:vllm018.dev1` (vLLM 0.18, PyTorch 2.6+). Training runs inside the container; ProRL runs on the host at `:8006`. The loop is fully-async decoupled agentic RL: rollouts stream continuously into a bounded in-process replay store; trainer samples with clipped temporal IS correction; rank-16 LoRA adapters publish to the vLLM pool on `save_freq`. Both plain GRPO and DAPO (`filter_groups=True`) are wired. See `plans-n-solutions/handsoff.md` for topology, pointer table, gotchas, and the open problem sheet.
 
 ## Conventions
 

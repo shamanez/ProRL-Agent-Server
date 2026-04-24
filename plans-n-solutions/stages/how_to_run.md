@@ -1,6 +1,6 @@
-# Runbook — how to execute a Phase 2 fully-async training run
+# Runbook — how to execute a fully-async training run
 
-Authoritative launch procedure for `full-async` branch. Mirrors `handsoff.md §6` with the full command sequence, credential sourcing, env-knob matrix, monitoring, stop/resume, and failure runbook.
+Authoritative launch procedure for the current branch. Companion to `handsoff.md §2` — this doc adds the env-knob matrix, monitoring, stop/resume, and failure runbook.
 
 Source of truth: `scripts/_internal/s3_fullasync_docker.sh` (outer) + `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh` (inner). **Do not invent new invocations.**
 
@@ -100,12 +100,12 @@ The outer docker script:
 
 | Var | Default | What it controls | When to override |
 |---|---|---|---|
-| `REPLAY_ENABLE` | `True` | Master switch for TrajectoryStore + temporal IS | Set `False` to fall back to Phase-1 lock-step |
+| `REPLAY_ENABLE` | `True` | Master switch for TrajectoryStore + temporal IS | Set `False` to fall back to lock-step (matches baseline `s2_weightsync_docker.sh`) |
 | `BUFFER_SIZE` | `128` | Max surviving groups held in replay store (= 4 × train_batch_size × n) | Shrink if `sample_age_p95` near K; grow if replay reuse wanted |
 | `STALENESS_CUTOFF_K` | `4` | Hard FIFO staleness eviction (steps) | Lower if IS clip fraction > 0.2 |
 | `PRODUCER_BATCH_SIZE` | `4` | Groups per DAPO producer call (= train_batch_size) | Keep equal to train_batch_size |
 | `USE_TEMPORAL_IS` | `True` | Gate for clipped IS correction in `core_algos.py` | Disable for pure on-policy A/B |
-| `CONTINUOUS_PRODUCER` | `True` | Daemon producer thread (vs inline lock-step) | `False` reverts to Phase-1 lock-step rollout |
+| `CONTINUOUS_PRODUCER` | `True` | Daemon producer thread (vs inline lock-step) | `False` reverts to lock-step rollout |
 | `FILTER_GROUPS` | `False` | DAPO filter_groups.enable | Flip to `True` ONLY after filter=False run clean |
 | `TOTAL_EPOCHS` | `10` | — | Scale up for full runs |
 | `TOTAL_TRAINING_STEPS` | `500` | — | `2` for smoke, `5000+` for learning |
@@ -296,39 +296,40 @@ grep -c Traceback /tmp/smoke.log   # 0
 
 ## Frozen — do not edit
 
-- `scripts/_internal/s2_weightsync_docker.sh` (Phase 1 baseline)
-- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` (Phase 1 baseline)
+- `scripts/_internal/s2_weightsync_docker.sh` (matched-`global_steps` A/B baseline)
+- `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` (same)
 - `dev_config/python/**` (lint/type/format configs — require explicit approval to change)
 - `/tmp/verl/**` (pinned verl checkout at commit `910ba344`)
 
 ## Validation after a run
 
-No in-run validation (disabled for wall-clock). Offline A/B:
+In-run validation is optional (`trainer.test_freq`, `trainer.val_before_train`). Offline A/B:
 
 ```bash
 # Via eval-harness skill on validation.parquet (23 prompts, input_hash pass@k)
-# Compares full-async checkpoint vs decoup-weight-sync baseline at matched global_steps.
+# Compares full-async checkpoint vs baseline at matched global_steps.
 # Triggered from Claude Code: /eval-harness ... (see .claude/skills/)
 ```
 
-Handsoff §12 success gates (all must pass to ship):
+Success signals (all should hold on a healthy run):
 1. `weight_sync/endpoints_failed == 0` end-to-end
 2. ≥ 4 `/reload_lora` events per 20 steps at `save_freq=5`
 3. Zero 5xx on `/generate` during publishes
-4. `replay/sample_age_steps_p95 ≤ K` (K=4)
-5. `is_weight/p99 < 10`, `is_weight/clip_fraction < 0.2`
-6. `critic/rewards/mean` trends up
+4. `replay/sample_age_steps_p95 ≤ K` (K=4) AND `rollout/staleness_steps_p95 ≤ K + save_freq`
+5. `is_weight/p99 < 10`, `is_weight/clip_fraction < 0.2`  *(currently FAIL — problem #3)*
+6. `critic/rewards/mean` trends up on long runs
 7. Offline A/B: full-async ≥ baseline pass@k on validation.parquet
 8. Both `filter_groups={False, True}` runs land clean
-9. Zero tracebacks, zero §19 skipped-validates
-10. Token-in/token-out golden-file preserved (Cut 1 test)
+9. Zero tracebacks, zero §19 skipped-validates  *(currently FAIL at step-10 — problem #7)*
+10. Token-in/token-out golden-file preserved
 
 ## Related docs
 
-- `plans-n-solutions/handsoff.md` — phase spec, gotchas (§10), topology (§4), credentials (§5)
-- `plans-n-solutions/stages/full_async.md` — Phase 2 design decisions, §5a testing order
-- `plans-n-solutions/stages/run8_findings.md` — Phase E2 DAPO gate evidence
+- `plans-n-solutions/handsoff.md` — topology, pointer table, gotchas, credentials
+- `plans-n-solutions/stages/current_bottlenecks_and_problems.md` — open problems
+- `plans-n-solutions/stages/run9_n16_report.md` — moment-of-truth run evidence
+- `plans-n-solutions/stages/replay_dynamics.md` — producer/store/trainer interaction
 - `plans-n-solutions/stages/latencies.md` — per-component latency / TPS breakdown
 - `openhands/nvidia/README.md` — FastAPI job lifecycle
 - `openhands/llm/nvidia/README.md` — token-in/token-out invariant
-- `CLAUDE.md` — architectural invariants across phases
+- `CLAUDE.md` — architectural invariants

@@ -1,6 +1,6 @@
-# Latency / TPS breakdown — run8 Phase E2 (filter_groups=True, 50-step DAPO)
+# Latency / TPS breakdown — 50-step DAPO reference (filter_groups=True, n=8)
 
-Source log: `/tmp/s3-fullasync.log`. Branch `full-async`. Data window: steps 7-46 (n=40 per-step samples; step 6 excluded — cumulative-from-launch).
+Source log: `/tmp/s3-fullasync.log`. Data window: steps 7-46 (n=40 per-step samples; step 6 excluded — cumulative-from-launch). Kept as a reference baseline for the n=8 regime; Run9 (n=16) numbers live in `run9_n16_report.md`.
 
 Purpose: decide where to invest tuning effort. Numbers below are extracted from existing verl metric lines and the `publish_lora_adapter` JSON event stream.
 
@@ -39,7 +39,7 @@ Adapter size: 244.5 MB mean. S3 upload bandwidth 14.2 MB/s; vLLM 4-child load ba
 ## DAPO pipeline
 
 - 11 `generate_sequences_dapo` producer calls (bug #16 reset fires each call: "dropped N leftover jobs" × 11).
-- 54 hard-filter events across 45 unique prompts (see `run8_findings.md`).
+- 54 hard-filter events across 45 unique prompts.
 - 81% of filtered groups are 0/8 (all-fail), 19% are 8/8 (all-pass).
 - Repeat filtering confirmed: `dask-8903` × 3, `dask-6809` × 3, `MONAI-4796` × 3.
 
@@ -80,7 +80,7 @@ All additions are single JSON lines at existing log boundaries; no behavior chan
 | Signal threshold | Action |
 |---|---|
 | Raw vLLM TPS < 100 tok/s/GPU | Bump pool children or `tp_size`; reclaim vLLM-side waste |
-| `groups_dropped_filter / groups_drawn > 0.5` | Flip to `filter_groups=False` + replay reuse (Phase 2 primary config) |
+| `groups_dropped_filter / groups_drawn > 0.5` | Flip to `filter_groups=False` + replay reuse |
 | Trainer idle > 70% of step time | Lower `train_batch_size` or raise `producer_batch_size` |
 | `sample_age_steps_p95` approaches K=4 | Raise K or lower `save_freq` |
 | `is_weight/clip_fraction > 0.2` | Shrink buffer_size or lower K; TIS clipping masking drift |
@@ -159,6 +159,6 @@ pv:15  publish:35.38 xfer:19.06 load:16.32
 
 ## Related docs
 
-- `plans-n-solutions/stages/run8_findings.md` — plumbing gates + DAPO filter pathology
-- `plans-n-solutions/stages/full_async.md` — Phase 2 design
-- `plans-n-solutions/handsoff.md` — Phase 2 spec + gotchas (incl. §19 cooperative stop, §20 GIL atomicity)
+- `plans-n-solutions/stages/run9_n16_report.md` — moment-of-truth n=16 run evidence
+- `plans-n-solutions/stages/replay_dynamics.md` — producer / store / trainer interaction reference
+- `plans-n-solutions/handsoff.md` — topology, pointer table, gotchas (incl. §19 cooperative stop, §20 GIL atomicity)
