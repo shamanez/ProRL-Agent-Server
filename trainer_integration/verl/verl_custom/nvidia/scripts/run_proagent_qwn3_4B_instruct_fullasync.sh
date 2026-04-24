@@ -29,12 +29,7 @@ CKPT_PATH='/path/to/outputs'
 
 
 BATCH_SIZE=4
-# Phase 2: cap tail at 20 tool calls (was 30). Qwen3-4B on SWE-Gym
-# converges or times out well before turn 20; the extra iterations
-# only extend worst-case producer wait (20×600s = 3.3h vs 30×1000s =
-# 8.3h). Shorter tail → fewer trainer-stale ticks waiting on the
-# slowest group member.
-MAX_NUM_ITERS=20
+MAX_NUM_ITERS=30
 # DAPO-aligned: 8 samples per prompt balances GRPO group-stat signal
 # (meaningful with filter_groups on) against rollout cost.
 NUM_TRAJ=8
@@ -119,7 +114,7 @@ python3 -m verl_custom.trainer.main_ppo \
     +actor_rollout_ref.rollout.openhands_num_workers=$OPENHANDS_NUM_WORKERS \
     +actor_rollout_ref.rollout.task_type=swegym \
     +actor_rollout_ref.rollout.chat_template_name=qwen3_chat_template_generation \
-    +actor_rollout_ref.rollout.openhands_timeout=600 \
+    +actor_rollout_ref.rollout.openhands_timeout=1000 \
     +actor_rollout_ref.actor.masking=True \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
