@@ -167,9 +167,9 @@ docker run --rm --name "$CNAME" \
       trainer.val_before_train=False \
       trainer.test_freq=-1 \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
-      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=32768 \
-      actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=32768 \
-      actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=32768 \
+      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=36864 \
+      actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=36864 \
+      actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=36864 \
       +actor_rollout_ref.actor.calculate_entropy=false \
       actor_rollout_ref.actor.entropy_checkpointing=true \
       data.train_files=[/data/SkyRL-v0-293/train.parquet] \
