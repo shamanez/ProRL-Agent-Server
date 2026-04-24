@@ -195,16 +195,20 @@ class ContinuousRolloutProducer:
     # ---- worker -------------------------------------------------------------
 
     def _run(self) -> None:
+        import json as _json  # noqa: PLC0415
+
         prompts_iter = (
             self._prompts_iter_factory()
             if self._prompts_iter_factory is not None
             else None
         )
+        store_full_idles = 0
         try:
             while not self._stop_event.is_set():
                 # Back off when the store is at capacity — no point generating
                 # more rollouts the trainer is about to evict FIFO.
                 if self._store_full():
+                    store_full_idles += 1
                     if self._stop_event.wait(timeout=self._poll_interval_s):
                         break
                     continue
@@ -212,6 +216,7 @@ class ContinuousRolloutProducer:
                 # Drive one batch. Plain GRPO pulls the next dataloader batch
                 # from our iterator; DAPO pulls internally from its own
                 # dataloader.
+                iter_start = time.monotonic()
                 if prompts_iter is not None:
                     try:
                         gen_batch = next(prompts_iter)
@@ -234,6 +239,23 @@ class ContinuousRolloutProducer:
                     behavior_policy_version=policy_version,
                     current_step=current_step,
                 )
+                # latencies.md §5 addition #2 — emit one line per producer
+                # iteration so the log can reconstruct producer throughput
+                # independent of the DAPO-internal metrics.
+                logger.info(
+                    'PRODUCER_ITER %s',
+                    _json.dumps(
+                        {
+                            'event': 'producer_iter',
+                            'wall_s': round(time.monotonic() - iter_start, 3),
+                            'store_full_idles': store_full_idles,
+                            'policy_version': policy_version,
+                            'current_step': current_step,
+                            'store_num_groups': int(self._store.num_groups()),
+                        }
+                    ),
+                )
+                store_full_idles = 0
         except BaseException as exc:  # noqa: BLE001
             logger.exception('ContinuousRolloutProducer worker crashed')
             self._exception = exc

@@ -155,6 +155,40 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
             'generate_sequences': total_end_time
             - total_start_time,  # Main timing metric
         }
+
+        # latencies.md §5 addition #1 — single JSON event summarizing this
+        # producer call. Consumers: log-scraper in stages/replay_dynamics.md
+        # §9 decision table (effective_tps, groups_drawn/survived/dropped).
+        import json as _json  # noqa: PLC0415
+
+        wall_s = total_end_time - total_start_time
+        stats = getattr(self, '_last_dapo_call_stats', {}) or {}
+        try:
+            tokens_out = int(out_batch.batch['responses'].numel())
+            trajectories_out = int(out_batch.batch['responses'].shape[0])
+        except Exception:  # noqa: BLE001
+            tokens_out = 0
+            trajectories_out = 0
+        effective_tps = float(tokens_out / wall_s) if wall_s > 0 else 0.0
+        logger.info(
+            'DAPO_PRODUCER_CALL %s',
+            _json.dumps(
+                {
+                    'event': 'dapo_producer_call',
+                    'wall_s': round(wall_s, 3),
+                    'openhands_s': round(request_end_time - request_start_time, 3),
+                    'convert_s': round(
+                        convert_results_end_time - convert_results_start_time, 3
+                    ),
+                    'groups_drawn': stats.get('groups_drawn', 0),
+                    'groups_survived': stats.get('groups_survived', 0),
+                    'groups_dropped_filter': stats.get('groups_dropped_filter', 0),
+                    'trajectories_out': trajectories_out,
+                    'tokens_out': tokens_out,
+                    'effective_tps': round(effective_tps, 2),
+                }
+            ),
+        )
         return out_batch
 
     def process_batch(self, batch_dict):
@@ -553,6 +587,14 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
             )
             # put the remaining train data back to the job queue
             await self.push_remaining_train_data_to_job_queue()
+
+            # latencies.md §5 addition #1 — stash filter-group counts for
+            # generate_sequences_dapo to emit alongside wall/throughput.
+            self._last_dapo_call_stats = {
+                'groups_drawn': len(instance_ids_before_filtering),
+                'groups_survived': len(instance_ids_in_output_batch),
+                'groups_dropped_filter': len(instance_ids_in_filtered_instance_ids),
+            }
 
             return all_responses, output_batch
         except Exception as e:
