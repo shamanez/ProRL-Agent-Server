@@ -254,7 +254,51 @@ Goal of the next run: **fast-improving DAPO** — reward trend clearly up across
 
 ---
 
-## Reproducing (Run9 baseline)
+## Cut 6 production validation + Cut 8 follow-up (2026-04-25/26)
+
+The Cut 1–6 plan landed and ran a 25-step DAPO production training (`/tmp/s3-fullasync-cut6-prod.log`). Outcomes:
+
+| Goal | Achieved? | Evidence |
+|---|---|---|
+| Trainer stall → 0 after warmup | **Partially** | Steps 11→12 ran in 10 min (warm buffer), but call-boundary gaps re-introduced ~26 min stalls between calls #3 and #4. |
+| `is_weight/clip_fraction < 0.2` | Cut 2 (cap 2→5) shipped; observed clip held to ~0.06–0.44 range across steps 1–11, well below the 60 % seen in Run9. | `response_length/clip_ratio` 0.06–0.44; Cut 1 (1536→4096) holding. |
+| ≥ 2 in-training pass@k datapoints | Not measured this run — `test_freq=-1` for the prod 25-step. | (Cut 8 prep-100 run sets `test_freq=10` to capture this.) |
+| Trainer util > 10 % | Yes, when buffer is warm. Buffer-bound during call boundaries pulls the average down. | Mixed step pacing: 10 min ↔ 60 min depending on call phase. |
+
+**The new finding (call-boundary dead gap).** Cut 5's eager-push smoothed pushes within a call, but DAPO's per-call lifecycle still has a hard ~26 min trough between calls (full description in handsoff §31). Two non-exclusive levers close it:
+
+| Lever | Effect | Cost |
+|---|---|---|
+| **Cut 8 — bigger `gen_batch_size` (default 16 → 32)** | Longer hot phase, fewer call boundaries per hour, lower fraction of wall in the trough. | One env-var bump. Trivial; reversible. |
+| **Cut 7 — multi-producer fan-out** | Producer B's hot phase covers producer A's trough; trainer never sees the gap. | Code change; OH-server `/start`/`/stop` race needs fix (per-producer OH server, or no-op the lifecycle). |
+
+**Decision: validate Cut 8 first via prep-100 run, defer Cut 7 to a fresh session.** Run the 100-step prep with `GEN_BATCH_SIZE=32 TEST_FREQ=10` (env overrides; defaults in `s3_fullasync_docker.sh` stay at 4× and `-1` until the run completes cleanly). Only ship Cut 8 as the new default after the 100-step run lands without regression. Only revisit Cut 7 if Cut 8 still leaves the trainer stalling after warmup.
+
+### Knob deltas (Cut 8 prep-100 run vs Cut 6 prod baseline)
+
+| Knob | Cut 6 prod | Cut 8 prep-100 | Why |
+|---|---|---|---|
+| `GEN_BATCH_SIZE` | 16 | **32** | Halve call-boundary frequency. Default bumped in `s3_fullasync_docker.sh`. |
+| `TOTAL_TRAINING_STEPS` | 25 | **100** | Real training-trend window; first run that can show pass@k movement across 10 datapoints. |
+| `TEST_FREQ` | `-1` | **10** | Capture 10 in-training pass@k datapoints (steps 10/20/.../100). New env var; default stays `-1`. |
+| `SAVE_FREQ` | 5 | 5 | Unchanged — same pool publish cadence. |
+
+### Next session — Cut 7 (multi-producer fan-out)
+
+**This is the named next architectural step.** Land it only if the Cut 8 prep-100 run still shows the trainer waiting on `_acquire_training_batch_dapo` after warmup (i.e. `gen_batch_size=32` did not fully cover the call-boundary trough).
+
+Shape:
+- Two `AsyncLLMServerManagerDAPO` + `ContinuousRolloutProducer` pairs sharing one `TrajectoryStore` (single `threading.Lock`, safe).
+- Per-producer disjoint dataloader slice (offset by rank, stride by `num_producers`).
+- **Per-producer OpenHands FastAPI** — `:8006` for producer A, `:8007` for producer B — to avoid the `/start`/`/stop` race on a shared server (handsoff.md §17 / §31). Or alternatively no-op `start_servers`/`stop_servers` when `num_producers > 1`.
+- Pool-saturation guard: drop `OPENHANDS_NUM_WORKERS` to 16 per producer (still 32 concurrent on the pool).
+
+Files that will change (when Cut 7 lands):
+- `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` — `_start_continuous_producer_if_needed` spawns `replay.num_producers` copies.
+- `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` — `producer_index` / `num_producers` in ctor; per-producer dataloader slice.
+- `scripts/_internal/s3_fullasync_docker.sh` — new `NUM_PRODUCERS` env var.
+- ProRL launcher — second OH server on `:8007`.
+- `plans-n-solutions/handsoff.md` — promote §31 deferred → shipped, document the OH-server-per-producer invariant.
 
 ```bash
 # On trainer box (ProRL running at :8006, pool warm on vllm-instance:8100-8103)

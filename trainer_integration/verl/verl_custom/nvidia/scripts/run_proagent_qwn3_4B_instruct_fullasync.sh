@@ -28,7 +28,13 @@ TOKENIZER_PATH='Qwen/Qwen3-4B-Instruct-2507'
 CKPT_PATH='/path/to/outputs'
 
 
-BATCH_SIZE=4
+BATCH_SIZE=${BATCH_SIZE:-4}
+# Cut 6 — producer batch (DAPO ``requested_batch_size``) is decoupled
+# from trainer batch. Default is 4× ``BATCH_SIZE`` so post-warmup the
+# replay buffer always carries enough fresh groups for the trainer to
+# draw without blocking. Override at run time via
+# ``GEN_BATCH_SIZE=...`` in the outer launcher.
+GEN_BATCH_SIZE=${GEN_BATCH_SIZE:-$((BATCH_SIZE * 4))}
 MAX_NUM_ITERS=30
 # DAPO-aligned: 8 samples per prompt balances GRPO group-stat signal
 # (meaningful with filter_groups on) against rollout cost.
@@ -57,10 +63,15 @@ CLIP_RATIO_HIGH=0.28
 # but kept to avoid Hydra removal noise.
 GPU_MEM_UTIL=0.8
 # rollout_dp_size = world_size / TP_SIZE = 8 / 2 = 4, matching the 4 remote
-# endpoints. SP_SIZE=2 for 8-GPU FSDP.
+# endpoints. SP_SIZE=4 for 8-GPU FSDP (DP=2). Bumped from 2 → 4 after the
+# Cut-1 max_response_length=16384 raise OOM'd backward at SP=2 (40.36 GiB
+# requested on 39.49 GiB A100). Each sequence is now split 4-way along the
+# token dim (Ulysses), roughly halving per-GPU activation memory. SP=4
+# divides Qwen3-4B's 32 query heads / 8 KV heads / world_size=8 cleanly.
+# If 4 still OOMs, escalate to 8 (DP=1, slowest but guaranteed fit).
 TP_SIZE=2
 NNODES=1
-SP_SIZE=2
+SP_SIZE=4
 TEMPERATURE=1.4
 TOP_P=0.95
 
@@ -69,9 +80,9 @@ python3 -m verl_custom.trainer.main_ppo \
     data.train_files=["$DATA_PATH/train.parquet"] \
     data.val_files=["$DATA_PATH/validation.parquet"] \
     data.train_batch_size=$BATCH_SIZE \
-    +data.gen_batch_size=1 \
+    +data.gen_batch_size=$GEN_BATCH_SIZE \
     data.max_prompt_length=31232 \
-    data.max_response_length=4096 \
+    data.max_response_length=16384 \
     data.truncation='error' \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \

@@ -18,21 +18,20 @@
 #     +replay.use_temporal_is=True feeds behavior-policy logprobs from
 #     the buffer into the existing tis_imp_ratio code in core_algos.py.
 #
-# Testing-order reminder (plans-n-solutions/stages/full_async.md §5a):
-#   ALWAYS run filter_groups=False FIRST. DAPO's generate_sequences_dapo
-#   waits for train_batch_size surviving groups, not train_batch_size
-#   prompts — ~2-3x wall-clock vs plain GRPO because SWE-Gym drops ~50%
-#   of groups for sign-shared rewards. Promote to filter_groups=True only
-#   after the plain run is clean.
+# Topology reminder (Cut 5+ / handsoff.md §Topology):
+#   filter_groups=True is the target. DAPO's generate_sequences_dapo is the
+#   only path wired to eager-push each survivor into the replay store the
+#   moment it clears filter_easy_hard_instance — plain GRPO has no such
+#   seam. Set FILTER_GROUPS=False only for throwaway plain-GRPO debugging.
 #
 # Environment knobs (all optional; defaults below):
 #   REPLAY_ENABLE             True
-#   BUFFER_SIZE               128       (= 4 × train_batch_size × n = 4×4×8)
+#   BUFFER_SIZE               256
 #   STALENESS_CUTOFF_K        4         (handsoff §12.3)
 #   PRODUCER_BATCH_SIZE       4
 #   USE_TEMPORAL_IS           True
 #   CONTINUOUS_PRODUCER       True
-#   FILTER_GROUPS             False     (flip to True ONLY after E1 clean)
+#   FILTER_GROUPS             True      (DAPO eager-push is the target path)
 #   TOTAL_EPOCHS              10
 #   TOTAL_TRAINING_STEPS      500
 #   SAVE_FREQ                 1
@@ -54,20 +53,41 @@ STALENESS_CUTOFF_K="${STALENESS_CUTOFF_K:-4}"
 PRODUCER_BATCH_SIZE="${PRODUCER_BATCH_SIZE:-4}"
 USE_TEMPORAL_IS="${USE_TEMPORAL_IS:-True}"
 CONTINUOUS_PRODUCER="${CONTINUOUS_PRODUCER:-True}"
-# DEFAULT False. Primary E2E smoke test runs plain GRPO. Flip to True
-# only when running the DAPO gate (Phase E2) — see full_async.md §5a.
-FILTER_GROUPS="${FILTER_GROUPS:-False}"
+# DEFAULT True. Cut 5 onward the eager-push path is DAPO-specific, so the
+# production topology always runs filter_groups=True. Override to False
+# only for throwaway plain-GRPO debugging (full_async.md §5a).
+FILTER_GROUPS="${FILTER_GROUPS:-True}"
 
 # Trainer scale knobs — overridable per run.
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 SAVE_FREQ="${SAVE_FREQ:-1}"
+# In-training pass@k validation cadence. Default -1 disables it (val is
+# expensive: each test_freq boundary calls producer.stop and re-warms).
+# Set to 10 (or similar) for runs where you want pass@k datapoints
+# before the final step.
+TEST_FREQ="${TEST_FREQ:--1}"
 LOG_PATH="${LOG_PATH:-/tmp/s3-fullasync.log}"
+
+# Cut 6: producer / trainer batch decoupling. ``BATCH_SIZE`` is the
+# trainer's per-step group draw from replay; ``GEN_BATCH_SIZE`` is the
+# DAPO producer's per-call survivor target. Default is 4× (validated
+# by Cut 6's 25-step prod run).
+#
+# Cut 8 (in validation, prep-100 run): bumping the ratio to 8× is
+# proposed to mitigate the ~26 min producer call-boundary dead gap
+# Cut 6's prod run exposed (handsoff.md §31). Override at run time
+# via ``GEN_BATCH_SIZE=32`` until the 100-step prep run validates the
+# bump as a safe new default.
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-$((BATCH_SIZE * 4))}"
 
 echo "[fullasync/docker] starting $(date -u +%FT%TZ)"
 echo "[fullasync/docker] image: $IMG"
 echo "[fullasync/docker] remote pool: $REMOTE_DNS:8100-8103"
 echo "[fullasync/docker] replay: enable=$REPLAY_ENABLE buffer=$BUFFER_SIZE K=$STALENESS_CUTOFF_K producer_bs=$PRODUCER_BATCH_SIZE tis=$USE_TEMPORAL_IS continuous=$CONTINUOUS_PRODUCER"
+echo "[fullasync/docker] batches: train=$BATCH_SIZE (groups/step) gen=$GEN_BATCH_SIZE (survivors/producer call)"
+echo "[fullasync/docker] cadence: total_steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ test_freq=$TEST_FREQ"
 echo "[fullasync/docker] filter_groups=$FILTER_GROUPS (False = plain GRPO; flip to True only after E1 clean — full_async.md §5a)"
 
 # Clean up any stale container from a prior attempt.
@@ -95,6 +115,7 @@ docker run --rm --name "$CNAME" \
   -e TOTAL_EPOCHS="$TOTAL_EPOCHS" \
   -e TOTAL_TRAINING_STEPS="$TOTAL_TRAINING_STEPS" \
   -e SAVE_FREQ="$SAVE_FREQ" \
+  -e TEST_FREQ="$TEST_FREQ" \
   -e REPLAY_ENABLE="$REPLAY_ENABLE" \
   -e BUFFER_SIZE="$BUFFER_SIZE" \
   -e STALENESS_CUTOFF_K="$STALENESS_CUTOFF_K" \
@@ -102,6 +123,8 @@ docker run --rm --name "$CNAME" \
   -e USE_TEMPORAL_IS="$USE_TEMPORAL_IS" \
   -e CONTINUOUS_PRODUCER="$CONTINUOUS_PRODUCER" \
   -e FILTER_GROUPS="$FILTER_GROUPS" \
+  -e BATCH_SIZE="$BATCH_SIZE" \
+  -e GEN_BATCH_SIZE="$GEN_BATCH_SIZE" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \
@@ -165,13 +188,17 @@ docker run --rm --name "$CNAME" \
       trainer.save_freq="$SAVE_FREQ" \
       trainer.resume_mode=auto \
       trainer.val_before_train=False \
-      trainer.test_freq=-1 \
+      trainer.test_freq="$TEST_FREQ" \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
-      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=36864 \
-      actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=36864 \
-      actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=36864 \
+      actor_rollout_ref.actor.ppo_max_token_len_per_gpu=49152 \
+      actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=49152 \
+      actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=49152 \
       +actor_rollout_ref.actor.calculate_entropy=false \
       actor_rollout_ref.actor.entropy_checkpointing=true \
+      actor_rollout_ref.model.use_fused_kernels=True \
+      +actor_rollout_ref.model.fused_kernel_options.impl_backend=torch \
+      +actor_rollout_ref.actor.use_fused_kernels=True \
+      +actor_rollout_ref.actor.use_remove_padding=True \
       data.train_files=[/data/SkyRL-v0-293/train.parquet] \
       data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
       trainer.default_local_dir="$STAGE2_OUT" \

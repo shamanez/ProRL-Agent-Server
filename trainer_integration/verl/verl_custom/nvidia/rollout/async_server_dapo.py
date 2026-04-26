@@ -242,7 +242,14 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
     async def request_from_openhands_dapo(self):
         import time
 
-        requested_batch_size = self.full_config.data.train_batch_size
+        # Cut 6: producer batch is decoupled from trainer batch. The DAPO
+        # producer's per-call survivor target is ``data.gen_batch_size``;
+        # the trainer pulls ``data.train_batch_size`` groups per step from
+        # the replay store independently. Falls back to ``train_batch_size``
+        # for the legacy lockstep path that never set ``gen_batch_size``.
+        requested_batch_size = self.full_config.data.get(
+            'gen_batch_size', self.full_config.data.train_batch_size
+        )
         # Start total timing for performance analysis
         total_start_time = time.time()
 
@@ -739,11 +746,17 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
             ):
                 batch_idx_to_remain.append(i)
         self.all_input_batch = self.all_input_batch.select_idxs(batch_idx_to_remain)
+        # Cut 6: completeness assert is against the producer's per-call
+        # target (``gen_batch_size``), not the trainer's per-step group
+        # count (``train_batch_size``). They are now distinct.
+        _expected_call_size = self.full_config.data.get(
+            'gen_batch_size', self.full_config.data.train_batch_size
+        )
         assert (
             len(output_batch.non_tensor_batch['instance']) == len(all_responses)
-            and len(all_responses) == self.full_config.data.train_batch_size
+            and len(all_responses) == _expected_call_size
         ), (
-            f'The number of instances in the input batch and the number of instances in the responses are not the same, {len(output_batch.non_tensor_batch["instance"])} != {len(all_responses)} != {self.full_config.data.train_batch_size}'
+            f'The number of instances in the input batch and the number of instances in the responses are not the same, {len(output_batch.non_tensor_batch["instance"])} != {len(all_responses)} != {_expected_call_size}'
         )
         return all_responses, output_batch
 
