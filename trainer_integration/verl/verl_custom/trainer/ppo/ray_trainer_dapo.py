@@ -79,7 +79,9 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
         """
         from verl import DataProto  # noqa: PLC0415
 
-        from verl_custom.replay.continuous_producer import wait_until  # noqa: PLC0415
+        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
+            wait_until_with_progress,
+        )
 
         if self._producer is not None:
             self._producer.check_background_error()
@@ -90,24 +92,40 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             # the buffer always holds gradient-bearing groups, so the
             # trainer simply draws ``train_batch_size`` groups per step.
             n_groups = int(self.config.data.train_batch_size)
-            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 7200.0))
+            # No-progress detector — replaces the old hard-coded 7200 s
+            # ``wait_timeout_s`` ceiling that killed prep-100 at step 44
+            # once response_length climbed past ~12 k tokens. We now only
+            # abort if the producer pushes nothing new for
+            # ``no_progress_timeout_s`` (default 30 min, vastly longer
+            # than any single rollout). Healthy-but-slow producers no
+            # longer trip this guardrail.
+            no_progress_timeout_s = float(
+                self.config.replay.get('no_progress_timeout_s', 1800.0)
+            )
             with _timer('gen', timing_raw):
-                # Wait on non-stale group count — raw num_groups
-                # counts groups sample_mini_batch will drop as stale.
-                # See ray_trainer.py for the same fix rationale.
-                filled = wait_until(
+                # Predicate: non-stale group count (raw num_groups
+                # would unblock on a group ``sample_mini_batch`` is
+                # about to drop as stale; see ray_trainer.py for the
+                # rationale — the run4-step-11 race).
+                # Progress: monotonic store push counter — the only
+                # signal that distinguishes "producer is slow" from
+                # "producer is wedged".
+                filled = wait_until_with_progress(
                     lambda: self.trajectory_store.num_fresh_groups(self.global_steps)
                     >= n_groups,
-                    timeout=wait_timeout_s,
+                    self.trajectory_store.total_pushes,
+                    no_progress_timeout=no_progress_timeout_s,
                 )
             if not filled:
                 self._producer.check_background_error()
                 raise RuntimeError(
-                    f'Replay store did not reach {n_groups} fresh groups within '
-                    f'{wait_timeout_s:.1f}s (current='
+                    f'Replay store made no forward progress for '
+                    f'{no_progress_timeout_s:.1f}s while waiting for '
+                    f'{n_groups} fresh groups (current='
                     f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
-                    f'fresh / {self.trajectory_store.num_groups()} total). '
-                    'Check producer logs / pool endpoints_failed.'
+                    f'fresh / {self.trajectory_store.num_groups()} total, '
+                    f'total_pushes={self.trajectory_store.total_pushes()}). '
+                    'Producer is wedged — check pool /health and producer logs.'
                 )
             sampled = self.trajectory_store.sample_mini_batch(
                 n_groups=n_groups, current_step=self.global_steps

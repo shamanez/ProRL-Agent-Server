@@ -249,6 +249,8 @@ ls /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/outputs/ProAgent/fulla
 # rm -rf global_step_{later-than-target}  # CAREFUL
 ```
 
+**Current on-disk state (post-prep-100, 2026-04-26):** only `global_step_20` and `global_step_40` are preserved (the other 8 prep-100 checkpoints were deleted to free disk during session shutdown). `resume_mode=auto` will pick `global_step_40`. If you need an earlier resume target, choose `global_step_20`.
+
 ### Fresh start (discard checkpoints)
 
 ```bash
@@ -322,6 +324,60 @@ Success signals (all should hold on a healthy run):
 8. Both `filter_groups={False, True}` runs land clean
 9. Zero tracebacks, zero §19 skipped-validates  *(currently FAIL at step-10 — problem #7)*
 10. Token-in/token-out golden-file preserved
+
+## Where this session leaves you (2026-04-26 sign-off)
+
+### Last known-good state
+
+- **HEAD commit:** `full-async-optimization` branch, post Cut 9 (no-progress detector).
+- **Latest preserved checkpoint:** `outputs/ProAgent/fullasync/global_step_40/` (full FSDP shards + LoRA adapter).
+- **Mid-run reference:** `outputs/ProAgent/fullasync/global_step_20/`.
+- **vLLM pool:** healthy on all 4 children (`/health` 200, `MAX_MODEL_LEN=47616`).
+- **ProRL FastAPI:** still running on host `:8006` (pid via `pgrep -f s0_prorl`).
+- **Disk:** `/dev/root` 72% used (down from 92%); 195 GB freed during cleanup.
+
+### Three ways to pick up
+
+**A. Resume training from step 40 with the no-progress fix in place.**
+```bash
+# vLLM pool already up; ProRL already up. Just relaunch the trainer:
+TOTAL_TRAINING_STEPS=100 GEN_BATCH_SIZE=32 SAVE_FREQ=5 TEST_FREQ=-1 \
+  bash scripts/_internal/s3_fullasync_docker.sh
+```
+`TEST_FREQ=-1` keeps the §19 cooperative-skip mechanism out of the picture entirely until the deferred pause/resume lands. `resume_mode=auto` picks `global_step_40` automatically.
+
+**B. Evaluate the step-40 LoRA adapter (post-hoc pass@k against `validation.parquet`).**
+The adapter is ready to load:
+```
+outputs/ProAgent/fullasync/global_step_40/actor/lora_adapter/
+├── adapter_config.json   (peft 0.18.1, r=32, alpha=64, base=Qwen/Qwen3-4B-Instruct-2507)
+└── adapter_model.safetensors  (253 MB)
+```
+The driver is not yet written. See `plans-n-solutions/stages/current_bottlenecks_and_problems.md` for the eval shape (T=0.6, top_p=0.95, n=2 against the live pool with this adapter loaded via `/load_lora`).
+
+**C. Land Cut 7 (multi-producer fan-out) before any more training.**
+Only do this if you want to address the producer call-boundary trough at the architectural level. Full file list and shape in `current_bottlenecks_and_problems.md` ("Next session — Cut 7"). Pair it with the deferred pause/resume implementation since both touch `continuous_producer.py`.
+
+### Open TODOs (carry forward)
+
+| TODO | Scope | Why deferred | Where it goes |
+|---|---|---|---|
+| **`continuous_producer.pause()` / `resume()`** | ~40 LOC in `verl_custom/replay/continuous_producer.py` | The §19 cooperative-skip mechanism prevented in-training pass@k for the entire prep-100 run (15 skips). The principled fix lets the worker finish its current call cleanly, pauses between calls, and lets `_validate()` run without races. | handsoff.md §19 / §25 |
+| **Cut 7 — multi-producer fan-out** | `ray_trainer.py`, `async_server_dapo.py`, second OH server on `:8007` | Producer call-boundary dead gap (~26 min/call). Cut 8 (gen_batch_size 16→32) is the cheap mitigation; Cut 7 is the principled fix. | current_bottlenecks_and_problems.md "Next session" |
+| **LoRA-only post-hoc eval driver** | New script under `scripts/eval/` | Need pass@k numbers from step 40 without spinning up the FSDP trainer. Loads `adapter_model.safetensors` into the pool via `/load_lora`, scores `validation.parquet`. | current_bottlenecks_and_problems.md (option B above) |
+| **Temperature alignment in `dp_actor.compute_log_prob`** | `verl_custom/workers/actor/dp_actor.py` | `is_weight/clip_fraction` decomposition: ~0.35 of the 0.55 mean log-ratio is rollout-vs-train temperature mismatch (T=1.4 → T=1.0). Aligning the compute_log_prob temperature would cut ~60% of "drift" that isn't drift. Deferred because raising `tis_imp_ratio_cap` to 5 was sufficient for the prep run. | handsoff.md §27 |
+| **Per-prompt instrumentation** | `nvidia/rollout/async_server_dapo.py` | Iter-3 wall regression (80 min vs 53 min) couldn't be diagnosed without `(uid, resolved_ratio, wall_s)` per prompt in `DAPO_PRODUCER_CALL`. | current_bottlenecks_and_problems.md problem #8 |
+| **DAPO gate (`FILTER_GROUPS=True`)** | `s3_fullasync_docker.sh` env | Default already `True`; just confirm it stays clean across the next 100-step run. Plain-GRPO fallback is `FILTER_GROUPS=False`. | how_to_run.md |
+
+### What "good" looks like on the next run
+
+(Same target table as before; carry forward.)
+- `weight_sync/endpoints_failed == 0`
+- `replay/sample_age_steps_p95 ≤ 4`
+- `is_weight/clip_fraction < 0.25` (post-Cut-2 cap raise)
+- `response_length/clip_ratio` trends down or stays bounded
+- `critic/rewards/mean` trends up across 50+ steps
+- Zero tracebacks, zero `Replay store made no forward progress` (Cut 9 guardrail)
 
 ## Related docs
 

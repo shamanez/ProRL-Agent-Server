@@ -283,9 +283,25 @@ The Cut 1–6 plan landed and ran a 25-step DAPO production training (`/tmp/s3-f
 | `TEST_FREQ` | `-1` | **10** | Capture 10 in-training pass@k datapoints (steps 10/20/.../100). New env var; default stays `-1`. |
 | `SAVE_FREQ` | 5 | 5 | Unchanged — same pool publish cadence. |
 
+### Cut 8 prep-100 outcome (2026-04-26)
+
+prep-100 ran 24 successful steps (resumed from step 20 → reached step 44) before crashing with `RuntimeError: Replay store did not reach 4 fresh groups within 7200.0s`. Root cause was *not* a wedged producer — it was a hard-coded 7200 s ceiling on the trainer's wait that didn't account for `response_length/mean` climbing 9 045 → 12 071 between step 43 and step 44 (clip_ratio 0.22 → 0.34). Producer per-iteration wall scales with response length; the threshold was sized for the original ~1500-token regime.
+
+15 cooperative §19 validation skips fired during the run, so no in-training pass@k datapoints landed — but training itself was healthy (`reward_metrics/all` 0.5–0.53 around step 43–44, `actor/grad_norm` ~0.025).
+
+Latest LoRA checkpoint preserved: `outputs/ProAgent/fullasync/global_step_40/actor/lora_adapter/` (253 MB adapter + adapter_config.json). Mid-run reference: `global_step_20/`. All other prep-100 checkpoints were deleted to free disk during session shutdown.
+
+### Cut 9 — no-progress detector replaces 7200 s ceiling (shipped)
+
+`wait_until_with_progress` in `verl_custom/replay/continuous_producer.py` now drives `_acquire_training_batch_dapo`. Resets the deadline whenever `trajectory_store.total_pushes()` (new monotonic accessor) grows; aborts only when no group lands for `replay.no_progress_timeout_s` seconds (default 1800 s, plumbed via `+replay.no_progress_timeout_s=1800` in `s3_fullasync_docker.sh`). Old `replay.wait_timeout_s` knob removed. Test coverage: `tests/replay/test_continuous_producer.py::TestWaitUntilWithProgress`.
+
+This changes failure semantics:
+- "Producer healthy but slow as model learns longer trajectories" → trainer waits, never aborts. **Desired.**
+- "Producer wedged / pool dead / push thread stalled" → no `total_pushes` growth → trainer aborts after 1800 s with a clearer message.
+
 ### Next session — Cut 7 (multi-producer fan-out)
 
-**This is the named next architectural step.** Land it only if the Cut 8 prep-100 run still shows the trainer waiting on `_acquire_training_batch_dapo` after warmup (i.e. `gen_batch_size=32` did not fully cover the call-boundary trough).
+**This is the named next architectural step.** Land it only if the next prep-100 run still shows the trainer waiting on `_acquire_training_batch_dapo` after warmup (i.e. `gen_batch_size=32` did not fully cover the call-boundary trough).
 
 Shape:
 - Two `AsyncLLMServerManagerDAPO` + `ContinuousRolloutProducer` pairs sharing one `TrajectoryStore` (single `threading.Lock`, safe).

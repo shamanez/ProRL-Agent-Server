@@ -1759,7 +1759,7 @@ class RayPPOTrainer:
         if self._producer is not None:
             # Continuous-producer path.
             from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-                wait_until,
+                wait_until_with_progress,
             )
 
             self._producer.check_background_error()
@@ -1769,28 +1769,31 @@ class RayPPOTrainer:
             # FSDP trainer. The replay buffer + ingest filter already
             # guarantee every sampled group has gradient content.
             n_groups = int(self.config.data.train_batch_size)
-            wait_timeout_s = float(self.config.replay.get('wait_timeout_s', 7200.0))
+            # No-progress detector (mirror of ray_trainer_dapo.py). See
+            # that file for the prep-100 step-44 incident this replaces.
+            no_progress_timeout_s = float(
+                self.config.replay.get('no_progress_timeout_s', 1800.0)
+            )
             with _timer('gen', timing_raw):
-                # Wait on the *non-stale* group count, not the raw
-                # count. Raw num_groups includes groups that
-                # sample_mini_batch is about to drop as stale — if we
-                # unblock on one of those and the producer hasn't
-                # refreshed, sample_mini_batch raises
-                # InsufficientTrajectoriesError. This is the race that
-                # killed run4 at step 11.
-                filled = wait_until(
+                # Predicate uses non-stale group count (run4-step-11
+                # race). Progress uses monotonic ``total_pushes`` so a
+                # slow-but-healthy producer doesn't trip the guardrail.
+                filled = wait_until_with_progress(
                     lambda: self.trajectory_store.num_fresh_groups(self.global_steps)
                     >= n_groups,
-                    timeout=wait_timeout_s,
+                    self.trajectory_store.total_pushes,
+                    no_progress_timeout=no_progress_timeout_s,
                 )
             if not filled:
                 self._producer.check_background_error()
                 raise RuntimeError(
-                    f'Replay store did not reach {n_groups} fresh groups within '
-                    f'{wait_timeout_s:.1f}s (current='
+                    f'Replay store made no forward progress for '
+                    f'{no_progress_timeout_s:.1f}s while waiting for '
+                    f'{n_groups} fresh groups (current='
                     f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
-                    f'fresh / {self.trajectory_store.num_groups()} total). '
-                    'Check producer logs / pool endpoints_failed.'
+                    f'fresh / {self.trajectory_store.num_groups()} total, '
+                    f'total_pushes={self.trajectory_store.total_pushes()}). '
+                    'Producer is wedged — check pool /health and producer logs.'
                 )
             sampled = self.trajectory_store.sample_mini_batch(
                 n_groups=n_groups, current_step=self.global_steps

@@ -151,6 +151,11 @@ class TrajectoryStore:
         self._lock = threading.Lock()
         self._dropped_by_staleness_total = 0
         self._last_sample_ages: list[int] = []
+        # Monotonic count of groups ever appended. Used by the trainer's
+        # no-progress detector (replaces the brittle 7200 s hard-cap on
+        # ``_acquire_training_batch_dapo`` — see ``wait_until_with_progress``
+        # in ``continuous_producer``).
+        self._pushes_total = 0
 
     # ---- ingest -------------------------------------------------------------
 
@@ -172,6 +177,7 @@ class TrajectoryStore:
                 )
         with self._lock:
             self._groups.append(group)
+            self._pushes_total += 1
 
     def push_from_dataproto(
         self,
@@ -351,6 +357,7 @@ class TrajectoryStore:
         with self._lock:
             for records in group_list:
                 self._groups.append(list(records))
+            self._pushes_total += len(group_list)
         return len(group_list)
 
     # ---- eviction -----------------------------------------------------------
@@ -562,6 +569,16 @@ class TrajectoryStore:
     def num_groups(self) -> int:
         with self._lock:
             return len(self._groups)
+
+    def total_pushes(self) -> int:
+        """Monotonic count of groups ever appended.
+
+        Resets on store re-construction, never on sample. Used by the
+        trainer's no-progress detector to distinguish "producer is slow"
+        from "producer is wedged".
+        """
+        with self._lock:
+            return self._pushes_total
 
     def num_fresh_groups(self, current_step: int) -> int:
         """Count groups whose age is within ``staleness_cutoff_k``.

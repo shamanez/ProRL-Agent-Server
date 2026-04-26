@@ -55,6 +55,7 @@ from verl_custom.replay.continuous_producer import (  # noqa: E402
     ContinuousRolloutProducer,
     StepCounter,
     wait_until,
+    wait_until_with_progress,
 )
 from verl_custom.replay.trajectory_store import TrajectoryStore  # noqa: E402
 
@@ -389,6 +390,66 @@ class TestTrainerSleepOnEmptyBuffer:
             )
         finally:
             t.join(timeout=5.0)
+
+
+class TestWaitUntilWithProgress:
+    """No-progress detector for ``_acquire_training_batch_dapo``.
+
+    Replaces the brittle 7200 s hard-cap that killed prep-100 at
+    step 44 once response_length climbed past ~12 k tokens. The new
+    helper aborts only when the producer has stopped pushing for
+    ``no_progress_timeout`` seconds — a slow-but-healthy producer
+    no longer trips the guardrail.
+    """
+
+    def test_returns_false_when_no_pushes_arrive(self) -> None:
+        store = _store(max_size=8)
+        start = time.monotonic()
+        result = wait_until_with_progress(
+            lambda: store.num_groups() >= 1,
+            store.total_pushes,
+            no_progress_timeout=0.05,
+            interval=0.005,
+        )
+        elapsed = time.monotonic() - start
+        assert result is False
+        assert elapsed < 0.5, f'took {elapsed:.3f}s (>> no_progress_timeout)'
+
+    def test_resets_deadline_on_progress(self) -> None:
+        """Push interval (0.1 s) > single no-progress timeout window
+        (0.15 s) is *not* enough to trip the guardrail because each push
+        resets the deadline. Without the reset, total wall (~0.4 s for
+        4 pushes) would exceed a single 0.15 s window long before the
+        predicate flips."""
+        store = _store(max_size=8)
+        errors: list[BaseException] = []
+
+        def slow_pusher() -> None:
+            try:
+                for i in range(4):
+                    time.sleep(0.1)
+                    store.push_from_dataproto(
+                        _stub_dataproto(batch=1, uid_offset=i),
+                        behavior_policy_version=0,
+                        current_step=0,
+                    )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        t = threading.Thread(target=slow_pusher)
+        t.start()
+        try:
+            result = wait_until_with_progress(
+                lambda: store.num_groups() >= 4,
+                store.total_pushes,
+                no_progress_timeout=0.15,
+                interval=0.005,
+            )
+        finally:
+            t.join(timeout=5.0)
+        assert errors == [], f'pusher raised: {errors}'
+        assert result is True
+        assert store.total_pushes() == 4
 
 
 # --- store-full backoff -----------------------------------------------------

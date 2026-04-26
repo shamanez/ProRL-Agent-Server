@@ -323,3 +323,41 @@ def wait_until(
         if time.monotonic() >= deadline:
             return False
         time.sleep(interval)
+
+
+def wait_until_with_progress(
+    predicate: Callable[[], bool],
+    progress: Callable[[], int],
+    *,
+    no_progress_timeout: float,
+    interval: float = 0.01,
+) -> bool:
+    """Wait on ``predicate``, but reset the deadline whenever ``progress`` grows.
+
+    Replaces the brittle hard-coded ``wait_until(timeout=7200.0)`` in
+    ``_acquire_training_batch_dapo``. The old form aborts on total
+    wall-clock — which kills the run as soon as the model learns to use
+    longer trajectories (producer iteration wall scales with response
+    length). The new form only aborts when the producer has stopped
+    making forward progress for ``no_progress_timeout`` seconds.
+
+    Two failure modes the old code conflated:
+
+    - producer is hung / pool is dead → ``progress`` never grows → abort
+    - producer is healthy but slow   → ``progress`` keeps growing → wait
+
+    Returns True if the predicate became truthy. Returns False if no
+    progress was observed for ``no_progress_timeout`` seconds.
+    """
+    last_progress = progress()
+    deadline = time.monotonic() + no_progress_timeout
+    while True:
+        if predicate():
+            return True
+        cur = progress()
+        if cur > last_progress:
+            last_progress = cur
+            deadline = time.monotonic() + no_progress_timeout
+        elif time.monotonic() >= deadline:
+            return False
+        time.sleep(interval)
