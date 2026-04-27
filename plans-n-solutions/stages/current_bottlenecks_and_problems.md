@@ -289,7 +289,7 @@ prep-100 ran 24 successful steps (resumed from step 20 → reached step 44) befo
 
 15 cooperative §19 validation skips fired during the run, so no in-training pass@k datapoints landed — but training itself was healthy (`reward_metrics/all` 0.5–0.53 around step 43–44, `actor/grad_norm` ~0.025).
 
-Latest LoRA checkpoint preserved: `outputs/ProAgent/fullasync/global_step_40/actor/lora_adapter/` (253 MB adapter + adapter_config.json). Mid-run reference: `global_step_20/`. All other prep-100 checkpoints were deleted to free disk during session shutdown.
+Latest LoRA checkpoint preserved: `outputs/ProAgent/fullasync/global_step_40/actor/lora_adapter/` (253 MB adapter + adapter_config.json) — this is the **only** local checkpoint that survived session shutdown; all other prep-100 checkpoints (and the earlier `global_step_20` reference) were deleted to free disk. Use `trainer.resume_mode=auto` to pick it up. Corresponding WandB run kept: `z6yznr3z` (project `ProAgent`, experiment `fullasync-replay-prorl`); the 32 prior runs in the project were deleted at the same time.
 
 ### Cut 9 — no-progress detector replaces 7200 s ceiling (shipped)
 

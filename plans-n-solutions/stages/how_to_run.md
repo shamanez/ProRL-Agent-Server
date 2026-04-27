@@ -249,7 +249,7 @@ ls /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/outputs/ProAgent/fulla
 # rm -rf global_step_{later-than-target}  # CAREFUL
 ```
 
-**Current on-disk state (post-prep-100, 2026-04-26):** only `global_step_20` and `global_step_40` are preserved (the other 8 prep-100 checkpoints were deleted to free disk during session shutdown). `resume_mode=auto` will pick `global_step_40`. If you need an earlier resume target, choose `global_step_20`.
+**Current on-disk state (post-prep-100, 2026-04-26):** only `global_step_40` is preserved (all earlier prep-100 checkpoints were deleted to free disk during session shutdown). `resume_mode=auto` will pick it. If you need an earlier resume target you must re-train from scratch.
 
 ### Fresh start (discard checkpoints)
 
@@ -330,11 +330,11 @@ Success signals (all should hold on a healthy run):
 ### Last known-good state
 
 - **HEAD commit:** `full-async-optimization` branch, post Cut 9 (no-progress detector).
-- **Latest preserved checkpoint:** `outputs/ProAgent/fullasync/global_step_40/` (full FSDP shards + LoRA adapter).
-- **Mid-run reference:** `outputs/ProAgent/fullasync/global_step_20/`.
+- **Only preserved checkpoint:** `outputs/ProAgent/fullasync/global_step_40/` (full FSDP shards + LoRA adapter). All earlier prep-100 checkpoints were deleted; this is the only resume target.
+- **WandB:** project `ProAgent`, experiment `fullasync-replay-prorl`. **Only run kept:** `z6yznr3z` (the prep-100 run, finished). 32 prior runs in the project were deleted.
 - **vLLM pool:** healthy on all 4 children (`/health` 200, `MAX_MODEL_LEN=47616`).
 - **ProRL FastAPI:** still running on host `:8006` (pid via `pgrep -f s0_prorl`).
-- **Disk:** `/dev/root` 72% used (down from 92%); 195 GB freed during cleanup.
+- **Disk:** `/dev/root` 71% used (down from 92%); ~210 GB freed during cleanup.
 
 ### Three ways to pick up
 
