@@ -133,36 +133,42 @@ class ContinuousRolloutProducer:
         )
         self._thread.start()
 
-    def stop(self, timeout: float = 10.0) -> bool:
+    def stop(self, timeout: float | None = None) -> bool:
         """Signal the loop to exit and join the thread.
 
-        Returns True if the thread exited cleanly within ``timeout``,
-        False if it was still alive at return. On False the ``_thread``
-        handle is **retained** and ``rollout_manager.sleep()`` is **not**
-        called — the caller must decide whether to (a) retry ``stop()``
-        at the next boundary, or (b) skip any work that would contend
-        with the still-running producer for the shared OpenHands session
-        (see gotcha §19 in plans-n-solutions/handsoff.md).
+        Default (``timeout=None``) drains unconditionally: blocks until
+        the current ``asyncio.run(generate_sequences)`` returns, the
+        outer-loop ``_stop_event`` check fires, and the worker thread
+        exits. The publish boundary is aligned to producer-batch
+        completion by design — a finite timeout that fires mid-batch
+        leaves an orphan thread running across the publish, causing a
+        mid-trajectory policy-version switch (turns 1..k under v_n,
+        turn k+1 under v_{n+1}) and breaking the IS-correction
+        contract.
 
-        A stuck thread is mid-``asyncio.run(generate_sequences)``; the
-        event is only checked at the top of the worker loop, so the
-        thread resumes the shutdown handshake once the current call
-        returns. Thread is daemon, so interpreter shutdown still
-        reclaims it.
+        The trainer's no-progress detector (``replay.no_progress_timeout_s``)
+        is the production deadlock canary; finite timeouts here exist
+        only for unit-test paths that assert hang detection.
+
+        Returns True if the thread exited; False only when a finite
+        ``timeout`` was passed and fired without the thread exiting.
         """
         self._stop_event.set()
         thread = self._thread
         if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-            if thread.is_alive():
-                logger.warning(
-                    'ContinuousRolloutProducer did not exit within %.1fs; '
-                    'leaving thread running (mid-generate_sequences); caller '
-                    'must skip contention with the producer and retry stop() '
-                    'at the next boundary',
-                    timeout,
-                )
-                return False
+            if timeout is None:
+                thread.join()
+            else:
+                thread.join(timeout=timeout)
+                if thread.is_alive():
+                    logger.warning(
+                        'ContinuousRolloutProducer did not exit within %.1fs; '
+                        'leaving thread running (mid-generate_sequences); '
+                        'caller must skip contention with the producer and '
+                        'retry stop() at the next boundary',
+                        timeout,
+                    )
+                    return False
         self._thread = None
         if hasattr(self._rollout_manager, 'sleep'):
             try:

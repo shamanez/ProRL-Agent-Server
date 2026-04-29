@@ -1,8 +1,8 @@
 # Current bottlenecks and problems
 
-Branch: `full-async-optimization`. Basis: Run9 — the moment-of-truth run (n=16, DAPO `filter_groups=True`, K=4 staleness cap, 128-group FIFO buffer, LR=1e-6, rank-16 LoRA). Log: `/tmp/s3-fullasync-n16-baseline.log`. Monitor: `/tmp/replay-monitor.jsonl`. Full report: `run9_n16_report.md`.
+Open problems on the fully-async loop (n=16, DAPO `filter_groups=True`, K=4 staleness cap, 128-group FIFO buffer, rank-16 LoRA). Each problem includes the fix direction (not the full patch).
 
-**Scope.** Problems observed in Run9 plus the concrete operating-regime shifts needed for the next run to be a fast-improving DAPO run. Each problem includes the fix direction (not the full patch).
+For the producer / store / trainer mechanics referenced throughout this doc, see [`replay_dynamics.md`](replay_dynamics.md).
 
 ---
 
@@ -57,7 +57,7 @@ The producer and trainer become fully decoupled pipelines meeting only at the bu
 | vLLM pool (EC2 `vllm-instance`) | 4 × L4 | **100 %** | 20.7 / 23 GiB each | 71–72 W / 72 W cap |
 | FSDP trainer (host, Docker) | 8 × A100-40GB | **0 %** | 2.1 / 40 GiB each | 80–95 W / 400 W |
 
-Per-step timing (`run9_n16_report.md` §"Per-step wall-clock"): trainer active ~43 s, iter wall ~53 min. 12 steps × 43 s / 226 min = **~3.8 % trainer utilisation** (skews down over time — iter 3 spent 80 min).
+Per-step timing in the n=16 reference window: trainer active ~43 s, iter wall ~53 min. 12 steps × 43 s / 226 min = **~3.8 % trainer utilisation** (skews down further when iters stretch past 53 min).
 
 **Throughput arithmetic.**
 
@@ -89,15 +89,15 @@ Even under maximal replay (every group sampled K=4 times before eviction), effec
 
 - Not MoE — dense 4B Qwen3.
 - Fully async — by construction the policy at generation time is ≥ 1 step behind the trainer's current weights. We cannot keep an up-to-the-step copy of the policy; that's the whole point of decoupling the clocks.
-- Dominant term is **T-mismatch**, not real drift (from handsoff gotcha #27): rollout sampling at T=1.4 vs trainer `compute_log_prob` at T=1.0 accounts for ~0.35 of the ~0.55 mean log-ratio. Numerical floor from vLLM↔FSDP kernel divergence adds another ~0.20. Real policy drift is the smallest component.
+- The dominant term is **vLLM↔FSDP numerical divergence** (different kernels, fused ops, softmax paths, FA-vs-paged-attention, mixed-precision casts), not real policy drift. Both sides operate at `T=1.4`: `verl_custom/workers/actor/dp_actor.py:210` rescales logits by `1/T` with `T=self.config.rollout.temperature=1.4` plumbed through `verl_custom/workers/fsdp_workers.py:349` (old_log_prob) and upstream `verl/workers/fsdp_workers.py:1188` (ref_log_prob), so temperature is not a contributor. See handsoff gotcha #27 for the source decomposition.
 
 So the current clamp is fighting a **known numerical bias**, not policy off-policy-ness.
 
 **What to change.**
 
-- **Raise `tis_imp_ratio_cap`** from 2.0 to something like 4.0 or 5.0. The clamp's job is to bound variance on *real* drift — not to paper over T-mismatch. With a higher cap the clip fraction drops below 20 % automatically.
+- **Raise `tis_imp_ratio_cap`** from 2.0 to something like 4.0 or 5.0. The clamp's job is to bound variance on *real* policy drift — not to paper over the vLLM↔FSDP numerical floor. With a higher cap the clip fraction drops below 20 % automatically.
 - Experience replay (problem #1's big-buffer design) naturally helps here too: when the trainer has a large pool to sample from, per-batch variance of `log_ppl_diff` drops, and the fraction of tokens near the cap shrinks.
-- **Do not** try to close the T-mismatch by re-sampling at T=1.0 — the T=1.4 is there for exploration and is part of the policy the reward signal was generated under. Changing it changes the thing being trained.
+- **Do not** try to close the residual log-ratio offset by lowering the rollout temperature — T=1.4 is there for exploration and is part of the policy the reward signal was generated under. Changing it changes the thing being trained. The offset is kernel-numerics + drift; address it at the cap, not at the sampler.
 
 **Keep the metric.** `is_weight/clip_fraction` still matters as a sentinel for real drift — just expect ~10 % baseline from numerical noise and tune the cap so the metric has headroom to move.
 
@@ -243,7 +243,7 @@ Direct knob deltas from Run9 baseline, aligned with the reframe above:
 | Knob | Run9 | Next run | Why |
 |---|---|---|---|
 | `data.max_response_length` | 1536 | **4096** | Problem #4 — stop truncating multi-turn SWE-Gym trajectories mid-tool-call. |
-| `actor_rollout_ref.actor.tis_imp_ratio_cap` | 2.0 | **5.0** | Problem #3 — T-mismatch floor puts most of the ~0.55 log-ratio beyond log(2); raise cap so clamp bounds real drift, not numerical noise. |
+| `actor_rollout_ref.actor.tis_imp_ratio_cap` | 2.0 | **5.0** | Problem #3 — vLLM↔FSDP numerical-divergence floor puts most of the ~0.55 log-ratio beyond log(2); raise cap so clamp bounds real drift, not kernel noise. |
 | `replay.buffer_size` | 128 | **256+** | Problem #1 — trainer as pure consumer needs a pool big enough for genuine random sampling. |
 | Trainer batch coupling | `n_groups = max(1, tbs // n)` | **drop the floor**, read `tbs` as "groups to sample per step" | Problem #1 — trainer samples from buffer, does not wait on producer. |
 | DAPO ingest filter | Option A (filter at push), batch-held until `train_batch_size` | **Option A stays — filter is not dropped**; push each survivor eagerly into the buffer instead of batch-holding | Problem #1 + #2 — survivors stream into buffer the moment they clear the filter, trainer samples whenever enough survivors exist. |
@@ -265,14 +265,7 @@ The Cut 1–6 plan landed and ran a 25-step DAPO production training (`/tmp/s3-f
 | ≥ 2 in-training pass@k datapoints | Not measured this run — `test_freq=-1` for the prod 25-step. | (Cut 8 prep-100 run sets `test_freq=10` to capture this.) |
 | Trainer util > 10 % | Yes, when buffer is warm. Buffer-bound during call boundaries pulls the average down. | Mixed step pacing: 10 min ↔ 60 min depending on call phase. |
 
-**The new finding (call-boundary dead gap).** Cut 5's eager-push smoothed pushes within a call, but DAPO's per-call lifecycle still has a hard ~26 min trough between calls (full description in handsoff §31). Two non-exclusive levers close it:
-
-| Lever | Effect | Cost |
-|---|---|---|
-| **Cut 8 — bigger `gen_batch_size` (default 16 → 32)** | Longer hot phase, fewer call boundaries per hour, lower fraction of wall in the trough. | One env-var bump. Trivial; reversible. |
-| **Cut 7 — multi-producer fan-out** | Producer B's hot phase covers producer A's trough; trainer never sees the gap. | Code change; OH-server `/start`/`/stop` race needs fix (per-producer OH server, or no-op the lifecycle). |
-
-**Decision: validate Cut 8 first via prep-100 run, defer Cut 7 to a fresh session.** Run the 100-step prep with `GEN_BATCH_SIZE=32 TEST_FREQ=10` (env overrides; defaults in `s3_fullasync_docker.sh` stay at 4× and `-1` until the run completes cleanly). Only ship Cut 8 as the new default after the 100-step run lands without regression. Only revisit Cut 7 if Cut 8 still leaves the trainer stalling after warmup.
+**The new finding (call-boundary dead gap).** Cut 5's eager-push smoothed pushes within a call, but DAPO's per-call lifecycle still has a hard ~26 min trough between calls (full description in handsoff §30). Cheapest lever: raise `gen_batch_size` (Cut 8, default 16 → 32) so the hot phase is longer per call and call boundaries are rarer per hour — one env-var bump, trivial and reversible. Past that, scale OpenHands workers and the vLLM pool.
 
 ### Knob deltas (Cut 8 prep-100 run vs Cut 6 prod baseline)
 
@@ -299,31 +292,3 @@ This changes failure semantics:
 - "Producer healthy but slow as model learns longer trajectories" → trainer waits, never aborts. **Desired.**
 - "Producer wedged / pool dead / push thread stalled" → no `total_pushes` growth → trainer aborts after 1800 s with a clearer message.
 
-### Next session — Cut 7 (multi-producer fan-out)
-
-**This is the named next architectural step.** Land it only if the next prep-100 run still shows the trainer waiting on `_acquire_training_batch_dapo` after warmup (i.e. `gen_batch_size=32` did not fully cover the call-boundary trough).
-
-Shape:
-- Two `AsyncLLMServerManagerDAPO` + `ContinuousRolloutProducer` pairs sharing one `TrajectoryStore` (single `threading.Lock`, safe).
-- Per-producer disjoint dataloader slice (offset by rank, stride by `num_producers`).
-- **Per-producer OpenHands FastAPI** — `:8006` for producer A, `:8007` for producer B — to avoid the `/start`/`/stop` race on a shared server (handsoff.md §17 / §31). Or alternatively no-op `start_servers`/`stop_servers` when `num_producers > 1`.
-- Pool-saturation guard: drop `OPENHANDS_NUM_WORKERS` to 16 per producer (still 32 concurrent on the pool).
-
-Files that will change (when Cut 7 lands):
-- `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` — `_start_continuous_producer_if_needed` spawns `replay.num_producers` copies.
-- `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` — `producer_index` / `num_producers` in ctor; per-producer dataloader slice.
-- `scripts/_internal/s3_fullasync_docker.sh` — new `NUM_PRODUCERS` env var.
-- ProRL launcher — second OH server on `:8007`.
-- `plans-n-solutions/handsoff.md` — promote §31 deferred → shipped, document the OH-server-per-producer invariant.
-
-```bash
-# On trainer box (ProRL running at :8006, pool warm on vllm-instance:8100-8103)
-TOTAL_TRAINING_STEPS=20 SAVE_FREQ=5 NUM_TRAJ=16 TEST_FREQ=10 VAL_BEFORE_TRAIN=True \
-  bash scripts/_internal/s3_fullasync_docker.sh
-
-# Monitor
-python /tmp/replay_monitor.py &        # emits /tmp/replay-monitor.jsonl
-tail -f /tmp/s3-fullasync-*.log
-```
-
-All nine problems surface within the first 20 steps.

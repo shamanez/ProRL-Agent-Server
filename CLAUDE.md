@@ -8,7 +8,7 @@ ProRLAgent Server is a scalable multi-turn rollout service for training/evaluati
 
 ## Start here
 
-If you are a planning / implementation agent landing on this repo in a new session: read **[`plans-n-solutions/handsoff.md`](plans-n-solutions/handsoff.md)** end to end before you touch anything. That doc is the single source of truth for the current system (fully-async decoupled agentic RL) — topology, launch sequence, credentials, observability, pointer table, gotchas. The open problem sheet is **[`plans-n-solutions/stages/current_bottlenecks_and_problems.md`](plans-n-solutions/stages/current_bottlenecks_and_problems.md)** — that's the work queue.
+If you are a planning / implementation agent landing on this repo in a new session, the entry point is **[`plans-n-solutions/architecture-walkthrough.md`](plans-n-solutions/architecture-walkthrough.md)** — a doc map that points you to the right reference for your task type. The single source of truth for the running system is **[`plans-n-solutions/handsoff.md`](plans-n-solutions/handsoff.md)** (topology, launch sequence, credentials, observability, pointer table, gotchas) and the open problem sheet is **[`plans-n-solutions/stages/current_bottlenecks_and_problems.md`](plans-n-solutions/stages/current_bottlenecks_and_problems.md)**.
 
 This file (`CLAUDE.md`) covers the **architectural invariants**. `handsoff.md` covers how to run, debug, and extend the live system.
 

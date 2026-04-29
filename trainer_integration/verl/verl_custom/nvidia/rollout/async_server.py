@@ -298,7 +298,32 @@ class AsyncLLMServerManager:
         if hasattr(self.tokenizer, 'tokenizer'):
             self.tokenizer = self.tokenizer.tokenizer
 
-        # Set sequence length constraints from configuration
+        # Sequence length contract (two-knob; do NOT collapse):
+        #   data.max_prompt_length:        dataset filter + addend in
+        #                                  total_len. Never reaches vLLM
+        #                                  directly.
+        #   data.max_response_length:      addend in total_len.
+        #   total_len = sum of the two:    plumbed to vLLM as
+        #                                  LLMConfig.max_model_len below.
+        #                                  vLLM enforces
+        #                                  seed_at_turn + body_at_turn
+        #                                  <= total_len per call, so the
+        #                                  whole accumulated response is
+        #                                  bounded by total_len - initial
+        #                                  seed.
+        #   max_starting_message_length:   empirical SWE-Gym cap on the
+        #                                  rollout-side seed slot
+        #                                  (system_prompt + dataset
+        #                                  instance prompt). This is the
+        #                                  width the train code left-pads
+        #                                  the prompt tensor to before
+        #                                  shipping to the trainer; sized
+        #                                  to 12000 (not 31232) to save
+        #                                  trainer-side activations.
+        # The replay store mirrors this contract: prompt cap =
+        # max_starting_message_length, response cap = total_len. See
+        # ray_trainer.py wiring next to TrajectoryStore(...) and the
+        # docstring on TrajectoryStore.
         self.max_prompt_length = self.full_config.data.max_prompt_length
         self.max_response_length = self.full_config.data.max_response_length
         self.total_len = self.max_prompt_length + self.max_response_length

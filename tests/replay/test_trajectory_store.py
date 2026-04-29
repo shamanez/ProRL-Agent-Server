@@ -594,7 +594,63 @@ def test_sample_mini_batch_n_groups_must_be_positive():
 # --- truncation / cap behavior ----------------------------------------------
 
 
-def test_response_length_cap_truncates_head_keeps_front():
+def test_response_at_cap_packs_clean():
+    """A response exactly at the cap packs cleanly (no assertion fires)."""
+    store = TrajectoryStore(
+        max_size=4,
+        staleness_cutoff_k=10,
+        pad_token_id=PAD_ID,
+        response_length_cap=4,
+    )
+    store.push_group(
+        [
+            _record(
+                seed=0,
+                response_ids=(99, 100, 101, 102),
+                loss_mask=(1, 1, 1, 1),
+                log_probs=(0.1, 0.2, 0.3, 0.4),
+            )
+        ]
+    )
+    mb = store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
+    resp_row = mb.tensors['responses'][0]
+    assert resp_row.shape[0] == 4
+    assert resp_row.tolist() == [99, 100, 101, 102]
+    m = store.metrics(current_step=0)
+    assert m['replay/oversize_response_total'] == 0.0
+
+
+def test_prompt_at_cap_packs_clean():
+    """A prompt exactly at the cap packs cleanly (no assertion fires)."""
+    store = TrajectoryStore(
+        max_size=4,
+        staleness_cutoff_k=10,
+        pad_token_id=PAD_ID,
+        prompt_length_cap=5,
+    )
+    store.push_group(
+        [
+            _record(
+                seed=0,
+                prompt_ids=(1, 2, 3, 4, 5),
+                response_ids=(6,),
+                loss_mask=(1,),
+                log_probs=(0.0,),
+            )
+        ]
+    )
+    mb = store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
+    prompt_len = mb.tensors['input_ids'].shape[1] - mb.tensors['responses'].shape[1]
+    prompt = mb.tensors['input_ids'][0, :prompt_len]
+    attn = mb.tensors['attention_mask'][0, :prompt_len]
+    unpad = prompt[attn == 1].tolist()
+    assert unpad == [1, 2, 3, 4, 5]
+    m = store.metrics(current_step=0)
+    assert m['replay/oversize_prompt_total'] == 0.0
+
+
+def test_pack_raises_on_oversize_response():
+    """Response longer than ``response_length_cap`` raises and counts."""
     store = TrajectoryStore(
         max_size=4,
         staleness_cutoff_k=10,
@@ -611,15 +667,15 @@ def test_response_length_cap_truncates_head_keeps_front():
             )
         ]
     )
-    mb = store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
-    # Response was truncated to first 2 tokens.
-    resp_row = mb.tensors['responses'][0]
-    assert resp_row.shape[0] == 2
-    assert resp_row.tolist() == [99, 100]
+    with pytest.raises(RuntimeError, match='response_ids length'):
+        store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
+    m = store.metrics(current_step=0)
+    assert m['replay/oversize_response_total'] == 1.0
+    assert m['replay/oversize_prompt_total'] == 0.0
 
 
-def test_prompt_length_cap_truncates_keeps_tail():
-    """Prompt truncation keeps the *tail* (most recent context)."""
+def test_pack_raises_on_oversize_prompt():
+    """Prompt longer than ``prompt_length_cap`` raises and counts."""
     store = TrajectoryStore(
         max_size=4,
         staleness_cutoff_k=10,
@@ -637,13 +693,21 @@ def test_prompt_length_cap_truncates_keeps_tail():
             )
         ]
     )
-    mb = store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
-    # With cap=2 we keep (4, 5) — the most recent tokens.
-    prompt_len = mb.tensors['input_ids'].shape[1] - mb.tensors['responses'].shape[1]
-    prompt = mb.tensors['input_ids'][0, :prompt_len]
-    attn = mb.tensors['attention_mask'][0, :prompt_len]
-    unpad = prompt[attn == 1].tolist()
-    assert unpad == [4, 5]
+    with pytest.raises(RuntimeError, match='prompt_ids length'):
+        store.sample_mini_batch(n_groups=1, current_step=0, rng=random.Random(0))
+    m = store.metrics(current_step=0)
+    assert m['replay/oversize_prompt_total'] == 1.0
+    assert m['replay/oversize_response_total'] == 0.0
+
+
+def test_metrics_exposes_oversize_counters():
+    """Both oversize counters appear in ``metrics()`` output and start at 0."""
+    store = TrajectoryStore(max_size=4, staleness_cutoff_k=10, pad_token_id=PAD_ID)
+    m = store.metrics(current_step=0)
+    assert 'replay/oversize_prompt_total' in m
+    assert 'replay/oversize_response_total' in m
+    assert m['replay/oversize_prompt_total'] == 0.0
+    assert m['replay/oversize_response_total'] == 0.0
 
 
 # --- push_from_dataproto round-trip (host-runnable via SimpleNamespace) ------

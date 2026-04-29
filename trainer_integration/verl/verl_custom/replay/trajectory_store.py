@@ -122,10 +122,15 @@ class TrajectoryStore:
         The tokenizer pad id used to right-pad responses and left-pad
         prompts at sample time.
     prompt_length_cap, response_length_cap:
-        Optional hard caps mirroring the trainer's
-        ``max_starting_message_length`` / ``total_len``. Trajectories
-        longer than the cap are right-truncated (prompts keep the tail,
-        responses keep the head).
+        Defensive hard caps mirroring the rollout-side packer contract:
+        ``prompt_length_cap`` = rollout's ``max_starting_message_length``
+        (seed-slot width); ``response_length_cap`` = rollout's
+        ``total_len = max_prompt_length + max_response_length`` (vLLM
+        ``max_model_len``). The rollout packer is expected to produce
+        records that already satisfy these bounds. ``_pack`` raises
+        :class:`RuntimeError` if a record exceeds either cap — that is a
+        contract violation, not a routine truncation. Use ``None`` to
+        skip the assertion.
     """
 
     def __init__(
@@ -150,6 +155,13 @@ class TrajectoryStore:
         self._groups: deque[list[TrajectoryRecord]] = deque(maxlen=max_size)
         self._lock = threading.Lock()
         self._dropped_by_staleness_total = 0
+        # Contract-violation counters — incremented inside ``_pack`` just
+        # before the RuntimeError raise, surfaced via ``metrics()`` so
+        # operators see a non-zero value in the W&B history if the
+        # rollout-side packer ever produces an over-cap record (and the
+        # trainer crash that follows). Steady state must be 0.
+        self._oversize_prompt_total = 0
+        self._oversize_response_total = 0
         self._last_sample_ages: list[int] = []
         # Monotonic count of groups ever appended. Used by the trainer's
         # no-progress detector (replaces the brittle 7200 s hard-cap on
@@ -493,9 +505,34 @@ class TrajectoryStore:
         extras_by_key: dict[str, list[Any]] = {k: [] for k in extra_keys}
 
         for i, rec in enumerate(records):
-            # Right-truncate prompts and responses to their caps. Prompts
-            # keep their tail (the most recent context) so left-pad-offset
-            # arithmetic stays right; responses keep their head.
+            # Defensive cap assertions: the rollout-side packer must produce
+            # records that already fit within the configured caps (see the
+            # ``prompt_length_cap`` / ``response_length_cap`` docstring).
+            # If a record over-shoots, that is a contract violation —
+            # ``data.truncation='error'`` semantics applied to the rollout/
+            # replay seam — so we count it and raise rather than silently
+            # right-trimming a slice the reward was already scored on.
+            if self._prompt_cap is not None and len(rec.prompt_ids) > self._prompt_cap:
+                self._oversize_prompt_total += 1
+                raise RuntimeError(
+                    f'replay/_pack: prompt_ids length {len(rec.prompt_ids)} '
+                    f'exceeds cap {self._prompt_cap}; rollout-side packer '
+                    f'contract violated. group_uid={rec.group_uid}'
+                )
+            if (
+                self._response_cap is not None
+                and len(rec.response_ids) > self._response_cap
+            ):
+                self._oversize_response_total += 1
+                raise RuntimeError(
+                    f'replay/_pack: response_ids length '
+                    f'{len(rec.response_ids)} exceeds cap '
+                    f'{self._response_cap}; vLLM max_model_len contract '
+                    f'violated. group_uid={rec.group_uid}'
+                )
+            # Slice is now a no-op for any record that passed the assertions
+            # above. Kept for the ``cap is None`` fallback path used in
+            # tests and small configurations.
             p_ids = rec.prompt_ids[-max_prompt:]
             offset = max_prompt - len(p_ids)
             prompt_ids[i, offset : offset + len(p_ids)] = torch.tensor(
@@ -606,11 +643,15 @@ class TrajectoryStore:
             groups = [list(g) for g in self._groups]
             last_sample_ages = list(self._last_sample_ages)
             dropped_total = self._dropped_by_staleness_total
+            oversize_prompt_total = self._oversize_prompt_total
+            oversize_response_total = self._oversize_response_total
         base: dict[str, float] = {
             'replay/store_size': float(len(groups)),
             'replay/store_fill_ratio': float(len(groups)) / float(self._max_size),
             'replay/store_num_trajectories': float(sum(len(g) for g in groups)),
             'replay/dropped_by_staleness_total': float(dropped_total),
+            'replay/oversize_prompt_total': float(oversize_prompt_total),
+            'replay/oversize_response_total': float(oversize_response_total),
         }
         if groups:
             ages = np.array(

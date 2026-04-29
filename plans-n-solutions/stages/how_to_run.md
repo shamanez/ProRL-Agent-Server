@@ -1,6 +1,6 @@
 # Runbook — how to execute a fully-async training run
 
-Authoritative launch procedure for the current branch. Companion to `handsoff.md §2` — this doc adds the env-knob matrix, monitoring, stop/resume, and failure runbook.
+Authoritative launch procedure. Companion to `handsoff.md §2` — this doc adds the env-knob matrix, monitoring, stop/resume, and failure runbook. For the producer-store-trainer mechanics behind these knobs (record fields, push/sample step-by-step, temporal-IS, `replay/*` metric reads), see [`replay_dynamics.md`](replay_dynamics.md).
 
 Source of truth: `scripts/_internal/s3_fullasync_docker.sh` (outer) + `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh` (inner). **Do not invent new invocations.**
 
@@ -29,7 +29,6 @@ Required keys:
 ```bash
 cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
 git status           # expect clean or known-intentional edits only
-git log -1 --oneline # confirm HEAD on full-async branch
 ls /tmp/verl         # pinned verl checkout must be present (shamanez/verl, 910ba344)
 source /home/ubuntu/.prorl_creds.env   # populates env for manual commands
 ```
@@ -73,11 +72,11 @@ curl -s localhost:8006/healthz
 ### Terminal 3 — FSDP trainer in Docker
 
 ```bash
-# Default (PRIMARY run — plain GRPO, filter_groups=False):
+# Default (DAPO with filter_groups=True):
 bash scripts/_internal/s3_fullasync_docker.sh
 
-# DAPO gate (filter_groups=True, ~2-3× wall-clock, only after plain run clean):
-FILTER_GROUPS=True bash scripts/_internal/s3_fullasync_docker.sh
+# Plain-GRPO fallback (only for throwaway smoke against the plain code paths):
+FILTER_GROUPS=False bash scripts/_internal/s3_fullasync_docker.sh
 
 # Short smoke test (2 steps, save every step):
 TOTAL_TRAINING_STEPS=2 SAVE_FREQ=1 bash scripts/_internal/s3_fullasync_docker.sh
@@ -98,20 +97,23 @@ The outer docker script:
 
 ## Env-knob matrix
 
+The two important ones are `GEN_BATCH_SIZE` (producer-side — how fast we fill the buffer) and `BATCH_SIZE` / `train_batch_size` (trainer-side — how fast we drain). They are **independent**: the trainer never waits on the producer once the buffer is warm, the producer never waits on the trainer.
+
 | Var | Default | What it controls | When to override |
 |---|---|---|---|
-| `REPLAY_ENABLE` | `True` | Master switch for TrajectoryStore + temporal IS | Set `False` to fall back to lock-step (matches baseline `s2_weightsync_docker.sh`) |
-| `BUFFER_SIZE` | `128` | Max surviving groups held in replay store (= 4 × train_batch_size × n) | Shrink if `sample_age_p95` near K; grow if replay reuse wanted |
-| `STALENESS_CUTOFF_K` | `4` | Hard FIFO staleness eviction (steps) | Lower if IS clip fraction > 0.2 |
-| `PRODUCER_BATCH_SIZE` | `4` | Groups per DAPO producer call (= train_batch_size) | Keep equal to train_batch_size |
-| `USE_TEMPORAL_IS` | `True` | Gate for clipped IS correction in `core_algos.py` | Disable for pure on-policy A/B |
-| `CONTINUOUS_PRODUCER` | `True` | Daemon producer thread (vs inline lock-step) | `False` reverts to lock-step rollout |
-| `FILTER_GROUPS` | `False` | DAPO filter_groups.enable | Flip to `True` ONLY after filter=False run clean |
-| `TOTAL_EPOCHS` | `10` | — | Scale up for full runs |
-| `TOTAL_TRAINING_STEPS` | `500` | — | `2` for smoke, `5000+` for learning |
-| `SAVE_FREQ` | `1` | Checkpoint + publish cadence | `5` for standard runs (handsoff gate: ≥ 4 reload_lora per 20 steps) |
-| `LOG_PATH` | `/tmp/s3-fullasync.log` | — | Override per run for A/B logs |
-| `REMOTE_DNS` | `ec2-54-145-77-207.compute-1.amazonaws.com` | vLLM pool public DNS | Change when pool moves |
+| `GEN_BATCH_SIZE` | `BATCH_SIZE × 4` (= 16) | **Producer**: prompts attempted per `generate_sequences_dapo` call. Each call ships up to `GEN_BATCH_SIZE × n` trajectories (after zero-variance drops). | Raise to fill the buffer faster: `32` (= 8 × `BATCH_SIZE`) for longer hot phase per call; cuts call-boundary dead time per hour. Real ceiling is set by vLLM pool throughput + `OPENHANDS_NUM_WORKERS` (handsoff §17, §30). |
+| `BATCH_SIZE` (`train_batch_size`) | `4` | **Trainer**: groups drained from the buffer per step. Internally `BATCH_SIZE × n = 32` trajectories per step. | Don't tune unless you know why — affects FSDP compute shape and group-mean variance. |
+| `BUFFER_SIZE` | `256` | Max surviving groups held in replay store (FIFO). | Shrink if `sample_age_p95` near `K`; grow if you intend replay reuse (currently the regime is near-on-policy, so the buffer rarely fills). |
+| `STALENESS_CUTOFF_K` | `4` | Hard FIFO staleness eviction (steps). | Lower if `is_weight/clip_fraction > 0.2`. |
+| `FILTER_GROUPS` | `True` | DAPO `filter_groups.enable`. Producer drops `resolved == 0` and `resolved == n` (zero-variance groups carry no GRPO gradient). | `False` only for throwaway plain-GRPO debugging. |
+| `USE_TEMPORAL_IS` | `True` | Gate for clipped IS correction in `core_algos.py`. | Disable for a pure on-policy A/B. |
+| `REPLAY_ENABLE` | `True` | Master switch for TrajectoryStore + temporal IS. | `False` reverts to lock-step (matches baseline `s2_weightsync_docker.sh`). |
+| `CONTINUOUS_PRODUCER` | `True` | Daemon producer thread (vs inline lock-step). | `False` reverts to lock-step rollout. |
+| `TOTAL_EPOCHS` | `10` | — | Scale up for full runs. |
+| `TOTAL_TRAINING_STEPS` | `500` | — | `2` for smoke, `5000+` for learning. |
+| `SAVE_FREQ` | `1` | Checkpoint + publish cadence. | `5` for standard runs (gate: ≥ 4 reload_lora per 20 steps). |
+| `LOG_PATH` | `/tmp/s3-fullasync.log` | — | Override per run for A/B logs. |
+| `REMOTE_DNS` | `ec2-54-145-77-207.compute-1.amazonaws.com` | vLLM pool public DNS. | Change when pool moves. |
 
 Extra Hydra overrides can be appended after the launcher call:
 ```bash
@@ -127,15 +129,15 @@ Key Hydra values in `run_proagent_qwn3_4B_instruct_fullasync.sh`:
 | Key | Value | Why |
 |---|---|---|
 | `algorithm.adv_estimator` | `grpo` | GRPO group baseline |
-| `data.train_batch_size` | `4` | Prompts per step (× n=8 → 32 trajectories/step) |
-| `data.gen_batch_size` | `1` | One prompt at a time through OpenHands |
+| `data.train_batch_size` | `4` | **Trainer-side.** Groups pulled from the buffer per step (× n=8 → 32 trajectories/step). |
+| `data.gen_batch_size` | `BATCH_SIZE × 4` (= 16) | **Producer-side.** Prompts attempted per producer call; raise to fill the buffer faster (`GEN_BATCH_SIZE=32` for 8 ×). |
 | `data.max_prompt_length` | `31232` | 31k context |
-| `data.max_response_length` | `1536` | Response budget per turn |
+| `data.max_response_length` | `16384` | Response budget per turn |
 | `actor_rollout_ref.rollout.n` | `8` | Samples per prompt (DAPO-aligned) |
-| `actor_rollout_ref.model.lora_rank` | `32` (note) | Trainer side; pool applies rank-16 adapter after quant |
+| `actor_rollout_ref.model.lora_rank` | `32` | Trainer side; pool applies rank-16 adapter after quant |
 | `actor_rollout_ref.actor.optim.lr` | `1e-6` | LoRA-safe LR |
-| `actor_rollout_ref.actor.tis_imp_ratio_cap` | `2` | TIS clamp |
-| `actor_rollout_ref.rollout.openhands_num_workers` | `32` | Sweet spot for 4-child pool (64 regresses per gotcha §17) |
+| `actor_rollout_ref.actor.tis_imp_ratio_cap` | `5` | TIS clamp (wide enough for T-mismatch + kernel floor; see handsoff §27) |
+| `actor_rollout_ref.rollout.openhands_num_workers` | `32` | Sweet spot for 4-child pool (64 regresses per handsoff §17) |
 | `actor_rollout_ref.rollout.max_iterations` | `30` | Max agent turns |
 | `actor_rollout_ref.rollout.openhands_timeout` | `1000` | Per-job seconds |
 | `actor_rollout_ref.rollout.temperature` | `1.4` | High exploration |
@@ -144,10 +146,12 @@ Key Hydra values in `run_proagent_qwn3_4B_instruct_fullasync.sh`:
 | `actor_rollout_ref.rollout.publish_on_save` | `True` | LoRA auto-publish on save |
 | `actor_rollout_ref.actor.use_kl_loss` | `False` | RLVR — no reward-model drift to anchor against |
 | `actor_rollout_ref.actor.clip_ratio_low/high` | `0.2 / 0.28` | DAPO clip-higher |
+| `+replay.stop_timeout_s` | `300` | Cooperative-stop window for the producer thread (handsoff §19, §25) |
+| `+replay.no_progress_timeout_s` | `1800` | Replay-store no-progress detector (handsoff §31) |
 | `trainer.n_gpus_per_node` | `8` | FSDP degree |
 | `trainer.resume_mode` | `auto` | Picks latest `global_step_*` in STAGE2_OUT |
-| `trainer.val_before_train` | `False` | In-run validation disabled |
-| `trainer.test_freq` | `-1` | In-run eval disabled |
+| `trainer.val_before_train` | `False` | In-run validation disabled by default |
+| `trainer.test_freq` | `-1` | In-run eval disabled by default |
 
 Output directory: `/workspace/outputs/ProAgent/fullasync` inside container (bind-mounted from host repo).
 
@@ -169,10 +173,10 @@ grep "step:" /tmp/s3-fullasync.log | tail -5
 # Weight-sync publish events (one per save_freq)
 grep publish_lora_adapter /tmp/s3-fullasync.log
 
-# Producer-mode bug #16 markers (one per DAPO call)
+# Producer-mode leftover-job rebuild marker (one per DAPO call)
 grep "dropped [0-9]* leftover jobs" /tmp/s3-fullasync.log | wc -l
 
-# Gotcha §19 cooperative-stop skip — MUST BE ZERO
+# §19 cooperative-stop skip — should be rare
 grep -c "did not exit within\|skipping _validate" /tmp/s3-fullasync.log
 
 # Tracebacks — MUST BE ZERO
@@ -204,7 +208,7 @@ done
 
 ### WandB
 
-Project: `ProAgent`. Experiment: `fullasync-replay-prorl`. Key panels to track (handsoff §12):
+Project: `ProAgent`. Experiment: `fullasync-replay-prorl`. Key panels (handsoff §5):
 - `replay/store_size`, `replay/store_fill_ratio`, `replay/sample_age_steps_p50/p95`, `replay/dropped_by_staleness_total`
 - `is_weight/mean`, `is_weight/p99`, `is_weight/clip_fraction`
 - `weight_sync/policy_version`, `weight_sync/endpoints_ok`, `weight_sync/endpoints_failed`
@@ -249,8 +253,6 @@ ls /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/outputs/ProAgent/fulla
 # rm -rf global_step_{later-than-target}  # CAREFUL
 ```
 
-**Current on-disk state (post-prep-100, 2026-04-26):** only `global_step_40` is preserved (all earlier prep-100 checkpoints were deleted to free disk during session shutdown). `resume_mode=auto` will pick it. If you need an earlier resume target you must re-train from scratch.
-
 ### Fresh start (discard checkpoints)
 
 ```bash
@@ -269,7 +271,7 @@ bash scripts/_internal/s3_fullasync_docker.sh
    bash scripts/serving/launch_remote_vllm_pool.sh start
    ```
 3. **Fix**: edit, `make lint`, `pytest -m "not integration and not slow and not real_data"`, commit (never `--no-verify`).
-4. **Note**: add gotcha to `plans-n-solutions/handsoff.md §10` (or bump gotcha number if new).
+4. **Note**: add gotcha to `plans-n-solutions/handsoff.md §6` (or bump gotcha number if new).
 5. **Rerun**: same command as before; `resume_mode=auto` picks up.
 
 ### Common failures
@@ -278,15 +280,16 @@ bash scripts/_internal/s3_fullasync_docker.sh
 |---|---|---|
 | `/health` timeout during pre-flight | Pool not up or SG blocks trainer IP | Run `launch_remote_vllm_pool.sh start`; confirm EC2 SG 8100-8103 inbound |
 | `endpoints_failed > 0` in `weight_sync/*` | One vLLM child OOM'd or drained; partial publish → mixed policy versions | Abort (trainer does this automatically). Restart pool. Resume. |
-| `did not exit within Ns; leaving thread running` | Producer stuck mid-`asyncio.run(generate_sequences)` during save | Handled automatically — caller skips validation, retries next boundary. Verify `skipping _validate` warning appears once, then normal progress. Fix `590f8281` applied in Cut 4.1. |
-| Tracebacks with `NoneType.concat` in DAPO | Bug #16 (`all_input_batch` leak across producer calls) | Reset fires each call ("dropped N leftover jobs" marker). Count should equal producer call count. |
-| tqdm frozen > 60 min with no producer-mode markers | Producer wedged | `docker rm -f s3-fullasync`, restart pool, resume |
+| `did not exit within Ns; leaving thread running` | Producer stuck mid-`asyncio.run(generate_sequences)` during save | Handled automatically — caller skips validation, retries next boundary. Verify `skipping _validate` warning appears, then normal progress. |
+| Tracebacks with `NoneType.concat` in DAPO | `all_input_batch` leak across producer calls (handsoff §18) | Reset fires each call ("dropped N leftover jobs" marker). Count should equal producer call count. |
+| tqdm frozen with no producer-mode markers | Producer wedged | `docker rm -f s3-fullasync`, restart pool, resume |
 | 5xx on `/generate` during publish | Pool drain race | Non-fatal under load (`drain_timed_out:true, ok:true`). Count should stay low. Concern if > 10% of calls. |
+| `Replay store made no forward progress` | No new groups pushed for `no_progress_timeout_s` (default 1800 s) | Producer is genuinely wedged. Stop trainer, restart pool, resume. |
 
 ## Short smoke test (reproducible)
 
 ```bash
-# 2 steps, save every step — minimal end-to-end exercise (~30-40 min)
+# 2 steps, save every step — minimal end-to-end exercise
 TOTAL_TRAINING_STEPS=2 SAVE_FREQ=1 LOG_PATH=/tmp/smoke.log \
   bash scripts/_internal/s3_fullasync_docker.sh
 
@@ -298,94 +301,30 @@ grep -c Traceback /tmp/smoke.log   # 0
 
 ## Frozen — do not edit
 
-- `scripts/_internal/s2_weightsync_docker.sh` (matched-`global_steps` A/B baseline)
+- `scripts/_internal/s2_weightsync_docker.sh` (matched-`global_steps` lock-step A/B baseline)
 - `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` (same)
 - `dev_config/python/**` (lint/type/format configs — require explicit approval to change)
 - `/tmp/verl/**` (pinned verl checkout at commit `910ba344`)
 
 ## Validation after a run
 
-In-run validation is optional (`trainer.test_freq`, `trainer.val_before_train`). Offline A/B:
-
-```bash
-# Via eval-harness skill on validation.parquet (23 prompts, input_hash pass@k)
-# Compares full-async checkpoint vs baseline at matched global_steps.
-# Triggered from Claude Code: /eval-harness ... (see .claude/skills/)
-```
+In-run validation is optional (`trainer.test_freq`, `trainer.val_before_train`). Offline A/B uses the eval-harness skill against `validation.parquet` (23 prompts, input_hash pass@k) at matched `global_steps`.
 
 Success signals (all should hold on a healthy run):
 1. `weight_sync/endpoints_failed == 0` end-to-end
 2. ≥ 4 `/reload_lora` events per 20 steps at `save_freq=5`
 3. Zero 5xx on `/generate` during publishes
 4. `replay/sample_age_steps_p95 ≤ K` (K=4) AND `rollout/staleness_steps_p95 ≤ K + save_freq`
-5. `is_weight/p99 < 10`, `is_weight/clip_fraction < 0.2`  *(currently FAIL — problem #3)*
+5. `is_weight/p99 < 10`, `is_weight/clip_fraction < 0.25` (with `tis_imp_ratio_cap=5`)
 6. `critic/rewards/mean` trends up on long runs
 7. Offline A/B: full-async ≥ baseline pass@k on validation.parquet
 8. Both `filter_groups={False, True}` runs land clean
-9. Zero tracebacks, zero §19 skipped-validates  *(currently FAIL at step-10 — problem #7)*
+9. Zero tracebacks
 10. Token-in/token-out golden-file preserved
-
-## Where this session leaves you (2026-04-26 sign-off)
-
-### Last known-good state
-
-- **HEAD commit:** `full-async-optimization` branch, post Cut 9 (no-progress detector).
-- **Only preserved checkpoint:** `outputs/ProAgent/fullasync/global_step_40/` (full FSDP shards + LoRA adapter). All earlier prep-100 checkpoints were deleted; this is the only resume target.
-- **WandB:** project `ProAgent`, experiment `fullasync-replay-prorl`. **Only run kept:** `z6yznr3z` (the prep-100 run, finished). 32 prior runs in the project were deleted.
-- **vLLM pool:** healthy on all 4 children (`/health` 200, `MAX_MODEL_LEN=47616`).
-- **ProRL FastAPI:** still running on host `:8006` (pid via `pgrep -f s0_prorl`).
-- **Disk:** `/dev/root` 71% used (down from 92%); ~210 GB freed during cleanup.
-
-### Three ways to pick up
-
-**A. Resume training from step 40 with the no-progress fix in place.**
-```bash
-# vLLM pool already up; ProRL already up. Just relaunch the trainer:
-TOTAL_TRAINING_STEPS=100 GEN_BATCH_SIZE=32 SAVE_FREQ=5 TEST_FREQ=-1 \
-  bash scripts/_internal/s3_fullasync_docker.sh
-```
-`TEST_FREQ=-1` keeps the §19 cooperative-skip mechanism out of the picture entirely until the deferred pause/resume lands. `resume_mode=auto` picks `global_step_40` automatically.
-
-**B. Evaluate the step-40 LoRA adapter (post-hoc pass@k against `validation.parquet`).**
-The adapter is ready to load:
-```
-outputs/ProAgent/fullasync/global_step_40/actor/lora_adapter/
-├── adapter_config.json   (peft 0.18.1, r=32, alpha=64, base=Qwen/Qwen3-4B-Instruct-2507)
-└── adapter_model.safetensors  (253 MB)
-```
-The driver is not yet written. See `plans-n-solutions/stages/current_bottlenecks_and_problems.md` for the eval shape (T=0.6, top_p=0.95, n=2 against the live pool with this adapter loaded via `/load_lora`).
-
-**C. Land Cut 7 (multi-producer fan-out) before any more training.**
-Only do this if you want to address the producer call-boundary trough at the architectural level. Full file list and shape in `current_bottlenecks_and_problems.md` ("Next session — Cut 7"). Pair it with the deferred pause/resume implementation since both touch `continuous_producer.py`.
-
-### Open TODOs (carry forward)
-
-| TODO | Scope | Why deferred | Where it goes |
-|---|---|---|---|
-| **`continuous_producer.pause()` / `resume()`** | ~40 LOC in `verl_custom/replay/continuous_producer.py` | The §19 cooperative-skip mechanism prevented in-training pass@k for the entire prep-100 run (15 skips). The principled fix lets the worker finish its current call cleanly, pauses between calls, and lets `_validate()` run without races. | handsoff.md §19 / §25 |
-| **Cut 7 — multi-producer fan-out** | `ray_trainer.py`, `async_server_dapo.py`, second OH server on `:8007` | Producer call-boundary dead gap (~26 min/call). Cut 8 (gen_batch_size 16→32) is the cheap mitigation; Cut 7 is the principled fix. | current_bottlenecks_and_problems.md "Next session" |
-| **LoRA-only post-hoc eval driver** | New script under `scripts/eval/` | Need pass@k numbers from step 40 without spinning up the FSDP trainer. Loads `adapter_model.safetensors` into the pool via `/load_lora`, scores `validation.parquet`. | current_bottlenecks_and_problems.md (option B above) |
-| **Temperature alignment in `dp_actor.compute_log_prob`** | `verl_custom/workers/actor/dp_actor.py` | `is_weight/clip_fraction` decomposition: ~0.35 of the 0.55 mean log-ratio is rollout-vs-train temperature mismatch (T=1.4 → T=1.0). Aligning the compute_log_prob temperature would cut ~60% of "drift" that isn't drift. Deferred because raising `tis_imp_ratio_cap` to 5 was sufficient for the prep run. | handsoff.md §27 |
-| **Per-prompt instrumentation** | `nvidia/rollout/async_server_dapo.py` | Iter-3 wall regression (80 min vs 53 min) couldn't be diagnosed without `(uid, resolved_ratio, wall_s)` per prompt in `DAPO_PRODUCER_CALL`. | current_bottlenecks_and_problems.md problem #8 |
-| **DAPO gate (`FILTER_GROUPS=True`)** | `s3_fullasync_docker.sh` env | Default already `True`; just confirm it stays clean across the next 100-step run. Plain-GRPO fallback is `FILTER_GROUPS=False`. | how_to_run.md |
-
-### What "good" looks like on the next run
-
-(Same target table as before; carry forward.)
-- `weight_sync/endpoints_failed == 0`
-- `replay/sample_age_steps_p95 ≤ 4`
-- `is_weight/clip_fraction < 0.25` (post-Cut-2 cap raise)
-- `response_length/clip_ratio` trends down or stays bounded
-- `critic/rewards/mean` trends up across 50+ steps
-- Zero tracebacks, zero `Replay store made no forward progress` (Cut 9 guardrail)
 
 ## Related docs
 
 - `plans-n-solutions/handsoff.md` — topology, pointer table, gotchas, credentials
-- `plans-n-solutions/stages/current_bottlenecks_and_problems.md` — open problems
-- `plans-n-solutions/stages/run9_n16_report.md` — moment-of-truth run evidence
-- `plans-n-solutions/stages/replay_dynamics.md` — producer/store/trainer interaction
-- `plans-n-solutions/stages/latencies.md` — per-component latency / TPS breakdown
 - `openhands/nvidia/README.md` — FastAPI job lifecycle
 - `openhands/llm/nvidia/README.md` — token-in/token-out invariant
 - `CLAUDE.md` — architectural invariants

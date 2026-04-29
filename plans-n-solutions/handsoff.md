@@ -1,8 +1,6 @@
 # Handoff — current system
 
-Single source of truth for a fresh session. Read top to bottom before touching anything. `CLAUDE.md` at repo root covers architectural invariants; this doc covers **how the live system works, how to run it, how to debug it, and what is currently broken**.
-
-**Branch.** `full-async-optimization`. Baseline commit `01227c27` (branched off `full-async`). The primary next work is attacking the problems in [`stages/current_bottlenecks_and_problems.md`](stages/current_bottlenecks_and_problems.md) — that is the evidence sheet. Pick one lever per branch; don't stack.
+Single source of truth for a fresh session. Read top to bottom before touching anything. `CLAUDE.md` at repo root covers architectural invariants; this doc covers **how the live system works, how to run it, and how to debug it**.
 
 ---
 
@@ -13,11 +11,9 @@ ProRLAgent Server + verl fork, configured as a **fully-async decoupled agentic R
 - Rollouts stream continuously into a bounded in-process replay store.
 - Trainer samples from the store on its own cadence with clipped temporal importance-sampling correction and a hard staleness cutoff.
 - Rank-16 LoRA adapters ship to the vLLM pool via `POST /reload_lora` every `SAVE_FREQ` steps.
-- Both plain GRPO and DAPO (`filter_groups=True`) are wired.
+- Both plain GRPO and DAPO (`filter_groups=True`) are wired; DAPO is the default.
 
 Intellectual reference: `docs/README.md` (Arnal et al. 2026 distilled).
-
-**Moment-of-truth run:** Run9 (n=16, DAPO `filter_groups=True`, K=4 staleness, 128-group FIFO buffer, LR=1e-6, rank-16 LoRA). Log `/tmp/s3-fullasync-n16-baseline.log`, monitor JSONL `/tmp/replay-monitor.jsonl`. Evidence: `stages/run9_n16_report.md`. Problem sheet: `stages/current_bottlenecks_and_problems.md`.
 
 ---
 
@@ -42,82 +38,30 @@ Intellectual reference: `docs/README.md` (Arnal et al. 2026 distilled).
 
 The trainer container talks to ProRL on host `localhost:8006`; ProRL is called by OpenHands agents running inside vLLM-child turn loops, NOT directly by the trainer. `EXTERNAL BYPASS ACTIVE` in trainer logs confirms the decoupled topology is engaged.
 
-**Producer topology (Cut 5 onward).** The continuous producer is a pure
-consumer of the replay buffer: it calls `generate_sequences_dapo` in a
-loop on a daemon thread, and the DAPO manager eagerly pushes each
-survivor into the `TrajectoryStore` the moment it clears
-`filter_easy_hard_instance` — not at the end of the iteration.
-The trainer samples `train_batch_size` groups per step from the buffer
-and never waits after warmup. Zero-variance groups never enter the
-buffer (DAPO ingest filter runs at push time, so the buffer only holds
-gradient-bearing content).
+**The mental model.** Producer's job is to **fill the buffer**. Trainer's job is to **drain the buffer** at its own cadence. They share nothing else.
 
-**Two-batch architecture (Cut 6 onward).** Producer batch and trainer
-batch are **distinct config keys**. Trajectory accounting is:
+- `data.gen_batch_size` controls the **producer**: how many prompts a single `generate_sequences_dapo` call attempts. With `rollout.n=8`, one call ships up to `gen_batch_size × n` trajectories (after zero-variance drops). The DAPO manager eagerly pushes each surviving group into the `TrajectoryStore` the moment it clears `filter_easy_hard_instance` — not at end of call.
+- `data.train_batch_size` controls the **trainer**: how many groups it pulls from the buffer per step. Internally that's `train_batch_size × n` trajectories; after `compute_advantage` the loss path treats them as a flat tensor.
 
-- `data.gen_batch_size` (default `8 × train_batch_size = 32` post Cut
-  8; was `4 × train_batch_size = 16` for the Cut 6 baseline run) is
-  **prompts** the producer must complete + filter per call. With
-  `actor_rollout_ref.rollout.n=8`, one producer call ships
-  `gen_batch_size × n = 256` trajectories (modulo zero-variance
-  drops, which loop until the survivor target ships). The bump from
-  16 → 32 was driven by Cut 6's production evidence: a ~26 min dead
-  gap between producer calls (DAPO `/stop` → `/start` → first new
-  group from turn 0). Bigger batch = longer hot phase, fewer call
-  boundaries per hour, smaller fraction of wall in the gap. Cut 8
-  default is unchanged (4×) until the prep-100 run validates the
-  bump; pass `GEN_BATCH_SIZE=32` via env to opt in. The alternative
-  — multi-producer fan-out — is deferred (see §6 problem list,
-  "Cut 7").
-- `data.train_batch_size` (default 4) is **prompts** the trainer
-  pulls from the buffer per step. Internally the buffer flattens to
-  `train_batch_size × n = 32` trajectories; after `compute_advantage`
-  attaches per-token advantages, the trainer's loss path treats it
-  as a flat 32-trajectory tensor. "Groups" stop mattering past the
-  advantage call.
-- The producer does **not** compute advantages — it only screens
-  groups via `filter_easy_hard_instance` (drops `resolved == 0` and
-  `resolved == n`, where `group_std = 0`). Advantage tensors are
-  built at the trainer in `compute_advantage`
-  (`ray_trainer_dapo.py:343`). The screen is a precondition for
-  non-zero advantages, not the advantage itself.
-- The trainer is otherwise a pure replay consumer — it doesn't need
-  `n` for anything except multiplying out flat batch dimensions.
+The two knobs are independent. The trainer never waits on the producer once the buffer is warm. The producer never knows or cares what the trainer is doing.
 
-Eager-push delivers each surviving group into the store the moment
-its `n` trajectories complete, so the trainer can sample partway
-through a producer call.
+**Scaling the producer to fill faster.** Buffer-fill rate is bottlenecked by `vLLM throughput × concurrent agentic clients`. Scale either side:
 
-Defaults set in `scripts/_internal/s3_fullasync_docker.sh` (search
-for `GEN_BATCH_SIZE`), forwarded as `BATCH_SIZE` / `GEN_BATCH_SIZE`
-env vars and consumed by
-`run_proagent_qwn3_4B_instruct_fullasync.sh:31,37` →
-`+data.gen_batch_size=$GEN_BATCH_SIZE`. The DAPO server reads it at
-`async_server_dapo.py:251` (with safe fallback to `train_batch_size`
-for any legacy lockstep path that never set the key).
+- **More vLLM children** (currently 4 on the EC2 pool) → raw generation throughput.
+- **More OpenHands workers** (currently `OPENHANDS_NUM_WORKERS=32`) → more concurrent agentic trajectories. The 4-child pool saturates at ~32 concurrent clients (§17); past that, scale the pool too.
+- **Larger `gen_batch_size`** → longer hot phase per producer call, fewer call boundaries per hour. The `/start`–`/stop` boundary plus group cold-start (`n` trajectories from turn 0 before the first survivor) is the dominant dead time per call (§30).
 
-**Cut 7 (deferred): multi-producer fan-out.** The original Cut-6
-fork would land two `AsyncLLMServerManagerDAPO` +
-`ContinuousRolloutProducer` pairs sharing the same `TrajectoryStore`,
-each holding a disjoint dataloader slice. Goal: producer B's hot
-phase covers producer A's `/stop` → `/start` → first-group ramp
-window so the trainer never sees a buffer trough. **Why it's
-deferred until a fresh session:** the call-boundary dead gap is the
-*scheduling* bottleneck Cut 7 fixes, but the *capacity* bottleneck
-is also addressable by enlarging `gen_batch_size` (Cut 8) — fewer
-call boundaries per hour, no code change. Cut 7 also has an
-unresolved implementation cost: two producers sharing one OpenHands
-server (`localhost:8006`) race on `/start` and `/stop` (gotcha §17).
-The fix is either (a) two OH servers (`:8006` and `:8007`, each
-producer pinned to one) or (b) make `start_servers`/`stop_servers`
-no-ops when `num_producers > 1`. Either is a meaningful change.
-**Validate Cut 8 (`GEN_BATCH_SIZE=32`) on the prep-100 run first; if
-it ships as the new default, only then revisit Cut 7. Cut 7 stays
-deferred while Cut 8 is in validation.**
+Once buffer-fill rate ≥ trainer-drain rate, the trainer never waits and the loop converges on the near-on-policy regime.
+
+**Where advantages are computed.** GRPO advantage = `(reward − group_mean) / group_std` over the `n` siblings of one prompt. Today this runs at the trainer on the sampled mini-batch (`ray_trainer_dapo.py:361`, `ray_trainer.py:2073`), so the buffer must hand back **whole groups intact** — `sample_mini_batch` never splits a group. The `TrajectoryRecord.advantage` field exists but is `0.0` in the live path because eager-push happens before `compute_advantage`. Architectural intent (deferred refactor): compute advantage at filter-clear time on the producer side (the `n` siblings are already grouped there), store the per-trajectory scalar in `TrajectoryRecord.advantage`, then the buffer becomes a flat per-trajectory pool and the trainer can sample arbitrary cross-group subsets — no group-integrity requirement at sample time.
+
+**Producer push semantics.** `filter_easy_hard_instance` (`async_server_dapo.py:763`) drops `resolved == 0` and `resolved == n` (zero-variance groups — see §6 gotcha #13) so the buffer only ever holds gradient-bearing groups. The producer does **not** compute advantages today — it only screens.
+
+Defaults set in `scripts/_internal/s3_fullasync_docker.sh`, forwarded as `BATCH_SIZE` / `GEN_BATCH_SIZE` env vars and consumed by `run_proagent_qwn3_4B_instruct_fullasync.sh:31,37` → `+data.gen_batch_size=$GEN_BATCH_SIZE`. The DAPO server reads it at `async_server_dapo.py:251`.
 
 **Frozen files — never edit, make siblings:**
 
-- `scripts/_internal/s2_weightsync_docker.sh` — kept as a matched-`global_steps` baseline for A/B.
+- `scripts/_internal/s2_weightsync_docker.sh` — kept as a matched-`global_steps` lock-step baseline for A/B.
 - `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh` — same.
 
 ---
@@ -167,17 +111,18 @@ EC2 security group must allow inbound TCP 8100–8103 from the trainer box's pub
 | Role | Path | Notes |
 |---|---|---|
 | Trainer entrypoint (host) — ProRL | `scripts/_internal/s0_prorl.sh` | FastAPI on :8006, 64 init / 64 run workers, 1000s job timeout. |
-| Trainer entrypoint (Docker) — fully-async | `scripts/_internal/s3_fullasync_docker.sh` | Default PRIMARY launcher. Env knobs: `TOTAL_TRAINING_STEPS`, `SAVE_FREQ`, `NUM_TRAJ`, `FILTER_GROUPS`, `TEST_FREQ`, `VAL_BEFORE_TRAIN`, `LOG_PATH`, `REMOTE_DNS`. |
-| Hydra launcher | `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh` | Baked config: `max_prompt_length=31232`, `max_response_length=16384` (Cut-1 bump), `lora_rank=32`, `lora_alpha=64`, `publish_on_save=True`, `replay.*`, `tis_imp_ratio_cap=5`, hardcoded EC2 DNS. Pool `MAX_MODEL_LEN=47616`, FSDP `ppo_max_token_len_per_gpu=49152`. |
-| Replay store | `trainer_integration/verl/verl_custom/replay/trajectory_store.py` | FIFO deque max 256 (Cut 3), K=4 staleness cap, pop-on-sample, single `threading.Lock`. |
-| Continuous producer (daemon thread) | `trainer_integration/verl/verl_custom/replay/continuous_producer.py` | `start`/`stop(timeout)` cooperative exit (gotcha #19 fix). Terminal `push_from_dataproto` skipped when `batch.meta_info['eager_pushed_all']` (Cut 5). |
-| GRPO trainer | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` | `_publish_lora_adapter` after `_save_checkpoint`, policy_version sync at 1506-1515, metrics hook ~1685. `_start_continuous_producer_if_needed` wires eager-push closure into the DAPO manager (Cut 5). |
-| DAPO trainer | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer_dapo.py` | Same publish hook wired. Cut 5: `n_groups = train_batch_size` at line ~86 (floor `max(1, tbs // n)` removed — ingest filter keeps zero-variance groups out of the buffer, so every sampled group carries gradient content). |
+| Trainer entrypoint (Docker) — fully-async | `scripts/_internal/s3_fullasync_docker.sh` | Default PRIMARY launcher. Env knobs: `TOTAL_TRAINING_STEPS`, `SAVE_FREQ`, `NUM_TRAJ`, `FILTER_GROUPS`, `TEST_FREQ`, `VAL_BEFORE_TRAIN`, `LOG_PATH`, `REMOTE_DNS`, `GEN_BATCH_SIZE`. |
+| Hydra launcher | `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh` | Baked config: `max_prompt_length=31232`, `max_response_length=16384`, `lora_rank=32`, `lora_alpha=64`, `publish_on_save=True`, `replay.*`, `tis_imp_ratio_cap=5`, hardcoded EC2 DNS. Pool `MAX_MODEL_LEN=47616`, FSDP `ppo_max_token_len_per_gpu=49152`. |
+| Replay store | `trainer_integration/verl/verl_custom/replay/trajectory_store.py` | FIFO deque max 256, K=4 staleness cap, pop-on-sample, single `threading.Lock`. Exposes `total_pushes()` for the no-progress detector. Mechanics (record fields, push/sample step-by-step, temporal-IS plumbing): see [`stages/replay_dynamics.md`](stages/replay_dynamics.md). |
+| Continuous producer (daemon thread) | `trainer_integration/verl/verl_custom/replay/continuous_producer.py` | `start`/`stop(timeout)` cooperative exit. Terminal `push_from_dataproto` skipped when `batch.meta_info['eager_pushed_all']`. Hosts `wait_until_with_progress` (no-progress detector). |
+| GRPO trainer | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py` | `_publish_lora_adapter` after `_save_checkpoint`, policy_version sync at 1506-1515, metrics hook ~1685. `_start_continuous_producer_if_needed` wires eager-push closure into the DAPO manager. |
+| DAPO trainer | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer_dapo.py` | Same publish hook wired. `n_groups = train_batch_size` (line ~86) — every sampled group carries gradient content because the ingest filter keeps zero-variance groups out of the buffer. |
 | Trainer class selector | `trainer_integration/verl/verl_custom/trainer/main_ppo.py:232-236` | `filter_groups.enable=True` → `RayPPOTrainerDAPO`, else plain. |
 | Temporal IS correction | `trainer_integration/verl/verl_custom/trainer/ppo/core_algos.py:586-590` | Gated on `replay.use_temporal_is`. Ratio = `exp(old_log_prob − rollout_log_probs)`, clamped at `tis_imp_ratio_cap=5`. |
-| Actor forward | `trainer_integration/verl/verl_custom/workers/actor/dp_actor.py` | `compute_log_prob` at T=1.0 (rollout at T=1.4 — see problem #3). |
+| Actor forward | `trainer_integration/verl/verl_custom/workers/actor/dp_actor.py` | `compute_log_prob` rescales logits by `1/T` at line 210 / 290 (non-fused branch is the live path; `use_fused_kernels=False` by default). `T = self.config.rollout.temperature = 1.4` is plumbed via `verl_custom/workers/fsdp_workers.py:349` (old_log_prob) and upstream `verl/workers/fsdp_workers.py:1188` (ref_log_prob, including the LoRA `ref_in_actor` path). All three log-prob paths land in the same T-scaled distribution as vLLM's `processed_logprobs`. See §27 for the IS-ratio decomposition. |
+| Advantage compute | `compute_advantage` in `ray_trainer.py:254` (called from `ray_trainer_dapo.py:361` and `ray_trainer.py:2073`) | GRPO group-mean/std over `n` siblings (`uid` keys the group). Runs on the sampled mini-batch — needs whole groups present. The `TrajectoryRecord.advantage` field is wired in `trajectory_store.py` but currently dead in the eager-push path (push happens pre-advantage). |
 | Rollout manager | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server.py` | `policy_version` stamping ~1495, EXTERNAL BYPASS ACTIVE path 408-425. |
-| DAPO rollout dispatcher | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | Producer-mode rebuild of `job_queue` (bug #16 fix). |
+| DAPO rollout dispatcher | `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | Producer-mode rebuild of `job_queue` on every call (see §18). |
 | Pool child (vLLM wrapper, FastAPI) | `scripts/serving/_vllm_child.py` | `active_lora` global, `POST /reload_lora`, `_swap_lock`, `_inflight_cond`, drain+swap. |
 | Pool runner (per child) | `scripts/serving/_remote_vllm_runner.sh` | `--enable-lora --max-loras 8 --max-lora-rank 32 --max-cpu-loras 16`. |
 | Pool orchestrator | `scripts/serving/launch_remote_vllm_pool.sh` | `start|stop|restart|publish` verbs. SSHs into `vllm-instance`. |
@@ -210,7 +155,7 @@ EC2 security group must allow inbound TCP 8100–8103 from the trainer box's pub
 | `critic/rewards/mean`, `critic/score/mean` | Learning signal. |
 | `perf/mfu/actor`, `perf/max_memory_allocated_gb` | FSDP efficiency. |
 
-`replay/sample_age_steps` (buffer-age) and `rollout/staleness_steps` (pool-adapter-age) measure different things — see gotcha #26 and problem #6.
+`replay/sample_age_steps` (buffer-age) and `rollout/staleness_steps` (pool-adapter-age) measure different things — see gotcha §26.
 
 ### Log paths
 
@@ -237,7 +182,7 @@ ssh vllm-instance 'jq -c "select(.event==\"reload_lora\")" ~/vllm-pool/child-810
 ```bash
 grep publish_lora_adapter /tmp/s3-fullasync.log
 grep "dropped [0-9]* leftover jobs" /tmp/s3-fullasync.log | wc -l   # one per DAPO call
-grep -c "did not exit within\|skipping _validate" /tmp/s3-fullasync.log   # §19 skips — should be ≤1 (at shutdown)
+grep -c "did not exit within\|skipping _validate" /tmp/s3-fullasync.log   # §19 skips
 grep -c "Traceback" /tmp/s3-fullasync.log   # MUST be 0 during fit()
 grep -E "resolved_ratio" /tmp/s3-fullasync.log | tail -20
 grep -c 'EXTERNAL BYPASS ACTIVE' /tmp/s3-fullasync.log   # ≥ 1 = decoupled topology active
@@ -245,31 +190,7 @@ grep -c 'EXTERNAL BYPASS ACTIVE' /tmp/s3-fullasync.log   # ≥ 1 = decoupled top
 
 ---
 
-## 6. Current problems (pointer)
-
-Evidence sheet: [`stages/current_bottlenecks_and_problems.md`](stages/current_bottlenecks_and_problems.md). Nine problems surface in the first 20 steps of the Run9 config.
-
-| # | Problem | One-line symptom |
-|---|---|---|
-| 1 | ~~`n_groups` floor~~ **fixed (Cut 5)** | Floor `max(1, tbs // n)` dropped; trainer now draws `train_batch_size` groups per step. |
-| 2 | Producer-bound regime | vLLM pool 100 % util, trainer A100s 0 % — 18.5× throughput mismatch. |
-| 3 | `is_weight/clip_fraction ~60 %` | IS clamp saturated; dominant cause is T=1.4 vs T=1.0 mismatch, not real drift. |
-| 4 | `response_length` saturating at 1536 | Systematic cap-hitting → corrupted reward signal. |
-| 5 | Advantages computed twice | Scalar at push, re-computed on sample — same result, dead work. |
-| 6 | Pool-age ≠ buffer-age | `rollout/staleness_steps` and `replay/sample_age_steps` diverge when producer iters are long. |
-| 7 | Validation–producer race | First fit()-time §19 cooperative skip at step 10 — validation delayed. |
-| 8 | Iter-3 wall regression | 80 min vs 53-min steady state — cause TBD. |
-| 9 | Publish #2 latency 1.84× | `transfer_latency_s` 4× jump on second publish. |
-
-**Ordering.** Problems group by root cause (numerical/config mismatch, producer-bound, architectural, network contention). Start by reading the evidence sheet, then decide ordering for your branch. Don't stack fixes across groups into one branch.
-
-### Named next step — Cut 7 (multi-producer fan-out)
-
-The next architectural cut, deferred from this session. Land it only if the Cut 8 prep-100 run still shows the trainer waiting on `_acquire_training_batch_dapo` after warmup. Full shape and file list in [`stages/current_bottlenecks_and_problems.md`](stages/current_bottlenecks_and_problems.md) — see "Next session — Cut 7 (multi-producer fan-out)". Key constraint: a second OpenHands FastAPI on `:8007` (per-producer) is required to avoid the `/start`/`/stop` race documented in §31.
-
----
-
-## 7. Gotchas (read every one before editing)
+## 6. Gotchas (read every one before editing)
 
 1. **`/codex:*` and the `codex-rescue` agent hang in plan mode / open-ended exploration.** They are diff-scoped tools. Always give them a concrete scope: working tree (default), `git diff base...HEAD`, or a specific commit range. Codified in `.claude/rules/codex-usage.md`. Free-form review: use `code-reviewer` or `python-reviewer`.
 2. **`trainer.val_only=True` is silently ignored by the custom trainer.** Upstream verl (`/tmp/verl/verl/trainer/ppo/ray_trainer.py:~1325`) has `if self.config.trainer.get("val_only", False): return`; the fork does not. Baseline-val runs roll straight into training unless you `docker rm -f <name>` after the val prints.
@@ -282,37 +203,37 @@ The next architectural cut, deferred from this session. Land it only if the Cut 
 9. **`max-loras 8`** on the pool absorbs in-flight swap slots. Exceed it (e.g., by lowering drain timeout below survivable for a long request) and `remove_lora` fails — slot leaks. Pool tolerates up to 8 leaked slots before a child bounce.
 10. **No `--no-verify`.** No `git push` without explicit approval. No force push. No modifying `dev_config/python/**`. No widening `pyproject.toml` pins without reading the pin comment (some are CVE-related).
 11. **Untracked artifacts that look like in-progress work:** `outputs/` (root-owned, `sudo rm -rf`), `wandb/`, `/tmp/s*-*.log`, `singularity_images` (symlink — leave alone). All gitignored.
-12. **`save_freq=1`** publishes every step. Fine debugging, wrong for real runs. For normal runs: `publish_latency_s × publishes_per_epoch < step_time × save_freq`.
-13. **DAPO `filter_groups=True` is now the default target path** (Cut 5 onward) — `scripts/_internal/s3_fullasync_docker.sh` defaults `FILTER_GROUPS=True`. The DAPO manager's eager-push seam (`self._push_fn` wired at `ray_trainer.py:_start_continuous_producer_if_needed`) fires each survivor into the replay store the moment it clears `filter_easy_hard_instance`, keeping the trainer drawing without waiting for whole 53 min iterations to finish. The plain-GRPO continuous-producer path has no equivalent seam; run `FILTER_GROUPS=False` only for throwaway smoke against the plain code paths.
+12. **`save_freq=1`** publishes every step. Fine for debugging, wrong for real runs. For normal runs: `publish_latency_s × publishes_per_epoch < step_time × save_freq`.
+13. **DAPO `filter_groups=True` is the default target path** — `scripts/_internal/s3_fullasync_docker.sh` defaults `FILTER_GROUPS=True`. The DAPO manager's eager-push seam (`self._push_fn` wired at `ray_trainer.py:_start_continuous_producer_if_needed`) fires each survivor into the replay store the moment it clears `filter_easy_hard_instance`, keeping the trainer drawing without waiting for whole iterations to finish. The plain-GRPO continuous-producer path has no equivalent seam; run `FILTER_GROUPS=False` only for throwaway smoke against the plain code paths.
 14. **`TrajectoryStore` concurrency is one `threading.Lock` serializing push / evict / sample+pop.** All mutations and reads acquire `self._lock`. Inside `sample_mini_batch` the sequence is `_evict_stale_locked → select → pop → detach records` as a single critical section, so a group cannot be observed-then-deleted out from under the caller. `_pack` runs outside the lock but only on the detached `records` list, so the returned `DataProto` cannot alias shared state.
 15. **Sampling is consume-on-sample (queue semantics), not with-replacement.** `sample_mini_batch` pops chosen groups before returning. Rationale: when producer throughput falls below trainer throughput, with-replacement would train on the same 8 trajectories K+1 times — overfitting, not replay. Deviates from paper Fig-18 (which holds at a large effective buffer).
 16. **`staleness_cutoff_k` is a producer-stall safety drop, not a reuse cap.** With pop-on-sample, a group sits in the store only between push and the next sample. K drops groups pushed but unconsumed for > K trainer steps (e.g., validation paused the sampler). Default `K=4` is conservative; not a "how many times can we reuse" knob.
-17. **`OPENHANDS_NUM_WORKERS=32` is the sweet spot for a 4-child vLLM pool, not 64.** The pool saturates to ~100 % GPU util at ~32 concurrent clients (measured on 4× H100 with Qwen3-4B, LoRA rank 32, `gpu_memory_utilization=0.45`). Bumping to 64 made every client-turn slower. `replay.producer_batch_size` yaml key is **dead config**. As of Cut 6: prompts-per-call for plain GRPO comes from the trainer dataloader's `gen_batch_size`; DAPO survivor target per call comes from `data.gen_batch_size` (independent of `data.train_batch_size`). Re-measure if the pool grows to 8 children.
-18. **`generate_sequences_dapo` leaves un-dispatched jobs in `self.job_queue` on every call.** The result-collection loop breaks when `num_completed_instances >= requested_batch_size`; mid-flight tasks are cancelled, queued-but-not-dispatched jobs stay. The classic path reuses them; producer mode can't (stale `asyncio` loop refs). **Fix:** producer-mode branch at top of `generate_sequences_dapo` drops leftovers by **rebuilding** `self.job_queue = asyncio.PriorityQueue()`. Do not replace with a `get_nowait` drain — stale loop refs make drain-only fragile. Cut 5 preserves this — the eager-push seam fires at filter-clear time *inside the same call*, so all leftover-job reasoning stays intact (the rebuild still happens at the top of the next call, and any instance the eager path already pushed is also listed in `output_batch` as a regular survivor).
-19. **`ContinuousRolloutProducer.stop()` has no handle on a producer thread mid-`asyncio.run`.** `stop()` sets `self._stop_event` and joins with the given timeout. The event is only checked at the top of the worker `while not self._stop_event.is_set():` loop; once inside `self._generate_fn(...)` → `asyncio.run(generate_sequences_dapo)` the thread ignores the event until the call returns (up to `openhands_timeout × max_iterations` ≈ 45 min on SWE-Gym). **Fix shipped:** `stop()` now returns `bool`; on timeout it does NOT null `self._thread` and does NOT call `rollout_manager.sleep()`. Both `_stop_continuous_producer_if_needed` paths (ray_trainer.py, ray_trainer_dapo.py fit()) propagate the `False` and skip `_validate`, logging `_logger.warning('step=%d skipping _validate: producer stop timed out')`; next save boundary retries. Trade-off: validation metrics skipped at boundaries mid-producer-call. **Stop-timeout default raised to 300 s** via `+replay.stop_timeout_s=300` in `scripts/_internal/s3_fullasync_docker.sh` (Cut 4) — wide enough for most in-flight iterations to settle instead of the hard 10 s drop in `ray_trainer.py:1712-1713`. **Proper fix** (deferred): make `_generate_fn` cooperatively cancellable — add `producer.pause()` / `producer.resume()` (~40 LOC in `continuous_producer.py`). See problem #7.
+17. **`OPENHANDS_NUM_WORKERS=32` is the sweet spot for a 4-child vLLM pool, not 64.** The pool saturates to ~100 % GPU util at ~32 concurrent clients (measured on 4× H100 with Qwen3-4B, LoRA rank 32, `gpu_memory_utilization=0.45`). Bumping to 64 made every client-turn slower. `replay.producer_batch_size` yaml key is **dead config**. Prompts-per-call for plain GRPO comes from the trainer dataloader's `gen_batch_size`; DAPO survivor target per call comes from `data.gen_batch_size` (independent of `data.train_batch_size`). Re-measure if the pool grows to 8 children.
+18. **`generate_sequences_dapo` leaves un-dispatched jobs in `self.job_queue` on every call.** The result-collection loop breaks when `num_completed_instances >= requested_batch_size`; mid-flight tasks are cancelled, queued-but-not-dispatched jobs stay. The classic path reuses them; producer mode can't (stale `asyncio` loop refs). **Fix:** producer-mode branch at top of `generate_sequences_dapo` drops leftovers by **rebuilding** `self.job_queue = asyncio.PriorityQueue()`. Do not replace with a `get_nowait` drain — stale loop refs make drain-only fragile. The eager-push seam fires at filter-clear time *inside the same call*, so all leftover-job reasoning stays intact (the rebuild still happens at the top of the next call, and any instance the eager path already pushed is also listed in `output_batch` as a regular survivor).
+19. **`ContinuousRolloutProducer.stop()` has no handle on a producer thread mid-`asyncio.run`.** `stop()` sets `self._stop_event` and joins with the given timeout. The event is only checked at the top of the worker `while not self._stop_event.is_set():` loop; once inside `self._generate_fn(...)` → `asyncio.run(generate_sequences_dapo)` the thread ignores the event until the call returns (up to `openhands_timeout × max_iterations` ≈ 45 min on SWE-Gym). **Behavior:** `stop()` returns `bool`; on timeout it does NOT null `self._thread` and does NOT call `rollout_manager.sleep()`. Both `_stop_continuous_producer_if_needed` paths (ray_trainer.py, ray_trainer_dapo.py fit()) propagate the `False` and skip `_validate`, logging `_logger.warning('step=%d skipping _validate: producer stop timed out')`; next save boundary retries. Trade-off: validation metrics skipped at boundaries mid-producer-call. **Stop-timeout default is 300 s** via `+replay.stop_timeout_s=300` in `scripts/_internal/s3_fullasync_docker.sh` — wide enough for most in-flight iterations to settle. **Proper fix** (deferred): make `_generate_fn` cooperatively cancellable — add `producer.pause()` / `producer.resume()` (~40 LOC in `continuous_producer.py`).
 20. **`rollout_manager.policy_version` is read across threads without a lock.** Continuous producer (daemon thread) reads it; trainer (main thread) writes it inside `_publish_lora_adapter` after a successful `/reload_lora` fanout. Relies on CPython GIL atomicity of single-int load/store. The benign race is temporal: a producer call in flight when publish lands stamps `behavior_policy_version = old_pv` on every trajectory of that call; the *next* producer call reads `new_pv`. That's exactly the TIS correction's input — not a bug. Do NOT rewrite as a lock or `threading.Event`.
 21. **`TrajectoryRecord` prompt/response lengths vary across store entries.** Producer batches pad to call-local max lengths (`async_server.py:1343-1367`), so `group_A.prompt_ids.shape = (8, 3800)` and `group_B.prompt_ids.shape = (8, 4122)` can coexist in the same deque. Store uses raw variable-length tuples and re-pads at `sample_mini_batch` to a fresh per-sample max. `DataProto.concat → torch.cat(dim=0)` (verl `protocol.py:930`) would assert-fail on a dim-1 mismatch; re-padding is load-bearing.
 22. **`/reload_lora` drain (`_vllm_child.py:163-166`) stamps `policy_version` atomically per `/generate` call.** In-flight agentic trajectories (tool-use loops) straddling a publish still see the *old* version because each turn's `/generate` completes against whichever version was active at that turn's arrival — correct (a mid-rollout switch would mix logprobs across two policies in one trajectory). Store stamps `behavior_policy_version = rollout_manager.policy_version_at_push_time`, which is the version at the *end* of the OpenHands session. For rank-16 adapters with publish_latency ≈ 30s and turn-time ≈ 20s the difference is within TIS clip. If `clip_fraction > 0.5` with K=4 staleness, investigate per-turn version stamping.
 23. **`endpoints_failed > 0` abort contract (`ray_trainer.py:1348-1352`) is preserved in producer mode.** A warm buffer does not mask a broken pool: publish failure raises from the trainer's `_publish_lora_adapter` and the producer thread is stopped as part of trainer exit.
 24. **Buffer is ephemeral — not checkpointed.** On trainer resume (`trainer.resume_mode=auto`), the store starts empty and re-warms from scratch. Pre-resume entries would be maximally stale anyway. Warm-up time ≈ `N / producer_throughput` steps.
-25. **§19 cooperative skip can fire during `fit()` — not just at shutdown.** Run9 step 10 hit it for the first time at a scheduled validation boundary: `_validate()` wanted an exclusive pool, called `producer.stop(timeout=10s)`, the producer was mid-`generate_sequences_dapo` (53+ min call), timeout elapsed → validation skipped (no corruption, no traceback). With `save_freq=5` and `test_freq=10`, this slips the first in-training pass@k datapoint from step 10 to step 20. **Cut 4 mitigation (shipped):** default `stop_timeout_s=300` via `+replay.stop_timeout_s=300` Hydra override — wide enough to catch an iteration in its settle window; read at `ray_trainer.py:1712-1713` via `self.config.replay.get('stop_timeout_s', 10.0)`. **Principled fix (deferred):** add `producer.pause()` / `producer.resume()` that lets the worker finish its current call then pauses between calls (~40 LOC in `continuous_producer.py`). See problem #7.
-26. **Pool-adapter-age (`rollout/staleness_steps`) and buffer-age (`replay/sample_age_steps`) diverge whenever producer-wall > `save_freq × burst_duration`.** Run9 step 9: `sample_age_p50=0` but `staleness_steps=4`. IS clipping correlates with pool-adapter-age, not buffer-age. Don't claim "staleness bounded" from `sample_age_p95 ≤ K` alone — add a companion gate `rollout/staleness_steps_p95 ≤ K + save_freq`. See problem #6.
-27. **`is_weight/clip_fraction` is ~60 % in the n=16 regime, of which only ~20 % is real policy drift.** Decomposition of the ~0.55 mean log-ratio:
-    - **~0.35** temperature mismatch: rollout at `T=1.4 top_p=0.95`, trainer's `old_log_prob` / `ref_log_prob` forward at `T=1.0` (dp_actor.py default).
-    - **~0.20** vLLM ↔ FSDP numerical divergence: different kernels, fused ops, softmax paths. Systematic, not random.
-    - **~0.05** LoRA load path at float16/bfloat16.
-    - **~0.15** genuine policy drift from the adapter difference between push-time pv and trainer-update-time pv.
+25. **§19 cooperative skip can fire during `fit()` — not just at shutdown.** A scheduled validation boundary calls `_validate()`, which wants an exclusive pool, calls `producer.stop(timeout=stop_timeout_s)`. If the producer is mid-`generate_sequences_dapo` (multi-minute call) the timeout elapses → validation skipped (no corruption, no traceback). The `+replay.stop_timeout_s=300` Hydra override (`ray_trainer.py:1712-1713`, read via `self.config.replay.get('stop_timeout_s', 10.0)`) is wide enough to catch most iterations in their settle window. Principled fix (deferred): add `producer.pause()` / `producer.resume()` so the worker finishes its current call then pauses between calls (~40 LOC in `continuous_producer.py`).
+26. **Pool-adapter-age (`rollout/staleness_steps`) and buffer-age (`replay/sample_age_steps`) diverge whenever producer-wall > `save_freq × burst_duration`.** A typical observation: `sample_age_p50=0` while `staleness_steps=4`. IS clipping correlates with pool-adapter-age, not buffer-age. Don't claim "staleness bounded" from `sample_age_p95 ≤ K` alone — add a companion gate `rollout/staleness_steps_p95 ≤ K + save_freq`.
+27. **`is_weight/clip_fraction` decomposition.** Both rollout and the trainer's `old_log_prob` / `ref_log_prob` forward passes operate at `T = self.config.rollout.temperature = 1.4`: `verl_custom/workers/actor/dp_actor.py:210` (and 290 for the entropy path) rescales logits by `1/T` before log-softmax, with `T` plumbed in via `verl_custom/workers/fsdp_workers.py:349` (old_log_prob) and upstream `verl/workers/fsdp_workers.py:1188` (ref_log_prob, including the LoRA `ref_in_actor` path). `use_fused_kernels=False` by default, so the explicit `div_` branch is the live path; `is_lora` only swaps the adapter context, not the temperature plumbing. Temperature is therefore not a contributor to the IS log-ratio.
 
-    **Phase-2.5 Cut 2 raises `tis_imp_ratio_cap` 2 → 5** so the clamp bounds genuine drift (~0.15 of the 0.55 mean log-ratio) rather than the T=1.4 / T=1.0 + kernel numerical floor (~0.55 − 0.15 = ~0.40) that is not a correctness bug. Principled followup (deferred): align the trainer's `old_log_prob` pass temperature to rollout temperature (single-line patch in `dp_actor.py`'s `compute_log_prob` — scale logits by `1/T` before log-softmax). Not a bug in the fork — the path assumes on-policy, where T-scaling cancels. With stored `rollout_log_probs`, the ratio is `exp(old − rollout)` and T-mismatch no longer cancels. See problem #3.
-28. **Producer-wall outliers (80 min vs 53 min typical) are not yet instrumented to the prompt level.** Run9 iter 3 regressed completion 40 % → 27 %, wall 53 → 80 min; iter 4 recovered to 58 min. Plausible causes: dataset difficulty drift, post-publish policy regression, pool KV-cache fragmentation over long uptimes. Cannot distinguish without emitting per-prompt `(uid, resolved_ratio, wall_s)` in `DAPO_PRODUCER_CALL`. Also: publish #2 `transfer_latency_s` was 1.84× publish #1 (19.0 s vs 4.0 s); if publish #3 also > 30 s, systemic network contention. See problems #8, #9.
-29. **Cut 5: eager push is the DAPO manager's job; the continuous producer skips its terminal push via `meta_info['eager_pushed_all']`.** Never call `store.push_from_dataproto(out_batch)` unconditionally from the continuous-producer worker loop under `filter_groups=True` — the DAPO manager pushes each survivor inside `request_from_openhands_dapo` the moment `filter_easy_hard_instance` clears it. If both fire, pop-on-sample (§15) breaks: the same `uid` appears twice, the first sample pops the first instance, the second sits in the buffer and is later popped under the same `uid`, corrupting `behavior_policy_version` / `created_at_step` tracking. The `eager_pushed_all` flag in `out_batch.meta_info` is the single source of truth; classic lockstep paths (`_push_and_sample_replay` in `ray_trainer.py`) never set it, so the flag defaults to False and the lockstep push fires normally. Manager-side seam is `self._push_fn` — the trainer wires it in `_start_continuous_producer_if_needed` and nulls it in `_stop_continuous_producer_if_needed`. A manager with `_push_fn is None` reverts to batch-level pushes at end of call.
-30. **Cut 5: `n_groups = train_batch_size`.** Previously `n_groups = max(1, train_batch_size // n)`, which collapsed to 1 whenever `n >= train_batch_size` (the `n=8 tbs=4` Phase-2.5 config). One group per step meant 7 of 8 FSDP GPUs idle on redundant copies of the same prompt. Post-Cut-5 the trainer draws `train_batch_size` independent groups per step from the buffer. Safe because the ingest filter (`filter_easy_hard_instance`) drops zero-variance groups at push time — every group in the buffer has non-trivial advantages and therefore gradient content. Both `ray_trainer_dapo.py` (DAPO path) and `ray_trainer.py` (plain-GRPO continuous-producer path) were updated; the lockstep `_push_and_sample_replay` branch is not on the target topology and was not touched.
-31. **Cut 6 production exposed a producer call-boundary dead gap (~26 min, no eager-push activity).** Between call N's last survivor (`stop_servers()` at `async_server_dapo.py:706`) and call N+1's first survivor, the trainer's buffer drains while: (a) HTTP `/stop` returns from OpenHands `localhost:8006`, (b) the producer thread loops back into `request_from_openhands_dapo`, (c) HTTP `/start` returns and agent runtimes warm up, (d) `gen_batch_size × n` jobs push to `self.job_queue` and dispatcher fans out, (e) the **first complete group** has to clear all 8 trajectories from turn 0 before any survivor can be filtered + pushed. Step (e) dominates — `/start`/`/stop` are seconds; group-cold-start is multi-turn agentic. **Cut 8 mitigation (in validation):** raising `gen_batch_size` to `8 × train_batch_size = 32` makes the hot phase longer per call so call boundaries are rarer per hour. Default stays at 4× (= 16) until the 100-step prep run validates the bump; meanwhile the prep-100 launch passes `GEN_BATCH_SIZE=32` explicitly via env override. **Principled fix (deferred — Cut 7):** two staggered producers with disjoint dataloader slices sharing one `TrajectoryStore`, so producer B's hot phase covers producer A's gap. The naive Cut 7 collides with §17 by spawning 64 OH workers; the safer shape is `OPENHANDS_NUM_WORKERS=16` per producer (still 32 concurrent on the pool) plus per-producer OH server (`:8006`/`:8007`) to avoid the `/start`/`/stop` race on a shared FastAPI.
-32. **Hard-coded 7200 s replay-store wait was a brittle guardrail — replaced with a no-progress detector.** prep-100 crashed at step 44 (`Replay store did not reach 4 fresh groups within 7200.0s`) once `response_length/mean` climbed from 9 045 → 12 071 (clip_ratio 0.22 → 0.34) and the producer's per-iteration wall stretched past the fixed 2 h ceiling. The old guardrail at `ray_trainer_dapo.py:105` / `ray_trainer.py:1788` measured *total wall* and could not distinguish "producer is wedged" from "producer is healthy but slow as the model learns longer trajectories" — the latter being the desired outcome. **Fix shipped (Cut 9):** new helper `wait_until_with_progress(predicate, progress, no_progress_timeout)` in `verl_custom/replay/continuous_producer.py`. The store grew a monotonic `total_pushes()` accessor (`trajectory_store.py`); the trainer now resets the deadline whenever a new group lands and only aborts after `replay.no_progress_timeout_s` seconds with no push at all (default 1800 s, plumbed via `+replay.no_progress_timeout_s=1800` in `s3_fullasync_docker.sh`). Old `replay.wait_timeout_s` knob is removed — semantics changed. Test coverage: `tests/replay/test_continuous_producer.py::TestWaitUntilWithProgress`.
+    Of the typical mean log-ratio ~0.55, the live sources, ordered by expected magnitude:
+    - **vLLM ↔ FSDP numerical divergence** — different kernels, fused ops, softmax paths, FA-vs-paged-attention, mixed-precision casts. Systematic, not random. Largest contributor in practice.
+    - **LoRA precision drift** — adapter loaded at bf16 in vLLM vs the FSDP-side forward pass (also bf16 but with different layernorm/attention numerics). Smaller than the kernel-divergence term but non-trivial under high `tis_imp_ratio_raw`.
+    - **Genuine policy drift** — adapter difference between push-time `behavior_policy_version` and trainer-update-time policy. Bounded by `staleness_cutoff_k` × `save_freq`.
+
+    **`tis_imp_ratio_cap=5`** is the live setting so the clamp bounds the kernel-numerics floor + drift comfortably; lower caps clip into the numerical floor and bias the gradient. The decomposition is qualitative — a quantitative split needs runtime instrumentation (per-source ratio histograms) and should be re-measured rather than trusted from memory.
+28. **Eager push is the DAPO manager's job; the continuous producer skips its terminal push via `meta_info['eager_pushed_all']`.** Never call `store.push_from_dataproto(out_batch)` unconditionally from the continuous-producer worker loop under `filter_groups=True` — the DAPO manager pushes each survivor inside `request_from_openhands_dapo` the moment `filter_easy_hard_instance` clears it. If both fire, pop-on-sample (§15) breaks: the same `uid` appears twice, the first sample pops the first instance, the second sits in the buffer and is later popped under the same `uid`, corrupting `behavior_policy_version` / `created_at_step` tracking. The `eager_pushed_all` flag in `out_batch.meta_info` is the single source of truth; classic lockstep paths (`_push_and_sample_replay` in `ray_trainer.py`) never set it, so the flag defaults to False and the lockstep push fires normally. Manager-side seam is `self._push_fn` — the trainer wires it in `_start_continuous_producer_if_needed` and nulls it in `_stop_continuous_producer_if_needed`. A manager with `_push_fn is None` reverts to batch-level pushes at end of call.
+29. **`n_groups = train_batch_size`, and groups are sampled intact.** The trainer draws `train_batch_size` independent groups per step from the buffer; `sample_mini_batch` never splits a group. Sampling whole groups is **load-bearing** today because GRPO `compute_advantage` normalizes by within-group mean/std, which needs the `n` siblings present. The ingest filter (`filter_easy_hard_instance`) drops zero-variance groups at push time, so every sampled group has gradient content. Both `ray_trainer_dapo.py` (DAPO path) and `ray_trainer.py` (plain-GRPO continuous-producer path) follow this; the lockstep `_push_and_sample_replay` branch is not on the target topology. **Deferred refactor:** if advantage moves to the producer side (filter-clear seam, where the group is already intact), the buffer can become a flat per-trajectory pool and the trainer can sample arbitrary cross-group subsets — `TrajectoryRecord.advantage` is already defined for this; today it carries 0.0.
+30. **Producer call boundaries leave a dead gap (~26 min, no eager-push activity).** Between call N's last survivor (`stop_servers()` at `async_server_dapo.py:706`) and call N+1's first survivor, the trainer's buffer drains while: (a) HTTP `/stop` returns from OpenHands `localhost:8006`, (b) the producer thread loops back into `request_from_openhands_dapo`, (c) HTTP `/start` returns and agent runtimes warm up, (d) `gen_batch_size × n` jobs push to `self.job_queue` and dispatcher fans out, (e) the **first complete group** has to clear all `n` trajectories from turn 0 before any survivor can be filtered + pushed. Step (e) dominates — `/start`/`/stop` are seconds; group-cold-start is multi-turn agentic. Mitigation: raise `gen_batch_size` (`GEN_BATCH_SIZE=32` for `8 ×`) so the hot phase is longer per call and call boundaries are rarer per hour.
+31. **Replay-store no-progress detector replaces the old fixed wall-time ceiling.** A fixed 7200 s ceiling at `ray_trainer_dapo.py:105` / `ray_trainer.py:1788` could not distinguish "producer is wedged" from "producer is healthy but slow as the model learns longer trajectories" — the latter being the desired outcome. The current helper `wait_until_with_progress(predicate, progress, no_progress_timeout)` lives in `verl_custom/replay/continuous_producer.py`; the store's monotonic `total_pushes()` accessor (`trajectory_store.py`) is the progress signal. The trainer resets the deadline whenever a new group lands and only aborts after `replay.no_progress_timeout_s` seconds with no push at all (default 1800 s, plumbed via `+replay.no_progress_timeout_s=1800` in `s3_fullasync_docker.sh`). The old `replay.wait_timeout_s` knob is removed — semantics changed. Test coverage: `tests/replay/test_continuous_producer.py::TestWaitUntilWithProgress`.
 
 ---
 
-## 8. Testing
+## 7. Testing
 
 Fast loop — keep new unit tests out of `integration`, `slow`, `real_data` so they land here:
 
@@ -352,7 +273,7 @@ See `.claude/rules/python-conventions.md` and `.claude/rules/testing-conventions
 
 ---
 
-## 9. What NOT to do
+## 8. What NOT to do
 
 - Don't touch `/tmp/verl` — pinned read-only upstream reference. Fork customizations live in `trainer_integration/verl/verl_custom/` as a patch package on top of the container's `verlai/verl:vllm018.dev1`. Edits to `/tmp/verl` are invisible to the trainer.
 - Don't touch `openhands/llm/nvidia/qwen3.py` or `qwen2_5_vl.py`.
@@ -368,9 +289,9 @@ See `.claude/rules/python-conventions.md` and `.claude/rules/testing-conventions
 
 ---
 
-## 10. When in doubt
+## 9. When in doubt
 
 1. Re-read `CLAUDE.md` and this file.
 2. Read the file in §4's pointer table closest to what you're changing.
 3. If a design choice is 50/50, write both options with pros/cons and ask the user.
-4. If a tool hangs, check §7 before retrying.
+4. If a tool hangs, check §6 before retrying.

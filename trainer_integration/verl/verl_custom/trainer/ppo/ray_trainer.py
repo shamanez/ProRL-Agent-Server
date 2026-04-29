@@ -414,13 +414,33 @@ class RayPPOTrainer:
                 if tokenizer.pad_token_id is not None
                 else tokenizer.eos_token_id
             )
+            # Replay-store length caps mirror the rollout-side packer
+            # contract, NOT the dataset-side data.max_*_length values:
+            #   prompt_length_cap   = rollout's max_starting_message_length
+            #       (width of the seed slot the rollout left-pads into;
+            #       empirical SWE-Gym cap on system + dataset_instance prompt).
+            #   response_length_cap = rollout's total_len
+            #       = max_prompt_length + max_response_length
+            #       (vLLM-bounded ceiling for accumulated response_ids across
+            #       turns — vLLM enforces seed + body <= max_model_len, which
+            #       is total_len).
+            # data.max_prompt_length is a dataset filter + addend in total_len;
+            # it never reaches the rollout or the store directly. Wiring the
+            # caps to data.max_*_length silently right-truncates trajectories
+            # whose body exceeds max_response_length, breaking reward<->loss
+            # alignment.
+            max_starting_message_length = int(
+                config.actor_rollout_ref.rollout.get('max_starting_message_length', 0)
+            )
+            total_len = int(config.data.get('max_prompt_length', 0)) + int(
+                config.data.get('max_response_length', 0)
+            )
             self.trajectory_store: TrajectoryStore | None = TrajectoryStore(
                 max_size=int(replay_cfg.buffer_size),
                 staleness_cutoff_k=int(replay_cfg.staleness_cutoff_k),
                 pad_token_id=int(pad_token_id),
-                prompt_length_cap=int(config.data.get('max_prompt_length', 0)) or None,
-                response_length_cap=int(config.data.get('max_response_length', 0))
-                or None,
+                prompt_length_cap=max_starting_message_length or None,
+                response_length_cap=total_len or None,
             )
         else:
             self.trajectory_store = None
@@ -1720,19 +1740,22 @@ class RayPPOTrainer:
     def _stop_continuous_producer_if_needed(self) -> bool:
         """Stop the producer and drop the reference on clean exit.
 
-        Returns ``True`` if the producer thread exited within the
-        configured ``replay.stop_timeout_s`` (default 10 s), ``False``
-        otherwise. A ``False`` return means the producer is still
-        dispatching against the shared OpenHands session; the caller
-        must not start validation or any other OH-bound work on top of
-        it (gotcha §19).
+        Drains unconditionally — ``producer.stop()`` blocks until the
+        current ``generate_sequences`` call completes naturally, so the
+        publish boundary is aligned to producer-batch completion. No
+        finite timeout: a timeout that fires mid-batch would leave an
+        orphan thread running across the publish, causing a
+        mid-trajectory policy-version switch.
+
+        Always returns ``True`` once stop returns. Genuine wedges
+        (vLLM/OpenHands hung) are caught by the trainer's no-progress
+        detector at the next ``_acquire_training_batch`` call
+        (``replay.no_progress_timeout_s``).
         """
         producer = getattr(self, '_producer', None)
         if producer is None:
             return True
-        stopped = producer.stop(
-            timeout=float(self.config.replay.get('stop_timeout_s', 10.0))
-        )
+        stopped = producer.stop()
         if stopped:
             self._producer = None
             # Cut 5: drop the eager-push closure so the manager goes

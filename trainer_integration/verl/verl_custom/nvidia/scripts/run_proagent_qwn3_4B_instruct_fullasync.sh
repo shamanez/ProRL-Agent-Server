@@ -39,7 +39,7 @@ MAX_NUM_ITERS=30
 # DAPO-aligned: 8 samples per prompt balances GRPO group-stat signal
 # (meaningful with filter_groups on) against rollout cost.
 NUM_TRAJ=8
-SAVE_FREQ=5
+SAVE_FREQ=${SAVE_FREQ:-1}
 # 32 OpenHands workers is the sweet spot for a 4-child vLLM pool on
 # 4× H100. Empirically the pool saturates to ~100 % GPU util at ~32
 # concurrent clients; bumping to 64 made every client-turn slower
@@ -75,6 +75,26 @@ SP_SIZE=4
 TEMPERATURE=1.4
 TOP_P=0.95
 
+# Sequence length contract (two-knob — see also async_server.py near
+# self.total_len init, and the TrajectoryStore constructor in
+# ray_trainer.py):
+#   data.max_prompt_length=31232:       dataset filter + addend in total_len.
+#                                       Never reaches vLLM directly.
+#   data.max_response_length=2048:      per-turn vLLM max_output_tokens AND
+#                                       addend in total_len. Tightened from
+#                                       16384 → 2048: long-tail turns were
+#                                       blowing past the publish-boundary
+#                                       drain budget; multi-turn budget is
+#                                       still bounded by total_len.
+#   total_len = 33280:                  plumbed to vLLM as max_model_len; the
+#                                       real per-call ceiling. vLLM enforces
+#                                       seed + body <= max_model_len.
+#   max_starting_message_length=12000:  empirical SWE-Gym (system + task)
+#                                       seed cap; rollout-side prompt-slot
+#                                       width. Independent knob.
+# Replay-store caps mirror this contract: prompt cap =
+# max_starting_message_length, response cap = total_len. Wiring at
+# ray_trainer.py near TrajectoryStore(...).
 python3 -m verl_custom.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=["$DATA_PATH/train.parquet"] \
@@ -82,7 +102,7 @@ python3 -m verl_custom.trainer.main_ppo \
     data.train_batch_size=$BATCH_SIZE \
     +data.gen_batch_size=$GEN_BATCH_SIZE \
     data.max_prompt_length=31232 \
-    data.max_response_length=16384 \
+    data.max_response_length=2048 \
     data.truncation='error' \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -114,7 +134,7 @@ python3 -m verl_custom.trainer.main_ppo \
     actor_rollout_ref.rollout.n=$NUM_TRAJ \
     actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.rollout.top_p=$TOP_P \
-    +actor_rollout_ref.rollout.external_llm_endpoints=[http://ec2-54-145-77-207.compute-1.amazonaws.com:8100,http://ec2-54-145-77-207.compute-1.amazonaws.com:8101,http://ec2-54-145-77-207.compute-1.amazonaws.com:8102,http://ec2-54-145-77-207.compute-1.amazonaws.com:8103] \
+    +actor_rollout_ref.rollout.external_llm_endpoints=[http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8100,http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8101,http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8102,http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8103] \
     +actor_rollout_ref.rollout.publish_on_save=True \
     +actor_rollout_ref.rollout.async_manager=openhands \
     +actor_rollout_ref.rollout.max_iterations=$MAX_NUM_ITERS \
