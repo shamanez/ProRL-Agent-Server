@@ -4,7 +4,7 @@ A scalable multi-turn rollout service for training and evaluating RL agents on a
 
 ## System shape
 
-Three processes on two machines, glued by an in-process replay store today; the [producer-as-a-service design](plans-n-solutions/producer_as_a_service.md) decouples them into independently deployable services.
+Three processes on two machines, glued by an in-process replay store today; the [rollout fabric design](plans-n-solutions/rollout_fabric.md) decouples them into independently replaceable adapter slots.
 
 - **ProRL FastAPI** (`:8006`, trainer host) — accepts rollout jobs, dispatches to per-task `AgentHandler`s, talks to vLLM in **token IDs** (not text — the multi-turn invariant).
 - **Remote vLLM pool** (4 children on ports `8100–8103`, EC2) — generation backend; LoRA adapters hot-reloaded on `save_freq` via path-versioned pinning.
@@ -33,7 +33,29 @@ bash scripts/_internal/s3_fullasync_docker.sh
 
 Stop order is reverse: kill the trainer container, then `launch_remote_vllm_pool.sh stop`, then kill ProRL.
 
-Env knobs the launcher reads (defaults in `scripts/_internal/s3_fullasync_docker.sh`): `TOTAL_TRAINING_STEPS`, `SAVE_FREQ`, `BATCH_SIZE`, `GEN_BATCH_SIZE`, `NUM_TRAJ`, `FILTER_GROUPS`, `TEST_FREQ`, `VAL_BEFORE_TRAIN`, `OPENHANDS_NUM_WORKERS`, `REMOTE_DNS`, `SWAP_PROTOCOL`. Read the comments in that file before changing anything — the knobs are interlocked.
+### First run — smoke test (default)
+
+The trainer launcher ships with smoke-test defaults so a functional check finishes in minutes, not hours:
+
+| Knob | Smoke-test default | Production |
+|---|---|---|
+| `VAL_BEFORE_TRAIN` | `False` (skip up-front val) | `True` |
+| `TEST_FREQ` | `-1` (disable in-training val) | `5` |
+| `BATCH_SIZE` (trainer groups/step) | `4` | `32` |
+| `GEN_BATCH_SIZE` (DAPO survivors/producer call) | `16` | `128` |
+
+Smoke run (just hit Terminal 3):
+```bash
+bash scripts/_internal/s3_fullasync_docker.sh
+```
+
+Production run:
+```bash
+VAL_BEFORE_TRAIN=True TEST_FREQ=1 BATCH_SIZE=32 GEN_BATCH_SIZE=128 \
+  bash scripts/_internal/s3_fullasync_docker.sh
+```
+
+All other env knobs the launcher reads (defaults in `scripts/_internal/s3_fullasync_docker.sh`): `TOTAL_TRAINING_STEPS`, `SAVE_FREQ`, `NUM_TRAJ`, `FILTER_GROUPS`, `OPENHANDS_NUM_WORKERS`, `REMOTE_DNS`, `SWAP_PROTOCOL`. Read the comments in that file before changing anything — the knobs are interlocked.
 
 Pool health check:
 
@@ -45,7 +67,7 @@ for p in 8100 8101 8102 8103; do curl -sf http://$REMOTE_DNS:$p/health | jq .; d
 
 | You are… | Read |
 |---|---|
-| Implementing the next architecture | [`plans-n-solutions/producer_as_a_service.md`](plans-n-solutions/producer_as_a_service.md) |
+| Implementing the next architecture | [`plans-n-solutions/rollout_fabric.md`](plans-n-solutions/rollout_fabric.md) |
 | Touching code in the existing system | [`CLAUDE.md`](CLAUDE.md) — invariants, gotchas, edit groups |
 
 ## Repo layout

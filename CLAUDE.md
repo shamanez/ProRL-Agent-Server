@@ -6,7 +6,7 @@ Guidance for Claude Code working in this repo.
 
 ProRLAgent Server is a scalable multi-turn rollout service for training and evaluating RL agents. It is a fork of OpenHands — the upstream `openhands/` tree is kept largely intact, and the new RL-serving code lives under `openhands/nvidia/`, `openhands/llm/nvidia/`, `scripts/`, and `trainer_integration/verl/`. Agent jobs flow through a FastAPI server that dispatches to pluggable handlers and talks to vLLM via token-level I/O.
 
-The forward design is in **[`plans-n-solutions/producer_as_a_service.md`](plans-n-solutions/producer_as_a_service.md)** — read that before changing the rollout/store/trainer wiring. This file covers the architectural invariants of the *current* in-process system you'll be migrating away from.
+The forward design is in **[`plans-n-solutions/rollout_fabric.md`](plans-n-solutions/rollout_fabric.md)** — read that before changing the rollout/store/trainer wiring. This file covers the architectural invariants of the *current* in-process system you'll be migrating away from.
 
 ## Topology — three processes, two machines
 

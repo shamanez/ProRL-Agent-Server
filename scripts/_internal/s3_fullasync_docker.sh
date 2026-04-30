@@ -35,6 +35,10 @@
 #   TOTAL_EPOCHS              10
 #   TOTAL_TRAINING_STEPS      500
 #   SAVE_FREQ                 1
+#   VAL_BEFORE_TRAIN          False     (smoke-test default; True for prod)
+#   TEST_FREQ                 -1        (-1 disables; 1/5 for prod)
+#   BATCH_SIZE                4         (smoke-test; 32 for prod)
+#   GEN_BATCH_SIZE            16        (smoke-test; 128 for prod)
 #
 # verl version: 0.8.0.dev (shamanez/verl main branch)
 # Docker image: verlai/verl:vllm018.dev1 (vLLM 0.18, PyTorch 2.6+)
@@ -62,25 +66,31 @@ FILTER_GROUPS="${FILTER_GROUPS:-True}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 SAVE_FREQ="${SAVE_FREQ:-1}"
-# In-training pass@k validation cadence. Default 1 = validate after every
-# training step while we're verifying the validation path; once we confirm
-# it stays inside total_len (now bounded by enable_history_truncation=False
-# in openhands/nvidia/swe_agent/utils.py — vLLM context-window error halts
-# the trajectory before its trainer-side concat exceeds max_model_len),
-# bump this to 5.
-TEST_FREQ="${TEST_FREQ:-1}"
+# Validation knobs — smoke-test defaults are OFF. A full validation pass
+# costs ~10–15 min; turning it off lets a quick functional test finish in
+# minutes instead of hours.
+#   VAL_BEFORE_TRAIN=False  — skip the once-up-front validation pass.
+#   TEST_FREQ=-1            — disable in-training pass@k validation.
+# Production runs: VAL_BEFORE_TRAIN=True, TEST_FREQ=1 every step while we
+# verify the validation path stays inside total_len (now bounded by
+# enable_history_truncation=False in openhands/nvidia/swe_agent/utils.py),
+# then bump to 5 once stable.
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-False}"
+TEST_FREQ="${TEST_FREQ:--1}"
 LOG_PATH="${LOG_PATH:-/tmp/s3-fullasync.log}"
 
 # Cut 6: producer / trainer batch decoupling. ``BATCH_SIZE`` is the
 # trainer's per-step group draw from replay; ``GEN_BATCH_SIZE`` is the
 # DAPO producer's per-call survivor target.
 #
-# Cut 9 (step-20 wedge stabilization): bumped BATCH_SIZE 4 → 32 for
-# stronger PPO gradient signal and GEN_BATCH_SIZE 16 → 128 explicit
-# (decoupled from the prior 4× formula) to keep the producer fed under
-# DAPO filter pressure.
-BATCH_SIZE="${BATCH_SIZE:-32}"
-GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
+# Smoke-test defaults: BATCH_SIZE=4, GEN_BATCH_SIZE=16 — keeps a quick
+# functional test from spending an hour on a single producer call.
+# Production defaults (Cut 9 step-20 wedge stabilization):
+# BATCH_SIZE=32 (stronger PPO gradient signal), GEN_BATCH_SIZE=128
+# (decoupled from the prior 4× formula to keep the producer fed under
+# DAPO filter pressure).
+BATCH_SIZE="${BATCH_SIZE:-4}"
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-16}"
 
 # How the vLLM pool retires the prior LoRA adapter on /reload_lora.
 #   pinning  — default. Multi-tenant, path-versioned. Pins every trajectory
@@ -98,7 +108,7 @@ echo "[fullasync/docker] image: $IMG"
 echo "[fullasync/docker] remote pool: $REMOTE_DNS:8100-8103"
 echo "[fullasync/docker] replay: enable=$REPLAY_ENABLE buffer=$BUFFER_SIZE K=$STALENESS_CUTOFF_K producer_bs=$PRODUCER_BATCH_SIZE tis=$USE_TEMPORAL_IS continuous=$CONTINUOUS_PRODUCER"
 echo "[fullasync/docker] batches: train=$BATCH_SIZE (groups/step) gen=$GEN_BATCH_SIZE (survivors/producer call)"
-echo "[fullasync/docker] cadence: total_steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ test_freq=$TEST_FREQ"
+echo "[fullasync/docker] cadence: total_steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ test_freq=$TEST_FREQ val_before_train=$VAL_BEFORE_TRAIN"
 echo "[fullasync/docker] filter_groups=$FILTER_GROUPS (False = plain GRPO; flip to True only after E1 clean — full_async.md §5a)"
 echo "[fullasync/docker] swap_protocol=$SWAP_PROTOCOL (pinning = path-versioned multi-tenant; quiesce = drain-and-swap)"
 
@@ -128,6 +138,7 @@ docker run --rm --name "$CNAME" \
   -e TOTAL_TRAINING_STEPS="$TOTAL_TRAINING_STEPS" \
   -e SAVE_FREQ="$SAVE_FREQ" \
   -e TEST_FREQ="$TEST_FREQ" \
+  -e VAL_BEFORE_TRAIN="$VAL_BEFORE_TRAIN" \
   -e REPLAY_ENABLE="$REPLAY_ENABLE" \
   -e BUFFER_SIZE="$BUFFER_SIZE" \
   -e STALENESS_CUTOFF_K="$STALENESS_CUTOFF_K" \
@@ -200,7 +211,7 @@ docker run --rm --name "$CNAME" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
       trainer.save_freq="$SAVE_FREQ" \
       trainer.resume_mode=auto \
-      trainer.val_before_train=True \
+      trainer.val_before_train="$VAL_BEFORE_TRAIN" \
       trainer.test_freq="$TEST_FREQ" \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
       actor_rollout_ref.actor.ppo_max_token_len_per_gpu=49152 \
