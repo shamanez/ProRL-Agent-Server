@@ -1505,19 +1505,39 @@ class AsyncLLMServerManager:
         # Extract instance data from each prompt in the batch
         messages = [prompt.non_tensor_batch['instance'] for prompt in prompts]
 
+        # Capture the trainer-authoritative LoRA version *once* per call so
+        # every sibling of every prompt below sees the same value. This is
+        # what gives per-group consistency: even if the trainer publishes a
+        # new adapter while these jobs are dispatching, all n siblings of one
+        # prompt — and every turn within each sibling's trajectory — will pin
+        # to ``pv_for_call`` via the path-versioned base_url
+        # (OpenHandsServer.process / Worker rewrites address to /v{N}).
+        # Reading ``self.policy_version`` once here is also what makes the
+        # downstream ``behavior_policy_version`` correct: trajectory_store
+        # reads ``instance['policy_version']`` per row at push time
+        # (see push_from_dataproto), so the stamp must be the version that
+        # actually drove the rollout, not whatever the manager has advanced
+        # to by end-of-call.
+        pv_for_call = int(self.policy_version)
+
         # Expand each instance into multiple trajectories
         new_messages = []
         for i in range(len(messages)):
+            # Mutate the prompt-side instance so the value lands in
+            # ``all_input_batch.non_tensor_batch['instance']`` and is preserved
+            # through select_idxs / repeat / union into the per-group DataProto
+            # the producer pushes to the trajectory store.
+            messages[i]['policy_version'] = pv_for_call
             for j in range(
                 self.num_trajectories if not val_mode else self.num_val_trajectories
             ):
                 # Create a copy of the original message for each trajectory
                 tmp_message = messages[i].copy()
                 tmp_message['trajectory_id'] = j  # Add trajectory identifier
-                # Stamp the current trainer-authoritative LoRA policy version
-                # so downstream (ProRL + pool child) can filter / debug
-                # mixed-version batches. 0 means "no adapter published yet".
-                tmp_message['policy_version'] = self.policy_version
+                # Per-trajectory stamp (already in messages[i] above; explicit
+                # for readability and to match the `tmp_message` contract that
+                # OpenHands consumes).
+                tmp_message['policy_version'] = pv_for_call
                 new_messages.append(tmp_message)
 
         return new_messages
@@ -2032,8 +2052,11 @@ class AsyncLLMServerManager:
                         val_mode=val_mode,
                     )
 
-                    # Handle retry logic
-                    if should_retry and retry_count < 2:  # Maximum 3 attempts
+                    # Handle retry logic. Total attempts = 1 + openhands_max_retries.
+                    # Default 0 (one attempt) caps long-tail trajectories at one
+                    # openhands_timeout instead of N×.
+                    max_retries = self.config.rollout.get('openhands_max_retries', 0)
+                    if should_retry and retry_count < max_retries:
                         async with job_queue_lock:
                             await job_queue.put(
                                 (message_index, message, retry_count + 1)

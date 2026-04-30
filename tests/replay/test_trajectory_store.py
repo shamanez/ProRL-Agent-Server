@@ -900,3 +900,78 @@ class TestPushFromDataProtoRoundTrip:
         del dp.non_tensor_batch['uid']
         with pytest.raises(KeyError, match='uid'):
             store.push_from_dataproto(dp, behavior_policy_version=0, current_step=0)
+
+    def test_per_row_policy_version_from_instance_overrides_call_scalar(
+        self,
+    ) -> None:
+        """Per-row stamp from instance['policy_version'] beats the call scalar.
+
+        This is the IS-correctness contract: the trainer's
+        ``DataProto2Messages`` stamps ``instance['policy_version']`` at
+        expansion time (synchronous, atomic per call), and the store reads
+        that per-row stamp here. The ``behavior_policy_version`` arg is only
+        a fallback for legacy / non-stamped paths. Without this contract, a
+        publish landing mid-call would stamp every row in the call with the
+        new version even though the rollouts ran against the old one,
+        corrupting the IS divisor downstream.
+        """
+        store = self._store()
+        # 4 rows, 2 distinct prompts, 2 siblings each. Two prompts dispatched
+        # under different policy versions (simulating a mid-call publish where
+        # only the message-time stamp on instance is trustworthy).
+        instances = [
+            {'instance_id': 'p0', 'policy_version': 7},
+            {'instance_id': 'p0', 'policy_version': 7},
+            {'instance_id': 'p1', 'policy_version': 8},
+            {'instance_id': 'p1', 'policy_version': 8},
+        ]
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((4, 5), dtype=torch.long),
+            responses=torch.zeros((4, 2), dtype=torch.long),
+            uids=['p0', 'p0', 'p1', 'p1'],
+            instance=instances,
+        )
+        # Call-level scalar deliberately disagrees — instance stamp must win.
+        store.push_from_dataproto(dp, behavior_policy_version=99, current_step=0)
+        groups = store._snapshot_groups()
+        assert len(groups) == 2
+        versions_by_uid: dict[str, set[int]] = {'p0': set(), 'p1': set()}
+        for group in groups:
+            for rec in group:
+                versions_by_uid[rec.prompt_uid].add(rec.behavior_policy_version)
+        assert versions_by_uid['p0'] == {7}, (
+            f'p0 siblings should both stamp pv=7; got {versions_by_uid["p0"]}'
+        )
+        assert versions_by_uid['p1'] == {8}, (
+            f'p1 siblings should both stamp pv=8; got {versions_by_uid["p1"]}'
+        )
+        # 99 is the fallback scalar — it should never have been used.
+        all_versions = versions_by_uid['p0'] | versions_by_uid['p1']
+        assert 99 not in all_versions, (
+            'call-scalar leaked into per-row stamp despite instance providing it'
+        )
+
+    def test_per_row_policy_version_falls_back_to_call_scalar(self) -> None:
+        """Rows whose instance dict lacks ``policy_version`` use the fallback.
+
+        Legacy producers (and the validation path) don't stamp policy_version
+        on the instance. The fallback to the call-level scalar keeps those
+        paths working.
+        """
+        store = self._store()
+        instances = [
+            {'instance_id': 'p0'},  # no policy_version key
+            {'instance_id': 'p0'},
+        ]
+        dp = _stub_dataproto(
+            input_ids=torch.zeros((2, 5), dtype=torch.long),
+            responses=torch.zeros((2, 2), dtype=torch.long),
+            uids=['p0', 'p0'],
+            instance=instances,
+        )
+        store.push_from_dataproto(dp, behavior_policy_version=42, current_step=0)
+        groups = store._snapshot_groups()
+        for rec in groups[0]:
+            assert rec.behavior_policy_version == 42, (
+                f'expected fallback to call scalar 42, got {rec.behavior_policy_version}'
+            )

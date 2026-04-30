@@ -216,7 +216,7 @@ def get_config(
         condenser=metadata.condenser_config,
         enable_prompt_extensions=False,
         enable_think=False,  # not too sure what this does.
-        enable_history_truncation=False,  # turn off history truncation
+        enable_history_truncation=False,  # halt trajectory on context overflow so trainer-side concat stays within max_model_len
         ensure_thinking_end_properly=agent_config[
             'ensure_thinking_end_properly'
         ],  # set to true only if using text based server for training.

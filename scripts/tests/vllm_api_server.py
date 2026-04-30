@@ -83,7 +83,9 @@ async def _generate(request_dict: dict, raw_request: Request) -> list[int]:
         log_probs = []
         for d in logprobs:
             cur_logprobs = list(d.values())
-            assert len(cur_logprobs) == 1, f"Expected 1 logprob per token when logprobs=0, but got {len(cur_logprobs)}"
+            assert len(cur_logprobs) == 1, (
+                f'Expected 1 logprob per token when logprobs=0, but got {len(cur_logprobs)}'
+            )
             log_probs.append(cur_logprobs[0].logprob)
         return log_probs
 

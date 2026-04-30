@@ -132,6 +132,15 @@ class Worker:
         self.result_queue = result_queue
 
     def create_llm_config(self):
+        """Build an LLMConfig from the address picked in the parent server.
+
+        If the parent server appended `/v{N}` to the address (because the
+        instance carries a non-zero `policy_version`), it is preserved here
+        verbatim. qwen3.py downstream joins `f"{base_url}/generate"` so the
+        request lands on the vLLM child's path-versioned route. See
+        OpenHandsServer_Process.process for the rewrite point and
+        scripts/serving/_vllm_child.py for the child-side contract.
+        """
         llm_config = LLMConfig(
             base_url=self.llm_server_addresses, **self.sampling_params
         )
@@ -840,6 +849,19 @@ class OpenHandsServer:
             job_id = self.get_unique_id(instance)
 
         llm_server_addresses = self.get_llm_server_addresses()
+
+        # Path-versioned pinning: if the trainer stamped a policy_version on
+        # this instance, rewrite the address to <host>:<port>/v{N} so qwen3.py
+        # downstream lands on the vLLM child's /v{N}/generate route. Pins
+        # every turn of this trajectory (and every sibling of one GRPO group)
+        # to one LoRA adapter version regardless of mid-call /reload_lora
+        # publishes. See plans-n-solutions/handsoff.md and
+        # scripts/serving/_vllm_child.py for the child-side contract.
+        policy_version = int(instance.get('policy_version', 0) or 0)
+        if policy_version > 0:
+            llm_server_addresses = (
+                f'{llm_server_addresses.rstrip("/")}/v{policy_version}'
+            )
 
         args = (
             job_id,

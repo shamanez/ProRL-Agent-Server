@@ -1313,6 +1313,103 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, 'w') as f:
             f.write(str(self.global_steps))
 
+    def _wait_for_publish_headroom(
+        self,
+        endpoints: list[str],
+        max_concurrent_versions: int = 6,
+        max_wait_s: float = 30.0,
+        poll_interval_s: float = 0.5,
+    ) -> dict:
+        """Pre-publish backpressure: defer until in-flight LoRA versions drain.
+
+        In path-versioned pinning mode (see scripts/serving/_vllm_child.py),
+        publishing a new adapter never evicts in-flight versions — they keep
+        serving requests against their pinned LoRARequest. But the vLLM engine
+        only has ``--max-loras`` GPU slots; if too many distinct versions are
+        in-flight at once, the engine LRU-evicts under pressure and the next
+        generate against an evicted slot pays an extra page-in latency.
+
+        Strategy: poll each endpoint's /health, pull
+        ``inflight_versions_count``, and if any child reports more than
+        ``max_concurrent_versions`` distinct in-flight versions, sleep and
+        retry. After ``max_wait_s`` we proceed anyway (deferring further
+        would stall training); the metric below records the wait so it's
+        observable in WandB.
+
+        Returns metrics for emit-with-publish_lora.
+        """
+        import time  # noqa: PLC0415
+
+        import requests  # noqa: PLC0415
+
+        t_start = time.monotonic()
+        deferred = 0
+        last_max = 0
+        while True:
+            max_inflight_versions = 0
+            for ep in endpoints:
+                try:
+                    r = requests.get(ep.rstrip('/') + '/health', timeout=5)
+                    if r.status_code != 200:
+                        # Pool health endpoint should always return 200; if it
+                        # doesn't we abort the wait and let _publish_lora_adapter
+                        # surface the real error.
+                        return {
+                            'weight_sync/publish_deferred_count': deferred,
+                            'weight_sync/publish_deferred_wait_s': round(
+                                time.monotonic() - t_start, 3
+                            ),
+                            'weight_sync/publish_max_inflight_versions': last_max,
+                        }
+                    body = r.json()
+                    n = int(body.get('inflight_versions_count', 0))
+                    if n > max_inflight_versions:
+                        max_inflight_versions = n
+                except (requests.RequestException, ValueError):
+                    # Health probe failure: don't block the publish on it.
+                    return {
+                        'weight_sync/publish_deferred_count': deferred,
+                        'weight_sync/publish_deferred_wait_s': round(
+                            time.monotonic() - t_start, 3
+                        ),
+                        'weight_sync/publish_max_inflight_versions': last_max,
+                    }
+
+            last_max = max_inflight_versions
+            if max_inflight_versions <= max_concurrent_versions:
+                return {
+                    'weight_sync/publish_deferred_count': deferred,
+                    'weight_sync/publish_deferred_wait_s': round(
+                        time.monotonic() - t_start, 3
+                    ),
+                    'weight_sync/publish_max_inflight_versions': last_max,
+                }
+
+            if time.monotonic() - t_start >= max_wait_s:
+                # Proceeding anyway. The publish will still succeed; the LRU
+                # may briefly evict an in-flight slot under pressure.
+                print(
+                    json.dumps(
+                        {
+                            'event': 'publish_deferred_capped',
+                            'inflight_versions': last_max,
+                            'max_concurrent_versions': max_concurrent_versions,
+                            'waited_s': round(time.monotonic() - t_start, 3),
+                        }
+                    ),
+                    flush=True,
+                )
+                return {
+                    'weight_sync/publish_deferred_count': deferred,
+                    'weight_sync/publish_deferred_wait_s': round(
+                        time.monotonic() - t_start, 3
+                    ),
+                    'weight_sync/publish_max_inflight_versions': last_max,
+                }
+
+            deferred += 1
+            time.sleep(poll_interval_s)
+
     def _publish_lora_adapter(self, local_global_step_folder: str) -> None:
         # Broadcasts the rank-16 LoRA adapter emitted by
         # verl/workers/fsdp_workers.py::save_checkpoint (when _is_lora=True) to
@@ -1355,6 +1452,13 @@ class RayPPOTrainer:
             raise RuntimeError(
                 'external_llm_endpoints is empty — nothing to publish LoRA to.'
             )
+
+        # Pre-publish backpressure: in path-versioned pinning mode (the
+        # default in scripts/serving/_remote_vllm_runner.sh), in-flight
+        # trajectories pinned to older versions still serve from those
+        # versions. Wait briefly for distinct in-flight version count to drop
+        # back under max_loras headroom before adding another one.
+        backpressure_metrics = self._wait_for_publish_headroom(endpoints)
 
         def _post(endpoint: str) -> dict:
             url = endpoint.rstrip('/') + '/reload_lora'
@@ -1421,6 +1525,7 @@ class RayPPOTrainer:
             'weight_sync/vllm_load_latency_s': vllm_load_latency_s,
             'weight_sync/endpoints_ok': len(ok),
             'weight_sync/endpoints_failed': len(failed),
+            **backpressure_metrics,
         }
 
         print(
@@ -1574,6 +1679,9 @@ class RayPPOTrainer:
         n = int(self.config.actor_rollout_ref.rollout.n)
         n_groups = max(1, len(batch.batch) // n)
 
+        metrics.update(
+            self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
+        )
         try:
             sampled = self.trajectory_store.sample_mini_batch(
                 n_groups=n_groups,
@@ -1581,6 +1689,9 @@ class RayPPOTrainer:
             )
         except InsufficientTrajectoriesError:
             metrics.update(self.trajectory_store.metrics(self.global_steps))
+            metrics.update(
+                self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
+            )
             return batch
 
         new_batch = DataProto.from_dict(
@@ -1589,6 +1700,9 @@ class RayPPOTrainer:
             meta_info=sampled.meta_info,
         )
         metrics.update(self.trajectory_store.metrics(self.global_steps))
+        metrics.update(
+            self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
+        )
         return new_batch
 
     # ---- Cut 4: continuous-rollout producer --------------------------------
@@ -1818,10 +1932,16 @@ class RayPPOTrainer:
                     f'total_pushes={self.trajectory_store.total_pushes()}). '
                     'Producer is wedged — check pool /health and producer logs.'
                 )
+            metrics.update(
+                self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
+            )
             sampled = self.trajectory_store.sample_mini_batch(
                 n_groups=n_groups, current_step=self.global_steps
             )
             metrics.update(self.trajectory_store.metrics(self.global_steps))
+            metrics.update(
+                self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
+            )
             return DataProto.from_dict(
                 tensors=sampled.tensors,
                 non_tensors=sampled.non_tensors,

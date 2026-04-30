@@ -397,8 +397,11 @@ class AsyncLLMServerManagerDAPO(AsyncLLMServerManager):
                         openhands_base_url=server_url,
                     )
 
-                    # Handle retry logic
-                    if should_retry and retry_count < 2:  # Maximum 3 attempts
+                    # Handle retry logic. Total attempts = 1 + openhands_max_retries.
+                    # Default 0 (one attempt) caps long-tail trajectories at one
+                    # openhands_timeout instead of N×.
+                    max_retries = self.config.rollout.get('openhands_max_retries', 0)
+                    if should_retry and retry_count < max_retries:
                         async with job_queue_lock:
                             await self.job_queue.put(
                                 (

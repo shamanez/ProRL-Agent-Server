@@ -40,13 +40,17 @@ MAX_NUM_ITERS=30
 # (meaningful with filter_groups on) against rollout cost.
 NUM_TRAJ=8
 SAVE_FREQ=${SAVE_FREQ:-1}
-# 32 OpenHands workers is the sweet spot for a 4-child vLLM pool on
-# 4× H100. Empirically the pool saturates to ~100 % GPU util at ~32
-# concurrent clients; bumping to 64 made every client-turn slower
-# (queue depth on a pool-bound workload, not a host-bound one) and
-# regressed first-step wall-clock from 17 min → 47 min (filter=True,
-# Progress 3/4 → 0/4). See gotcha §17 in handsoff.md.
-OPENHANDS_NUM_WORKERS=32
+# OpenHands worker concurrency. Pool is 4× L4 24 GB on vllm-instance
+# (verified via nvidia-smi 2026-04-30). Earlier comment claimed 32
+# saturated 4× H100; that was wrong hardware spec.
+#
+# Cut 9 (step-20 wedge stabilization): bumped to 64 alongside pinning
+# (multi-tenant LoRA serving) + openhands_max_retries=0 + history
+# truncation. The prior 64→47-min regression was measured under
+# filter_groups=True with the wedge present; with the triple in place
+# we expect the worker count to be the throughput knob, not a
+# wedge amplifier. Revisit if first-step wall-clock blows up again.
+OPENHANDS_NUM_WORKERS=64
 
 # DAPO drops KL loss: RLVR rewards are verifiable, no reward-model drift to
 # anchor against. Coef/type kept as unused sentinels for readability.
@@ -134,7 +138,7 @@ python3 -m verl_custom.trainer.main_ppo \
     actor_rollout_ref.rollout.n=$NUM_TRAJ \
     actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.rollout.top_p=$TOP_P \
-    +actor_rollout_ref.rollout.external_llm_endpoints=[http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8100,http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8101,http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8102,http://${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}:8103] \
+    +actor_rollout_ref.rollout.external_llm_endpoints=[http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8100,http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8101,http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8102,http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8103] \
     +actor_rollout_ref.rollout.publish_on_save=True \
     +actor_rollout_ref.rollout.async_manager=openhands \
     +actor_rollout_ref.rollout.max_iterations=$MAX_NUM_ITERS \
@@ -145,7 +149,8 @@ python3 -m verl_custom.trainer.main_ppo \
     +actor_rollout_ref.rollout.openhands_num_workers=$OPENHANDS_NUM_WORKERS \
     +actor_rollout_ref.rollout.task_type=swegym \
     +actor_rollout_ref.rollout.chat_template_name=qwen3_chat_template_generation \
-    +actor_rollout_ref.rollout.openhands_timeout=1000 \
+    +actor_rollout_ref.rollout.openhands_timeout=1500 \
+    +actor_rollout_ref.rollout.openhands_max_retries=0 \
     +actor_rollout_ref.actor.masking=True \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.format=hermes \
@@ -171,14 +176,14 @@ python3 -m verl_custom.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=$NNODES \
     trainer.save_freq=$SAVE_FREQ \
-    trainer.val_before_train=False \
+    trainer.val_before_train=True \
     +data.dataloader_num_workers=1 \
     +actor_rollout_ref.exchange_size=500000000 \
     actor_rollout_ref.rollout.val_kwargs.n=2 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-    trainer.test_freq=-1 \
+    trainer.test_freq=1 \
     +trainer.enable_pass_k_evaluation=True \
     +trainer.pass_k_problem_id_strategy=input_hash \
     trainer.total_epochs=100 "$@"

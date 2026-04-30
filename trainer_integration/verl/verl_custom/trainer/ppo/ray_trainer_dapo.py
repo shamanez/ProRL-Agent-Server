@@ -127,10 +127,16 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                     f'total_pushes={self.trajectory_store.total_pushes()}). '
                     'Producer is wedged — check pool /health and producer logs.'
                 )
+            metrics.update(
+                self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
+            )
             sampled = self.trajectory_store.sample_mini_batch(
                 n_groups=n_groups, current_step=self.global_steps
             )
             metrics.update(self.trajectory_store.metrics(self.global_steps))
+            metrics.update(
+                self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
+            )
             return DataProto.from_dict(
                 tensors=sampled.tensors,
                 non_tensors=sampled.non_tensors,

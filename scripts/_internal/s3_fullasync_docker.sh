@@ -44,7 +44,7 @@ source /home/ubuntu/.prorl_creds.env
 REPO=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
 IMG=verlai/verl:vllm018.dev1
 CNAME=s3-fullasync
-REMOTE_DNS="${REMOTE_DNS:-ec2-54-145-77-207.compute-1.amazonaws.com}"
+REMOTE_DNS="${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}"
 
 # Phase 2 replay knobs.
 REPLAY_ENABLE="${REPLAY_ENABLE:-True}"
@@ -62,25 +62,36 @@ FILTER_GROUPS="${FILTER_GROUPS:-True}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 SAVE_FREQ="${SAVE_FREQ:-1}"
-# In-training pass@k validation cadence. Default -1 disables it (val is
-# expensive: each test_freq boundary calls producer.stop and re-warms).
-# Set to 10 (or similar) for runs where you want pass@k datapoints
-# before the final step.
-TEST_FREQ="${TEST_FREQ:--1}"
+# In-training pass@k validation cadence. Default 1 = validate after every
+# training step while we're verifying the validation path; once we confirm
+# it stays inside total_len (now bounded by enable_history_truncation=False
+# in openhands/nvidia/swe_agent/utils.py — vLLM context-window error halts
+# the trajectory before its trainer-side concat exceeds max_model_len),
+# bump this to 5.
+TEST_FREQ="${TEST_FREQ:-1}"
 LOG_PATH="${LOG_PATH:-/tmp/s3-fullasync.log}"
 
 # Cut 6: producer / trainer batch decoupling. ``BATCH_SIZE`` is the
 # trainer's per-step group draw from replay; ``GEN_BATCH_SIZE`` is the
-# DAPO producer's per-call survivor target. Default is 4× (validated
-# by Cut 6's 25-step prod run).
+# DAPO producer's per-call survivor target.
 #
-# Cut 8 (in validation, prep-100 run): bumping the ratio to 8× is
-# proposed to mitigate the ~26 min producer call-boundary dead gap
-# Cut 6's prod run exposed (handsoff.md §31). Override at run time
-# via ``GEN_BATCH_SIZE=32`` until the 100-step prep run validates the
-# bump as a safe new default.
-BATCH_SIZE="${BATCH_SIZE:-4}"
-GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-$((BATCH_SIZE * 4))}"
+# Cut 9 (step-20 wedge stabilization): bumped BATCH_SIZE 4 → 32 for
+# stronger PPO gradient signal and GEN_BATCH_SIZE 16 → 128 explicit
+# (decoupled from the prior 4× formula) to keep the producer fed under
+# DAPO filter pressure.
+BATCH_SIZE="${BATCH_SIZE:-32}"
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-128}"
+
+# How the vLLM pool retires the prior LoRA adapter on /reload_lora.
+#   pinning  — default. Multi-tenant, path-versioned. Pins every trajectory
+#              and every GRPO sibling group to its dispatch-time policy
+#              version via /v{N}/generate. No cross-call mixing under
+#              save_freq=1. Requires the matching child startup flag in
+#              scripts/serving/_remote_vllm_runner.sh (already wired).
+#   quiesce  — fallback. Drains in-flight before remove_lora; HTTP 503 on
+#              drain timeout. Throughput cost grows with session length.
+#              Use only if a pinning-mode regression surfaces in E2E.
+SWAP_PROTOCOL="${SWAP_PROTOCOL:-pinning}"
 
 echo "[fullasync/docker] starting $(date -u +%FT%TZ)"
 echo "[fullasync/docker] image: $IMG"
@@ -89,6 +100,7 @@ echo "[fullasync/docker] replay: enable=$REPLAY_ENABLE buffer=$BUFFER_SIZE K=$ST
 echo "[fullasync/docker] batches: train=$BATCH_SIZE (groups/step) gen=$GEN_BATCH_SIZE (survivors/producer call)"
 echo "[fullasync/docker] cadence: total_steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ test_freq=$TEST_FREQ"
 echo "[fullasync/docker] filter_groups=$FILTER_GROUPS (False = plain GRPO; flip to True only after E1 clean — full_async.md §5a)"
+echo "[fullasync/docker] swap_protocol=$SWAP_PROTOCOL (pinning = path-versioned multi-tenant; quiesce = drain-and-swap)"
 
 # Clean up any stale container from a prior attempt.
 docker rm -f "$CNAME" >/dev/null 2>&1 || true
@@ -125,6 +137,7 @@ docker run --rm --name "$CNAME" \
   -e FILTER_GROUPS="$FILTER_GROUPS" \
   -e BATCH_SIZE="$BATCH_SIZE" \
   -e GEN_BATCH_SIZE="$GEN_BATCH_SIZE" \
+  -e SWAP_PROTOCOL="$SWAP_PROTOCOL" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \
@@ -187,7 +200,7 @@ docker run --rm --name "$CNAME" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
       trainer.save_freq="$SAVE_FREQ" \
       trainer.resume_mode=auto \
-      trainer.val_before_train=False \
+      trainer.val_before_train=True \
       trainer.test_freq="$TEST_FREQ" \
       actor_rollout_ref.rollout.gpu_memory_utilization=0.45 \
       actor_rollout_ref.actor.ppo_max_token_len_per_gpu=49152 \
@@ -210,7 +223,8 @@ docker run --rm --name "$CNAME" \
       replay.use_temporal_is="$USE_TEMPORAL_IS" \
       replay.continuous_producer="$CONTINUOUS_PRODUCER" \
       +replay.stop_timeout_s=300 \
-      +replay.no_progress_timeout_s=1800 \
+      +replay.no_progress_timeout_s=5400 \
+      +replay.swap_protocol="$SWAP_PROTOCOL" \
       +algorithm.filter_groups.enable="$FILTER_GROUPS" \
       "$@"
   ' _ "$@" 2>&1 | tee "$LOG_PATH"

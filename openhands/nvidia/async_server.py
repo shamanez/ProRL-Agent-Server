@@ -151,7 +151,19 @@ class OpenHandsServer:
     def clear_singularity_jobs(self):
         kill_all_singularity_jobs(self._exclude_pids)
 
-    def create_llm_config(self, sampling_params):
+    def create_llm_config(self, sampling_params, policy_version: int = 0):
+        """Build an LLMConfig pointing at the next pool address from the heap.
+
+        When `policy_version > 0` the address is rewritten to
+        `<host>:<port>/v{N}` so qwen3.py / qwen2_5_vl.py's downstream join of
+        `f"{base_url}/generate"` lands on the vLLM child's path-versioned
+        route (`/v{N}/generate`). This is what pins every turn of one
+        trajectory — and every sibling of one GRPO group — to a single LoRA
+        adapter version even when the trainer publishes a new adapter
+        mid-call. See plans-n-solutions/handsoff.md (per-trajectory and
+        per-group consistency) and scripts/serving/_vllm_child.py for the
+        contract on the child side.
+        """
         with self._address_lock:
             if len(self.weighted_addresses) == 0:
                 raise ValueError('No LLM server addresses added')
@@ -159,6 +171,9 @@ class OpenHandsServer:
             address = self.weighted_addresses[0][1]
             self.weighted_addresses[0][0] += 1  # type: ignore
             heapq.heapreplace(self.weighted_addresses, self.weighted_addresses[0])
+
+        if policy_version > 0:
+            address = f'{str(address).rstrip("/")}/v{policy_version}'
 
         llm_config = LLMConfig(base_url=address, **sampling_params)
         return llm_config
@@ -287,7 +302,14 @@ class OpenHandsServer:
                 job_details.agent_config[agent_config_key] = sampling_params.pop(
                     agent_config_key
                 )
-        llm_config = self.create_llm_config(sampling_params)
+        # `policy_version` is stamped per-trajectory by the trainer at
+        # DataProto2Messages time and (for DAPO) captured per-group in
+        # refill_job_queue. 0 means "no adapter published yet" → unpinned
+        # legacy /generate route.
+        policy_version = int(instance.get('policy_version', 0) or 0)
+        llm_config = self.create_llm_config(
+            sampling_params, policy_version=policy_version
+        )
         job_details.llm_config = llm_config
         job_details.event = threading.Event()
 

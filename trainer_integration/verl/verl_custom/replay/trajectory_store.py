@@ -213,6 +213,16 @@ class TrajectoryStore:
         appears only once still form a singleton group; the advantage
         computation will treat them as a degenerate group with mean=0 std=1.
 
+        ``behavior_policy_version`` is a fallback used only when the row's
+        ``instance`` dict is missing its own ``policy_version`` stamp. The
+        per-row stamp (set by :meth:`AsyncLLMServerManager.DataProto2Messages`
+        at expansion time) is the trustworthy value: it captures the LoRA
+        version that actually drove every turn of the trajectory, regardless
+        of how many ``/reload_lora`` calls fired between expansion and push.
+        Reading the manager's *current* ``policy_version`` at push time would
+        stamp every row with the latest value — corrupting the IS correction
+        downstream because the divisor would be the wrong reference policy.
+
         Returns the number of groups appended.
         """
         tensors = dp.batch
@@ -317,6 +327,19 @@ class TrajectoryStore:
                 # mutation after push would silently corrupt stored records.
                 prompt_extras[k] = dict(v) if isinstance(v, dict) else v
 
+            # Per-row policy version: prefer the stamp the trainer placed on
+            # the instance at DataProto2Messages time (async_server.py:~1520).
+            # Falls back to the call-level scalar if the row's instance dict
+            # is missing it (legacy producers / non-stamped paths).
+            row_instance = (
+                instance_arr[i]
+                if instance_arr is not None and isinstance(instance_arr[i], dict)
+                else {}
+            )
+            row_policy_version = int(
+                row_instance.get('policy_version', behavior_policy_version) or 0
+            )
+
             rec = TrajectoryRecord(
                 prompt_ids=tuple(int(x) for x in prompt_tokens),
                 response_ids=tuple(int(x) for x in response_tokens),
@@ -324,7 +347,7 @@ class TrajectoryStore:
                 response_log_probs=tuple(float(x) for x in response_lp),
                 reward=float(per_row_reward[i]),
                 advantage=float(per_row_advantage[i]),
-                behavior_policy_version=behavior_policy_version,
+                behavior_policy_version=row_policy_version,
                 created_at_step=current_step,
                 prompt_uid=uid,
                 group_uid=uid,
@@ -337,11 +360,7 @@ class TrajectoryStore:
                 finish=_bool_scalar(finish_arr, i) if finish_arr is not None else True,
                 is_padded=bool(is_padded[i].item()),
                 error=_opt_str(error_arr, i) if error_arr is not None else None,
-                instance=(
-                    dict(instance_arr[i])
-                    if instance_arr is not None and isinstance(instance_arr[i], dict)
-                    else {}
-                ),
+                instance=dict(row_instance) if row_instance else {},
                 prompt_extras=prompt_extras,
             )
             # Gate error_mask so the record's `error` surfaces transport
@@ -634,10 +653,17 @@ class TrajectoryStore:
         with self._lock:
             return sum(len(g) for g in self._groups)
 
-    def metrics(self, current_step: int) -> dict[str, float]:
+    def metrics(self, current_step: int, suffix: str = '') -> dict[str, float]:
         """Return ``replay/*`` WandB metrics for this store.
 
         The keys follow the Phase 2 stage-doc naming (``full_async.md`` §5).
+
+        ``suffix`` (e.g. ``'_pre_sample'``, ``'_post_sample'``) is appended
+        to the *level* keys (``store_size``, ``store_fill_ratio``,
+        ``store_num_trajectories``, ``store_age_p50``, ``store_age_p95``)
+        so callers can log a pre/post-sample pair on the same step.
+        Monotonic counters and last-sample metrics are reported only when
+        ``suffix == ''`` to avoid double-logging.
         """
         with self._lock:
             groups = [list(g) for g in self._groups]
@@ -646,30 +672,34 @@ class TrajectoryStore:
             oversize_prompt_total = self._oversize_prompt_total
             oversize_response_total = self._oversize_response_total
         base: dict[str, float] = {
-            'replay/store_size': float(len(groups)),
-            'replay/store_fill_ratio': float(len(groups)) / float(self._max_size),
-            'replay/store_num_trajectories': float(sum(len(g) for g in groups)),
-            'replay/dropped_by_staleness_total': float(dropped_total),
-            'replay/oversize_prompt_total': float(oversize_prompt_total),
-            'replay/oversize_response_total': float(oversize_response_total),
+            f'replay/store_size{suffix}': float(len(groups)),
+            f'replay/store_fill_ratio{suffix}': float(len(groups))
+            / float(self._max_size),
+            f'replay/store_num_trajectories{suffix}': float(
+                sum(len(g) for g in groups)
+            ),
         }
         if groups:
             ages = np.array(
                 [current_step - g[0].created_at_step for g in groups],
                 dtype=np.float64,
             )
-            base['replay/store_age_p50'] = float(np.percentile(ages, 50))
-            base['replay/store_age_p95'] = float(np.percentile(ages, 95))
+            base[f'replay/store_age_p50{suffix}'] = float(np.percentile(ages, 50))
+            base[f'replay/store_age_p95{suffix}'] = float(np.percentile(ages, 95))
         else:
-            base['replay/store_age_p50'] = 0.0
-            base['replay/store_age_p95'] = 0.0
-        if last_sample_ages:
-            sa = np.array(last_sample_ages, dtype=np.float64)
-            base['replay/sample_age_steps_p50'] = float(np.percentile(sa, 50))
-            base['replay/sample_age_steps_p95'] = float(np.percentile(sa, 95))
-        else:
-            base['replay/sample_age_steps_p50'] = 0.0
-            base['replay/sample_age_steps_p95'] = 0.0
+            base[f'replay/store_age_p50{suffix}'] = 0.0
+            base[f'replay/store_age_p95{suffix}'] = 0.0
+        if not suffix:
+            base['replay/dropped_by_staleness_total'] = float(dropped_total)
+            base['replay/oversize_prompt_total'] = float(oversize_prompt_total)
+            base['replay/oversize_response_total'] = float(oversize_response_total)
+            if last_sample_ages:
+                sa = np.array(last_sample_ages, dtype=np.float64)
+                base['replay/sample_age_steps_p50'] = float(np.percentile(sa, 50))
+                base['replay/sample_age_steps_p95'] = float(np.percentile(sa, 95))
+            else:
+                base['replay/sample_age_steps_p50'] = 0.0
+                base['replay/sample_age_steps_p95'] = 0.0
         return base
 
     # ---- test helpers -------------------------------------------------------

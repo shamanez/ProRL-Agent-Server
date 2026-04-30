@@ -73,6 +73,29 @@ class StepCounter:
 class ContinuousRolloutProducer:
     """Daemon-thread rollout generator for Phase 2 fully-async training.
 
+    Per-trajectory and per-group policy consistency contract
+    --------------------------------------------------------
+    The producer reads ``self._rollout_manager.policy_version`` at end-of-call
+    only as a *fallback* for the per-row ``behavior_policy_version`` stamp.
+    The trustworthy stamp lives on each row's ``instance['policy_version']``,
+    set by :meth:`AsyncLLMServerManager.DataProto2Messages` at expansion time
+    (synchronous, atomic per call), and consumed by
+    :meth:`TrajectoryStore.push_from_dataproto`. Reading the manager's
+    *current* version at end-of-call would silently corrupt the IS correction
+    when a publish landed mid-call. See
+    plans-n-solutions/handsoff.md (per-trajectory consistency under
+    save_freq=1) for the full design.
+
+    Path-versioned URL routing on the OpenHands side ensures every turn of a
+    trajectory — and every sibling of a GRPO group — actually runs against
+    the stamped version, regardless of whether ``swap_protocol`` is
+    ``pinning`` (multi-tenant; default) or ``quiesce`` (drain-and-swap;
+    fallback). In quiesce mode an in-flight call pinned to a prior version
+    will receive HTTP 410 from the child after the swap drains; the operator
+    is responsible for aligning publish boundaries with producer-call
+    completion (the existing ``_stop_continuous_producer_if_needed`` flow
+    handles validation; for save-time publishes the same pattern applies).
+
     Parameters
     ----------
     rollout_manager:

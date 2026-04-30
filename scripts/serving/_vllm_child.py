@@ -54,18 +54,37 @@ engine: AsyncLLMEngine | None = None
 # not split a single request.
 #
 # `_inflight` counts generates currently executing per lora_int_id (int_id=0
-# means base model / no adapter). `/reload_lora` drains the prior adapter's
-# count to 0 before calling `engine.remove_lora(prior)` so an in-flight
-# generate that snapshotted the prior adapter cannot race its removal.
+# means base model / no adapter).
+#
+# Two swap protocols are supported (selected at startup via --swap-protocol):
+#   * "pinning"  — multi-tenant. Path-versioned /v{N}/generate routes pin a
+#                  call to a specific lora_int_id N. /reload_lora installs new
+#                  adapters but never calls engine.remove_lora; vLLM's internal
+#                  LRU (max_loras / max_cpu_loras) handles GPU/CPU eviction.
+#                  Disk pv{N} dirs are kept so an evicted adapter can be
+#                  re-added on demand. This is the design that satisfies
+#                  per-trajectory and per-group policy consistency.
+#   * "quiesce"  — single-tenant fallback. /reload_lora drains in-flight to
+#                  zero before calling remove_lora(prior). Returns HTTP 503
+#                  on drain timeout (no silent slot leak). Path-versioned
+#                  routes accept lora_int_id == active_policy_version only.
 active_lora: LoRARequest | None = None
 active_policy_version: int = 0
 _swap_lock: asyncio.Lock | None = None  # created inside event loop in main()
 _inflight: dict[int, int] = {}
 _inflight_cond: asyncio.Condition | None = None  # created inside event loop
-_DRAIN_TIMEOUT_S = 15.0  # cap on drain wait before falling back to "leak old slot,
-# return 200 degraded" path. Must stay well below the trainer's 60s HTTP timeout
-# so a single straggler never aborts a run. Slot leaks are absorbed by
-# --max-loras=8 headroom in _remote_vllm_runner.sh.
+# Pinning-mode bookkeeping: every LoRARequest we have add_lora'd lives here so
+# /v{N}/generate can dispatch against it without re-reading the disk on hot
+# paths. vLLM may LRU-evict the GPU/CPU slot underneath us; on the next call
+# the engine pages it back from disk via the LoRARequest.lora_path. We never
+# drop entries from this dict in pinning mode (the cap is bounded by the
+# number of train steps in the run, and disk cleanup is a separate concern).
+_resident_loras: dict[int, LoRARequest] = {}
+swap_protocol: str = 'pinning'  # set in main() from --swap-protocol
+_DRAIN_TIMEOUT_S = 15.0  # quiesce-mode default. Overridden per-request via
+# --quiesce-drain-timeout-s for runs where individual sessions can exceed 15s.
+# In pinning mode this is unused (no drain).
+_QUIESCE_DRAIN_TIMEOUT_S = 600.0  # quiesce-mode max wait; HTTP 503 past this.
 CHILD_PORT: int = 0
 ADAPTER_STAGING_ROOT = Path('/tmp/lora_adapters')
 
@@ -124,24 +143,52 @@ class _JSONFormatter(logging.Formatter):
 async def health() -> Response:
     if engine is None:
         return JSONResponse({'detail': 'engine not ready'}, status_code=503)
-    return JSONResponse({'policy_version': active_policy_version}, status_code=200)
+    # Snapshot inflight without acquiring _inflight_cond — health probes are
+    # frequent and we just want a coarse view. CPython dict reads are atomic.
+    inflight_snapshot = {int(k): int(v) for k, v in _inflight.items() if v > 0}
+    payload: dict[str, Any] = {
+        'policy_version': active_policy_version,
+        'swap_protocol': swap_protocol,
+        # Versions for which the child still has the pv{N} dir on disk + a
+        # cached LoRARequest. /v{N}/generate against any of these will succeed
+        # (either from the engine's GPU/CPU LoRA cache, or via re-add from
+        # disk if vLLM's internal LRU evicted it).
+        'pinned_versions': sorted(_resident_loras.keys()),
+        # Per-version in-flight count — what the trainer's
+        # _publish_lora_adapter backpressure reads. A version with inflight>0
+        # cannot be evicted without splitting a trajectory, so the trainer
+        # avoids publishing a new adapter while too many distinct versions
+        # have in-flight work (to stay within --max-loras headroom).
+        'inflight_per_version': inflight_snapshot,
+        'inflight_versions_count': len(inflight_snapshot),
+    }
+    return JSONResponse(payload, status_code=200)
 
 
-@app.post('/generate')
-async def generate(request: Request) -> Response:
-    if engine is None or _inflight_cond is None:
-        return JSONResponse({'detail': 'engine not ready'}, status_code=503)
+async def _do_generate(
+    request: Request,
+    *,
+    pinned_lora: LoRARequest | None,
+    inflight_key: int,
+) -> Response:
+    """Shared body for /generate and /v{N}/generate.
+
+    `pinned_lora` is the LoRARequest to dispatch against (may be None for
+    base-model). `inflight_key` is the lora_int_id used for the inflight
+    counter — 0 for base/no-adapter, else N. Caller must already hold a
+    valid pre-flight (engine + cond non-None, body parsed)."""
+    assert engine is not None
+    assert _inflight_cond is not None
+
     body: dict[str, Any] = await request.json()
-
     prompt_ids = body.pop('prompt_ids', None)
     if prompt_ids is None:
         return JSONResponse(
             {'detail': "request body missing 'prompt_ids'"},
             status_code=400,
         )
-    # Request 1 logprob per sampled token so response includes per-token logprobs.
     body.setdefault('logprobs', 0)
-    body.pop('stream', None)  # streaming not wired; non-stream only
+    body.pop('stream', None)
 
     try:
         sampling_params = SamplingParams(**body)
@@ -154,28 +201,18 @@ async def generate(request: Request) -> Response:
     prompt = TokensPrompt(prompt_token_ids=prompt_ids)
     request_id = random_uuid()
 
-    # Snapshot active_lora AND register inflight under the same cond lock so a
-    # concurrent /reload_lora cannot commit the swap, drain an empty count,
-    # and remove_lora(prior) between our snapshot and our increment. Holding
-    # the cond for the snapshot guarantees: if we see the prior adapter, our
-    # increment is visible to the reloader's drain wait; if we see the new
-    # adapter, we're safe by construction.
     async with _inflight_cond:
-        current_lora = active_lora
-        inflight_key = current_lora.lora_int_id if current_lora is not None else 0
         _inflight[inflight_key] = _inflight.get(inflight_key, 0) + 1
 
     try:
         generator = engine.generate(
-            prompt, sampling_params, request_id, lora_request=current_lora
+            prompt, sampling_params, request_id, lora_request=pinned_lora
         )
         final = None
         try:
             async for output in generator:
                 final = output
         except asyncio.CancelledError:
-            # Client disconnected; abort so vLLM frees GPU blocks for this
-            # request instead of continuing to compute a result nobody will read.
             await engine.abort(request_id)
             raise
         if final is None:
@@ -196,6 +233,123 @@ async def generate(request: Request) -> Response:
             if _inflight[inflight_key] <= 0:
                 _inflight.pop(inflight_key, None)
                 _inflight_cond.notify_all()
+
+
+@app.post('/generate')
+async def generate(request: Request) -> Response:
+    """Legacy unpinned route. Snapshots whatever adapter is currently active.
+
+    This route is kept for backward compatibility with the eval/validation path
+    and any caller that does not yet stamp `policy_version` on its instance.
+    For training-time correctness use `/v{N}/generate` (pinning mode) so calls
+    cannot be silently mixed across a mid-trajectory swap.
+    """
+    if engine is None or _inflight_cond is None:
+        return JSONResponse({'detail': 'engine not ready'}, status_code=503)
+
+    # Snapshot active_lora under the cond lock so a concurrent /reload_lora
+    # (in quiesce mode, where remove_lora can fire) cannot drain past us.
+    # In pinning mode this is still correct — we just never call remove_lora
+    # so the inflight count is informational only.
+    async with _inflight_cond:
+        current_lora = active_lora
+        inflight_key = current_lora.lora_int_id if current_lora is not None else 0
+
+    # Note: _do_generate increments the inflight counter again under its own
+    # cond acquisition, but it does so for the same `inflight_key`. The brief
+    # window between the snapshot and the increment is safe because /reload_lora
+    # in quiesce mode holds _swap_lock for the whole drain — concurrent
+    # snapshots see the same active_lora throughout.
+    return await _do_generate(
+        request, pinned_lora=current_lora, inflight_key=inflight_key
+    )
+
+
+@app.post('/v{lora_int_id:int}/generate')
+async def generate_pinned(lora_int_id: int, request: Request) -> Response:
+    """Pinned-version generate: dispatch this call against a specific adapter.
+
+    The trainer-side rollout manager stamps `instance['policy_version']` on
+    every trajectory at expansion time (and every sibling of one prompt
+    inherits the same version, see refill_job_queue in async_server_dapo.py).
+    The ProRL-side OpenHandsServer rewrites the per-job vLLM base_url to
+    `<host>:<port>/v{N}` so qwen3.py's downstream `f"{base_url}/generate"`
+    lands here.
+
+    Returns HTTP 410 Gone if the requested version is no longer recoverable
+    (the pv{N} dir was cleaned up). Caller must abort the trajectory; do NOT
+    silently fall back to the active adapter.
+    """
+    if engine is None or _inflight_cond is None or _swap_lock is None:
+        return JSONResponse({'detail': 'engine not ready'}, status_code=503)
+
+    if lora_int_id == 0:
+        # Explicit "base model, no adapter" pin. Used by the validation /
+        # warmup path when there is no published adapter yet.
+        return await _do_generate(request, pinned_lora=None, inflight_key=0)
+
+    pinned_lora = _resident_loras.get(lora_int_id)
+    if pinned_lora is None:
+        # Slot was never installed (or the process was restarted). Try to
+        # re-add from disk; pv{N} dirs persist in pinning mode.
+        adapter_dir = ADAPTER_STAGING_ROOT / f'pv{lora_int_id}'
+        if not (adapter_dir / 'adapter_model.safetensors').exists():
+            logger.warning(
+                'pinned generate refused: version not recoverable',
+                extra={
+                    'event': 'pinned_generate_410',
+                    'port': CHILD_PORT,
+                    'requested_policy_version': lora_int_id,
+                    'active_policy_version': active_policy_version,
+                    'reason': 'no_disk_dir',
+                },
+            )
+            return JSONResponse(
+                {
+                    'detail': (
+                        f'pinned policy_version {lora_int_id} no longer resident '
+                        f'(active={active_policy_version})'
+                    ),
+                    'requested_policy_version': lora_int_id,
+                    'active_policy_version': active_policy_version,
+                },
+                status_code=410,
+            )
+        pinned_lora = LoRARequest(
+            lora_name=f'pv{lora_int_id}',
+            lora_int_id=lora_int_id,
+            lora_path=str(adapter_dir),
+        )
+        try:
+            async with _swap_lock:
+                # Re-check under lock (another caller may have added it).
+                if lora_int_id not in _resident_loras:
+                    await engine.add_lora(pinned_lora)
+                    _resident_loras[lora_int_id] = pinned_lora
+                else:
+                    pinned_lora = _resident_loras[lora_int_id]
+        except Exception as exc:  # noqa: BLE001 — surface engine errors
+            logger.exception(
+                'pinned generate add_lora failed',
+                extra={
+                    'event': 'pinned_generate_add_lora_failed',
+                    'port': CHILD_PORT,
+                    'requested_policy_version': lora_int_id,
+                    'active_policy_version': active_policy_version,
+                },
+            )
+            return JSONResponse(
+                {
+                    'detail': f'engine.add_lora({lora_int_id}) failed: {exc}',
+                    'requested_policy_version': lora_int_id,
+                    'active_policy_version': active_policy_version,
+                },
+                status_code=500,
+            )
+
+    return await _do_generate(
+        request, pinned_lora=pinned_lora, inflight_key=lora_int_id
+    )
 
 
 def _flatten_logprobs(logprobs: Any) -> list[float] | None:
@@ -391,18 +545,28 @@ async def reload_lora(
         # Commit: new adapter is live.
         active_lora = new_request
         active_policy_version = policy_version
+        _resident_loras[policy_version] = new_request
 
         remove_lora_ms = 0
         remove_lora_failed = False
         drain_timed_out = False
         drain_ms = 0
-        if prior_lora is not None:
-            # Drain in-flight generates that snapshotted the prior adapter
-            # before removing it from the engine. Without this, a generate
-            # that captured `current_lora = prior_lora` could race ahead and
-            # hit the engine after remove_lora was issued (vLLM's behaviour
-            # on a removed lora_int_id is undefined — see the hunter finding).
+        if swap_protocol == 'pinning':
+            # Pinning mode: do NOT drain or call engine.remove_lora(prior).
+            # In-flight calls that pinned to the prior version still resolve
+            # against `_resident_loras[prior_version]`, vLLM's LRU handles
+            # GPU/CPU slot pressure, and we keep pv{prior_version}/ on disk
+            # so a re-bind from /v{prior_version}/generate can re-page in.
+            # The active_lora swap is purely for the legacy unpinned route
+            # (and validation paths). This is what makes per-trajectory and
+            # per-group consistency possible at save_freq=1.
+            pass
+        elif prior_lora is not None:
+            # Quiesce mode: drain in-flight that snapshotted the prior adapter
+            # before removing it. vLLM's behaviour on a generate against a
+            # removed lora_int_id is undefined.
             assert _inflight_cond is not None  # set in startup
+            drain_deadline_s = _QUIESCE_DRAIN_TIMEOUT_S
             t_drain_start = time.monotonic()
             try:
                 async with _inflight_cond:
@@ -410,7 +574,7 @@ async def reload_lora(
                         _inflight_cond.wait_for(
                             lambda: _inflight.get(prior_lora.lora_int_id, 0) == 0
                         ),
-                        timeout=_DRAIN_TIMEOUT_S,
+                        timeout=drain_deadline_s,
                     )
             except asyncio.TimeoutError:
                 drain_timed_out = True
@@ -422,21 +586,17 @@ async def reload_lora(
                         'policy_version': policy_version,
                         'prior_policy_version': prior_version,
                         'inflight_prior': _inflight.get(prior_lora.lora_int_id, 0),
+                        'drain_timeout_s': drain_deadline_s,
                         'ok': False,
                     },
                 )
             drain_ms = int((time.monotonic() - t_drain_start) * 1000)
 
-            # On drain timeout, skipping `remove_lora(prior)` is the correct
-            # choice: in-flight generates would otherwise run against a
-            # removed lora_int_id (vLLM behaviour undefined). The prior
-            # adapter slot leaks until pool restart, but correctness of the
-            # in-flight batch is preserved. We still return 5xx so the
-            # trainer aborts and an operator intervenes.
             if not drain_timed_out:
                 t_remove_start = time.monotonic()
                 try:
                     await engine.remove_lora(prior_lora.lora_int_id)
+                    _resident_loras.pop(prior_lora.lora_int_id, None)
                 except Exception:  # noqa: BLE001 — swap already committed
                     remove_lora_failed = True
                     logger.exception(
@@ -451,8 +611,10 @@ async def reload_lora(
                     )
                 remove_lora_ms = int((time.monotonic() - t_remove_start) * 1000)
 
-        # Clean up prior adapter dir on disk (best effort; log on failure).
-        if prior_version > 0:
+        # Clean up prior adapter dir on disk only in quiesce mode where we
+        # know no future call can refer to prior_version. In pinning mode
+        # we keep pv{N} indefinitely so /v{N}/generate can re-page from disk.
+        if swap_protocol == 'quiesce' and prior_version > 0 and not drain_timed_out:
             prior_dir = ADAPTER_STAGING_ROOT / f'pv{prior_version}'
             try:
                 shutil.rmtree(prior_dir)
@@ -470,16 +632,18 @@ async def reload_lora(
                 )
 
     reload_wall_ms = int((time.monotonic() - t_start) * 1000)
-    # drain_timed_out alone is benign: the swap already committed at line
-    # ~389 (active_lora = new_request) so new generates use the new adapter;
-    # the in-flight straggler finishes safely against its snapshot of the
-    # old LoRARequest; we only skipped remove_lora(old), which means the
-    # old lora_int_id slot leaks until pool restart. max-loras must be
-    # sized with headroom (see _remote_vllm_runner.sh). remove_lora_failed
-    # is different — that's a real engine error; keep returning 502 so the
-    # trainer aborts.
-    ok = not remove_lora_failed
-    status_code = 200 if ok else 502
+    # drain_timed_out is fatal in quiesce mode (the contract is "no silent
+    # leak"); HTTP 503 so the trainer aborts. remove_lora_failed is also fatal
+    # (real engine error); HTTP 502. In pinning mode neither flag fires.
+    if drain_timed_out:
+        ok = False
+        status_code = 503
+    elif remove_lora_failed:
+        ok = False
+        status_code = 502
+    else:
+        ok = True
+        status_code = 200
 
     logger.info(
         'reload_lora %s',
@@ -536,6 +700,18 @@ def _build_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='vLLM 0.18 /generate child server.')
     parser.add_argument('--host', type=str, default='127.0.0.1')
     parser.add_argument('--port', type=int, required=True)
+    parser.add_argument(
+        '--swap-protocol',
+        type=str,
+        choices=('pinning', 'quiesce'),
+        default='pinning',
+        help=(
+            'How /reload_lora retires the prior adapter. "pinning" (default): '
+            'never call engine.remove_lora; rely on vLLM LRU; serve concurrent '
+            'versions via /v{N}/generate. "quiesce": drain in-flight then '
+            'remove; HTTP 503 on drain timeout (no silent leak).'
+        ),
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     return parser.parse_args()
 
@@ -554,8 +730,17 @@ def _configure_json_logging() -> None:
 def main() -> int:
     _configure_json_logging()
     args = _build_args()
-    global engine, CHILD_PORT
+    global engine, CHILD_PORT, swap_protocol
     CHILD_PORT = args.port
+    swap_protocol = args.swap_protocol
+    logger.info(
+        'vllm_child startup',
+        extra={
+            'event': 'startup',
+            'port': args.port,
+            'swap_protocol': swap_protocol,
+        },
+    )
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine = AsyncLLMEngine.from_engine_args(engine_args)
     uvicorn.run(app, host=args.host, port=args.port, log_level='info', access_log=True)

@@ -51,6 +51,13 @@ export HF_HOME="${POOL_DIR}/hf-cache"
 
 echo $$ > "$PIDFILE"
 
+# Swap protocol: how /reload_lora retires the prior adapter. See
+# scripts/serving/_vllm_child.py docstring for the full contract. Default
+# "pinning" gives per-trajectory and per-group policy consistency under
+# save_freq=1 by serving multiple LoRAs concurrently; "quiesce" is the
+# single-tenant fallback that drains in-flight before remove_lora.
+SWAP_PROTOCOL="${SWAP_PROTOCOL:-pinning}"
+
 exec python "$CHILD" \
   --host 0.0.0.0 \
   --port "$PORT" \
@@ -65,4 +72,5 @@ exec python "$CHILD" \
   --enable-lora \
   --max-loras 8 \
   --max-lora-rank 32 \
-  --max-cpu-loras 16
+  --max-cpu-loras 16 \
+  --swap-protocol "$SWAP_PROTOCOL"
