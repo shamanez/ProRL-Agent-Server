@@ -12,6 +12,70 @@ Three processes on two machines, glued by an in-process replay store:
 
 The producer fills the buffer; the trainer drains it at its own cadence. They share nothing else.
 
+## Current state — what runs today
+
+The system shipping on the `producer-as-a-service` branch is three processes
+across two machines, glued by an in-process replay store inside a Docker
+container.
+
+```
+┌───────────────────────── trainer box (host) ─────────────────────────┐
+│                                                                       │
+│  ProRL FastAPI :8006  (scripts/_internal/s0_prorl.sh)                 │
+│    - OpenHands agent dispatcher (registry + AgentHandler)             │
+│    - Singularity sandbox lifecycle                                    │
+│    - Three-stage pipeline: init → run → eval                          │
+│    - Calls remote vLLM children per assistant turn (token IDs only)   │
+│                                                                       │
+│  ┌─────────────────── Docker container (s3_fullasync_docker.sh) ─────┐│
+│  │                                                                    ││
+│  │  DATA LOADER                                                       ││
+│  │    SkyRL-v0-293 parquet → StatefulDataLoader                       ││
+│  │    [trainer-owned today; this is the data-ownership leak]          ││
+│  │                                                                    ││
+│  │  CONTINUOUS PRODUCER (daemon thread)                                ││
+│  │    - Pulls prompts from data_loader                                 ││
+│  │    - Calls AsyncLLMServerManagerDAPO.generate_sequences_dapo()     ││
+│  │    - That hits ProRL :8006 → vLLM pool                             ││
+│  │    - Eager-pushes survivors into TrajectoryStore                    ││
+│  │    - Tags each group with behavior_policy_version                   ││
+│  │                                                                    ││
+│  │  TRAJECTORY STORE (in-process, threading.Lock)                      ││
+│  │    - deque(maxlen=256) of groups                                    ││
+│  │    - pop-on-sample (queue semantics)                                ││
+│  │    - staleness eviction (K=4)                                       ││
+│  │    - re-pad to sample-local max at pack time                        ││
+│  │                                                                    ││
+│  │  TRAINER (RayPPOTrainerDAPO, 8×A100 FSDP)                          ││
+│  │    - sample_mini_batch(n_groups) from store                         ││
+│  │    - compute_reward → compute_old_log_prob → compute_advantage      ││
+│  │    - update_actor (PPO/GRPO/DAPO)                                   ││
+│  │    - save_checkpoint → _publish_lora_adapter → pool /reload_lora    ││
+│  │    - _validate: pauses producer, runs val via ProRL, resumes        ││
+│  │                                                                    ││
+│  └────────────────────────────────────────────────────────────────────┘│
+└───────────────────────────────────────────────────────────────────────┘
+                              │ HTTP
+                              ▼
+┌──────────────────────── EC2 vllm-instance ────────────────────────────┐
+│  4× _vllm_child.py  :8100 :8101 :8102 :8103                          │
+│  Qwen3-4B-Instruct + LoRA, pinning swap protocol                     │
+│  /v{N}/generate pins to policy version N                              │
+│  /reload_lora installs new adapter, never removes old (LRU eviction)  │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+Source files for the current implementation:
+- Launcher: `scripts/_internal/s3_fullasync_docker.sh`
+- ProRL server: `openhands/nvidia/async_server.py` and the `AgentHandler`
+  registry at `openhands/nvidia/registry.py`
+- Token-level vLLM clients: `openhands/llm/nvidia/qwen3.py`,
+  `openhands/llm/nvidia/qwen2_5_vl.py`
+- Live store: `trainer_integration/verl/verl_custom/replay/trajectory_store.py`
+- Producer: `trainer_integration/verl/verl_custom/replay/continuous_producer.py`
+- DAPO trainer: `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer_dapo.py`
+- Pool child: `scripts/serving/_vllm_child.py`
+
 ## Where to start
 
 | You are… | Read |
