@@ -11,7 +11,7 @@ echo "[prorl] starting $(date -u +%FT%TZ)"
 VLLM_ADDR_ARGS=()
 if [[ -n "${REMOTE_DNS:-}" ]]; then
   for port in 8100 8101 8102 8103; do
-    VLLM_ADDR_ARGS+=(--llm-server-address "${REMOTE_DNS}:${port}")
+    VLLM_ADDR_ARGS+=(--llm-server-address "http://${REMOTE_DNS}:${port}")
   done
   echo "[prorl] baking in vLLM endpoints: ${REMOTE_DNS}:8100-8103"
 fi
