@@ -150,6 +150,7 @@ docker run --rm --name "$CNAME" \
   -e BATCH_SIZE="$BATCH_SIZE" \
   -e GEN_BATCH_SIZE="$GEN_BATCH_SIZE" \
   -e SWAP_PROTOCOL="$SWAP_PROTOCOL" \
+  -e REPO_HOST_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \

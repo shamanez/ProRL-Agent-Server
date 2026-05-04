@@ -1451,19 +1451,26 @@ class RayPPOTrainer:
             time.sleep(poll_interval_s)
 
     def _publish_lora_adapter(self, local_global_step_folder: str) -> None:
-        # Broadcasts the rank-16 LoRA adapter emitted by
-        # verl/workers/fsdp_workers.py::save_checkpoint (when _is_lora=True) to
-        # every vLLM pool child listed in
-        # config.actor_rollout_ref.rollout.external_llm_endpoints. Trainer mints
-        # the monotonic policy_version — pool only echoes what it installed.
-        # Any endpoint failure aborts the run (mixed-version batches would be
-        # a correctness bug). See plans-n-solutions/stages/weight_sync_lora.md §5.
-        import io  # noqa: PLC0415
-        import tarfile  # noqa: PLC0415
-        import time  # noqa: PLC0415
-        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+        """S4 — delegate LoRA fanout to the PolicyRegistry (single source of truth).
 
-        import requests  # noqa: PLC0415
+        The PolicyRegistry (slot 5.7, ``policy_registry/server.py``) receives the
+        publish RPC, fans out ``/reload_lora`` to every vLLM pool child with the
+        §3.3 abort gate (``endpoints_failed > 0`` → ``PublishFailedError`` → trainer
+        aborts), writes the S2 JSON manifest for the worker's
+        ``FilePollingPolicySubscription``, and notifies any gRPC streaming
+        subscribers. The trainer is a single-line caller.
+
+        Path translation: the Docker container sees ``/workspace`` as the repo root;
+        the PolicyRegistry service runs on the HOST and needs the host-visible path.
+        ``REPO_HOST_PATH`` env var bridges this (set via ``-e`` in
+        ``s3_fullasync_docker.sh``; defaults to ``/workspace`` for host-native runs).
+        """
+        import time  # noqa: PLC0415
+
+        from policy_registry.client import (
+            PolicyRegistryClient,  # noqa: PLC0415
+            PublishFailedError,  # noqa: PLC0415
+        )
 
         adapter_dir = os.path.join(local_global_step_folder, 'actor', 'lora_adapter')
         required = ('adapter_model.safetensors', 'adapter_config.json')
@@ -1478,134 +1485,54 @@ class RayPPOTrainer:
 
         new_version = self.policy_version + 1
 
-        # Build tarball in memory (adapter ≤ ~80 MiB at rank=16 for Qwen3-4B).
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode='w:gz') as tar:
-            for fname in required:
-                tar.add(os.path.join(adapter_dir, fname), arcname=fname)
-        adapter_bytes = buf.tell()
-        buf.seek(0)
-        payload = buf.getvalue()
+        # Path translation: Docker container sees /workspace; PolicyRegistry
+        # runs on the HOST and needs the host-visible path to load the adapter.
+        # REPO_HOST_PATH is injected via -e in s3_fullasync_docker.sh.
+        repo_host_path = os.environ.get('REPO_HOST_PATH', '/workspace')
+        host_adapter_dir = adapter_dir.replace('/workspace', repo_host_path, 1)
+        adapter_uri = f'file://{host_adapter_dir}'
 
-        endpoints = list(self.config.actor_rollout_ref.rollout.external_llm_endpoints)
-        if not endpoints:
-            raise RuntimeError(
-                'external_llm_endpoints is empty — nothing to publish LoRA to.'
+        _policy_id = str(
+            self.config.actor_rollout_ref.model.get('policy_id', 'qwen3-4b-skyrl')
+        )
+        _socket = str(
+            self.config.replay.get(
+                'policy_registry_socket', '/tmp/prorl_policy_registry.sock'
             )
+        )
 
-        # Pre-publish backpressure: in path-versioned pinning mode (the
-        # default in scripts/serving/_remote_vllm_runner.sh), in-flight
-        # trajectories pinned to older versions still serve from those
-        # versions. Wait briefly for distinct in-flight version count to drop
-        # back under max_loras headroom before adding another one.
-        backpressure_metrics = self._wait_for_publish_headroom(endpoints)
-
-        def _post(endpoint: str) -> dict:
-            url = endpoint.rstrip('/') + '/reload_lora'
-            started = time.monotonic()
-            try:
-                resp = requests.post(
-                    url,
-                    files={'adapter': ('adapter.tgz', payload, 'application/gzip')},
-                    data={'policy_version': str(new_version)},
-                    timeout=60,
-                )
-                wall_s = time.monotonic() - started
-                body: dict = {}
-                try:
-                    body = resp.json()
-                except ValueError:
-                    body = {'detail': resp.text[:512]}
-                return {
-                    'endpoint': endpoint,
-                    'status': resp.status_code,
-                    'wall_s': wall_s,
-                    'body': body,
-                }
-            except requests.RequestException as exc:
-                return {
-                    'endpoint': endpoint,
-                    'status': -1,
-                    'wall_s': time.monotonic() - started,
-                    'body': {'detail': f'{type(exc).__name__}: {exc}'},
-                }
-
-        with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
-            responses = list(pool.map(_post, endpoints))
-
-        # 409 = pool rejected because new_version <= active_policy_version,
-        # i.e. this exact version is already installed on that child. Treat
-        # as success (idempotent replay after a partial-failure retry); the
-        # body's `policy_version` still lets us surface the ack latency.
-        ok = [r for r in responses if r['status'] in (200, 409)]
-        failed = [r for r in responses if r['status'] not in (200, 409)]
-        if failed:
-            raise RuntimeError(
-                f'ABORT: {len(failed)}/{len(endpoints)} endpoints failed /reload_lora '
-                f'at pv={new_version}: {failed}'
+        t0 = time.monotonic()
+        client = PolicyRegistryClient(_socket)
+        try:
+            # Single RPC: PolicyRegistry owns fanout, abort gate (§3.3),
+            # manifest write, and subscriber notification. BC-9 is preserved:
+            # PublishFailedError is raised if endpoints_failed > 0.
+            publish_metrics = client.publish_policy_version(
+                policy_id=_policy_id,
+                version=new_version,
+                adapter_uri=adapter_uri,
+                trainer_id='trainer-0',
             )
+        except PublishFailedError as exc:
+            # §3.3 abort gate: any pool child failure → hard abort.
+            raise RuntimeError(str(exc)) from exc
+        finally:
+            client.close()
 
-        # Commit only after every endpoint ACKed.
+        publish_latency_s = time.monotonic() - t0
+
+        # Commit only after PolicyRegistry confirmed all endpoints ACKed.
         self.policy_version = new_version
         self._last_publish_step = self.global_steps
         if getattr(self, 'async_rollout_manager', None) is not None:
             self.async_rollout_manager.policy_version = new_version
 
-        # S2 manifest write — RolloutWorker's FilePollingPolicySubscription
-        # reads this file at 1 Hz and feeds the new version into its
-        # PolicyVersionCache via atomic ref-swap (BC-7). Without this write
-        # the worker never learns about new LoRA adapters and all future
-        # rollouts stay on policy_version=0 (base model).
-        # S4 upgrade path: replace this block with a single gRPC call to
-        # PolicyRegistryClient.publish_policy_version().
-        try:
-            from policy_registry.file_registry import (  # noqa: PLC0415
-                PolicyManifest,
-                write_manifest,
-            )
-
-            _policy_id = str(
-                self.config.actor_rollout_ref.model.get('policy_id', 'qwen3-4b-skyrl')
-            )
-            _manifest_path = str(
-                self.config.replay.get(
-                    'policy_manifest_path', '/tmp/prorl_policy_manifest.json'
-                )
-            )
-            write_manifest(
-                PolicyManifest(
-                    policy_id=_policy_id,
-                    version=new_version,
-                    adapter_uri=f'file://{adapter_dir}',
-                    trainer_id='trainer-0',
-                    published_at=time.time(),
-                ),
-                path=_manifest_path,
-            )
-        except Exception as _manifest_exc:  # noqa: BLE001
-            import logging as _logging  # noqa: PLC0415
-
-            _logging.getLogger(__name__).warning(
-                'Failed to write policy manifest (worker will not see pv=%d): %s',
-                new_version,
-                _manifest_exc,
-            )
-
-        publish_latency_s = max(r['wall_s'] for r in ok)
-        vllm_load_latency_s = (
-            max(float(r['body'].get('vllm_load_latency_ms', 0.0)) for r in ok) / 1000.0
-        )
-        transfer_latency_s = max(0.0, publish_latency_s - vllm_load_latency_s)
-
         self._last_publish_metrics = {
             'weight_sync/policy_version': new_version,
-            'weight_sync/adapter_mib': adapter_bytes / (1024 * 1024),
             'weight_sync/publish_latency_s': publish_latency_s,
-            'weight_sync/transfer_latency_s': transfer_latency_s,
-            'weight_sync/vllm_load_latency_s': vllm_load_latency_s,
-            'weight_sync/endpoints_ok': len(ok),
-            'weight_sync/endpoints_failed': len(failed),
-            **backpressure_metrics,
+            **{
+                k: v for k, v in publish_metrics.items() if k.startswith('weight_sync/')
+            },
         }
 
         print(
@@ -1613,11 +1540,13 @@ class RayPPOTrainer:
                 {
                     'event': 'publish_lora_adapter',
                     'policy_version': new_version,
-                    'adapter_bytes': adapter_bytes,
-                    'endpoints_ok': len(ok),
+                    'adapter_uri': adapter_uri,
                     'publish_latency_s': round(publish_latency_s, 3),
-                    'transfer_latency_s': round(transfer_latency_s, 3),
-                    'vllm_load_latency_s': round(vllm_load_latency_s, 3),
+                    **{
+                        k.replace('weight_sync/', ''): v
+                        for k, v in publish_metrics.items()
+                        if k.startswith('weight_sync/')
+                    },
                 },
                 separators=(',', ':'),
             )

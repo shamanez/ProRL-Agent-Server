@@ -102,7 +102,33 @@ class PolicyRegistryServicer(policy_registry_pb2_grpc.PolicyRegistryServicer):
                     ),
                 )
                 conn.commit()
-        # Step 3: wake subscribers
+        # Step 3: Write S2 manifest so FilePollingPolicySubscription (1 Hz)
+        # updates the worker's PolicyVersionCache within 1 s. The manifest
+        # is the S2 file-backed registry; gRPC streaming (step 4 below) is
+        # the S4+ path. Both coexist; the manifest is a fast fallback.
+        try:
+            from policy_registry.file_registry import (  # noqa: PLC0415
+                PolicyManifest,
+                write_manifest,
+            )
+
+            write_manifest(
+                PolicyManifest(
+                    policy_id=request.policy_id,
+                    version=int(request.version),
+                    adapter_uri=request.adapter_uri,
+                    trainer_id=request.trainer_id,
+                    published_at=time.time(),
+                )
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                'manifest write failed for pv=%d — worker polling will not update',
+                request.version,
+                exc_info=True,
+            )
+
+        # Step 4: wake gRPC streaming subscribers (S4+)
         cv = self._cv_per_policy[request.policy_id]
         with cv:
             cv.notify_all()

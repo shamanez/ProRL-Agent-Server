@@ -948,3 +948,13 @@ replay:
   # accumulate train_batch_size surviving (non-zero-variance) groups on
   # SWE-Gym. Plain GRPO runs land in ~90s and are unaffected.
   wait_timeout_s: 7200.0
+
+  # S4 — PolicyRegistry gRPC socket (slot 5.7). Trainer calls
+  # publish_policy_version() here after every save_freq checkpoint.
+  # PolicyRegistry fans out /reload_lora, writes the worker manifest,
+  # and notifies streaming subscribers — all with the §3.3 abort gate.
+  policy_registry_socket: /tmp/prorl_policy_registry.sock
+
+  # S2 — manifest path written by PolicyRegistry after each publish.
+  # RolloutWorker's FilePollingPolicySubscription reads this at 1 Hz.
+  policy_manifest_path: /tmp/prorl_policy_manifest.json
