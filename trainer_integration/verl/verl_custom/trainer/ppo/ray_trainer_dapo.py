@@ -83,50 +83,50 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             wait_until_with_progress,
         )
 
-        if self._producer is not None:
-            self._producer.check_background_error()
-            # Cut 5: ``train_batch_size`` is now groups-per-step. The old
-            # ``max(1, tbs // n)`` floor collapsed to 1 when ``n >= tbs``
-            # (e.g. n=8, tbs=4 → n_groups=1), wasting 7 of every 8 FSDP
-            # GPUs per step. With eager-push + zero-variance ingest filter
-            # the buffer always holds gradient-bearing groups, so the
-            # trainer simply draws ``train_batch_size`` groups per step.
+        # S2 migration: use the store path whenever trajectory_store is set.
+        # Previously gated on LIVE_STORE_SOCKET env var AND _producer — that
+        # caused the classic in-process path to be taken when
+        # CONTINUOUS_PRODUCER=False (external RolloutWorker), because
+        # _producer=None and the env var was not forwarded into the container.
+        # Fix: trajectory_store being non-None is sufficient; the socket path
+        # is already resolved inside LiveStoreClient at construction time.
+        _use_store_path = self.trajectory_store is not None
+        if _use_store_path:
+            if self._producer is not None:
+                self._producer.check_background_error()
             n_groups = int(self.config.data.train_batch_size)
-            # No-progress detector — replaces the old hard-coded 7200 s
-            # ``wait_timeout_s`` ceiling that killed prep-100 at step 44
-            # once response_length climbed past ~12 k tokens. We now only
-            # abort if the producer pushes nothing new for
-            # ``no_progress_timeout_s`` (default 30 min, vastly longer
-            # than any single rollout). Healthy-but-slow producers no
-            # longer trip this guardrail.
             no_progress_timeout_s = float(
                 self.config.replay.get('no_progress_timeout_s', 1800.0)
             )
             with _timer('gen', timing_raw):
-                # Predicate: non-stale group count (raw num_groups
-                # would unblock on a group ``sample_mini_batch`` is
-                # about to drop as stale; see ray_trainer.py for the
-                # rationale — the run4-step-11 race).
-                # Progress: monotonic store push counter — the only
-                # signal that distinguishes "producer is slow" from
-                # "producer is wedged".
-                filled = wait_until_with_progress(
-                    lambda: self.trajectory_store.num_fresh_groups(self.global_steps)
-                    >= n_groups,
-                    self.trajectory_store.total_pushes,
-                    no_progress_timeout=no_progress_timeout_s,
-                )
-            if not filled:
-                self._producer.check_background_error()
-                raise RuntimeError(
-                    f'Replay store made no forward progress for '
-                    f'{no_progress_timeout_s:.1f}s while waiting for '
-                    f'{n_groups} fresh groups (current='
-                    f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
-                    f'fresh / {self.trajectory_store.num_groups()} total, '
-                    f'total_pushes={self.trajectory_store.total_pushes()}). '
-                    'Producer is wedged — check pool /health and producer logs.'
-                )
+                if self._producer is not None:
+                    # In-process producer path: poll until n_groups fresh
+                    # groups are available (busy-poll at 10 ms — acceptable
+                    # for the in-process store where gRPC overhead is zero).
+                    filled = wait_until_with_progress(
+                        lambda: self.trajectory_store.num_fresh_groups(
+                            self.global_steps
+                        )
+                        >= n_groups,
+                        self.trajectory_store.total_pushes,
+                        no_progress_timeout=no_progress_timeout_s,
+                    )
+                    if not filled:
+                        self._producer.check_background_error()
+                        raise RuntimeError(
+                            f'Replay store made no forward progress for '
+                            f'{no_progress_timeout_s:.1f}s while waiting for '
+                            f'{n_groups} fresh groups (current='
+                            f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
+                            f'fresh / {self.trajectory_store.num_groups()} total, '
+                            f'total_pushes={self.trajectory_store.total_pushes()}). '
+                            'Producer is wedged — check pool /health and producer logs.'
+                        )
+                # External worker path (CONTINUOUS_PRODUCER=False):
+                # sample_mini_batch → LiveStoreClient.get_batch blocks
+                # server-side until n_groups are ready; NoProgressError is
+                # raised by the server after no_progress_timeout_s. No
+                # busy-poll needed here — avoid hammering the gRPC socket.
             metrics.update(
                 self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
             )
