@@ -170,7 +170,19 @@ class RolloutWorkerLoop:
     def _run_one_group(self) -> None:
         """Read one task, dispatch group_size episodes, push survivors."""
         # Step 1: read one task instance from the dataloader.
-        instance = next(self._dataloader)
+        # The parquet row format is: {prompt, data_source, ability, instance: {...SWE fields}}
+        # ProRL expects the INNER instance dict (with instance_id, FAIL_TO_PASS, etc.) plus
+        # data_source at the top level for handler routing.
+        # If the row has a nested 'instance' key, flatten it here.
+        row = next(self._dataloader)
+        if isinstance(row.get('instance'), dict):
+            # Standard SkyRL parquet format: row['instance'] holds the SWE-bench fields.
+            instance = dict(row['instance'])
+            # Propagate data_source so ProRL can route to the right handler.
+            if 'data_source' in row and 'data_source' not in instance:
+                instance['data_source'] = row['data_source']
+        else:
+            instance = row
         task_id = str(instance.get('instance_id', instance.get('trajectory_id', '')))
 
         # Step 2: take ONE policy snapshot for the whole group (BC-0 / §3.2).
