@@ -1,0 +1,66 @@
+// PolicyRegistry (§A.7) gRPC schema.
+//
+// Compiled at S4 via scripts/gen_protos.sh.
+// `subscribe_version_updates` is server-streaming (one event per publish).
+
+syntax = "proto3";
+
+package rollout_fabric.policy_registry;
+
+service PolicyRegistry {
+  rpc PublishPolicyVersion(PublishPolicyVersionRequest)
+      returns (PublishPolicyVersionResponse);
+  rpc GetLatestVersion(GetLatestVersionRequest) returns (VersionInfo);
+  rpc SubscribeVersionUpdates(SubscribeRequest)
+      returns (stream PolicyVersionSnapshot);
+  rpc RegisterPolicyNamespace(RegisterPolicyNamespaceRequest) returns (Ack);
+}
+
+message PolicyVersionSnapshot {
+  string policy_id = 1;
+  int32 version = 2;
+  string adapter_uri = 3;
+  double received_at = 4;             // monotonic seconds at registry server
+}
+
+message VersionInfo {
+  string policy_id = 1;
+  int32 version = 2;
+  string adapter_uri = 3;
+  string published_at = 4;            // ISO-8601 UTC
+}
+
+message PublishPolicyVersionRequest {
+  string policy_id = 1;
+  int32 version = 2;
+  string adapter_uri = 3;
+  string trainer_id = 4;
+}
+
+message PublishPolicyVersionResponse {
+  bool success = 1;
+  int32 endpoints_ok = 2;
+  int32 endpoints_failed = 3;         // §3.3 abort gate: success => 0
+  double latency_s = 4;
+  string error = 5;
+}
+
+message GetLatestVersionRequest {
+  string policy_id = 1;
+}
+
+message SubscribeRequest {
+  string policy_id = 1;
+}
+
+message RegisterPolicyNamespaceRequest {
+  string policy_id = 1;
+  string base_model_id = 2;
+  string tokenizer_id = 3;
+  string adapter_storage_root = 4;
+}
+
+message Ack {
+  bool ok = 1;
+  string detail = 2;
+}

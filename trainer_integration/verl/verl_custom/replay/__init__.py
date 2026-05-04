@@ -1,24 +1,29 @@
-"""Phase 2 replay buffer + continuous producer (decoupled clocks).
+"""DEPRECATED package — see ``live_store/`` and ``trainer_adapters/verl/``.
 
-This package holds the in-process replay buffer that backs Phase 2's
-fully-async agentic RL loop. The buffer stores variable-length trajectories
-tagged with the behavior policy version that generated them; the trainer
-samples mini-batches from it at its own cadence and applies a temporal
-importance-sampling correction at the loss.
+S1 hard-cutover landed:
 
-See `plans-n-solutions/stages/full_async.md` for the design.
+* ``trajectory_store.py`` (in-process replay buffer) → deleted; lifted
+  to :mod:`live_store.store_core` (the data structure) and
+  :mod:`trainer_adapters.verl.pad` (the pack helper).
+* ``InsufficientTrajectoriesError`` → re-exported from
+  :mod:`live_store`.
+* ``SampledMiniBatch`` → re-exported from :mod:`trainer_adapters.verl`.
+* ``TrajectoryRecord`` → removed entirely; the wire shape is
+  :class:`schemas.training_sample.TrainingSample`.
+
+``continuous_producer.py`` stays at this path through S1 (it still
+runs in the trainer process and pushes into the LiveStoreClient).
+S2 lifts it into ``rollout_worker/``.
+
+These re-exports exist so any stray import of the legacy names
+surfaces at the new home rather than ``ImportError``-ing the trainer
+on the cut.
 """
 
-from verl_custom.replay.trajectory_store import (
-    InsufficientTrajectoriesError,
-    SampledMiniBatch,
-    TrajectoryRecord,
-    TrajectoryStore,
-)
+from live_store import InsufficientTrajectoriesError
+from trainer_adapters.verl import SampledMiniBatch
 
 __all__ = [
     'InsufficientTrajectoriesError',
     'SampledMiniBatch',
-    'TrajectoryRecord',
-    'TrajectoryStore',
 ]

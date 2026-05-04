@@ -59,12 +59,14 @@ from verl.utils.seqlen_balancing import (
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
+# LiveStore moved to its own gRPC service at S1; the trainer now talks
+# to a same-machine sidecar over UDS. Constructor swap is the only diff
+# needed here — the client's surface mirrors today's TrajectoryStore.
+from live_store import (  # noqa: PLC0415
+    InsufficientTrajectoriesError,
+)
 from verl_custom.nvidia.reward_manager.length_penalty import LengthPenalty
 from verl_custom.nvidia.utils.timer import TimeoutChecker
-from verl_custom.replay.trajectory_store import (
-    InsufficientTrajectoriesError,
-    TrajectoryStore,
-)
 from verl_custom.trainer.ppo import core_algos
 from verl_custom.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl_custom.trainer.ppo.metric_utils import (
@@ -435,9 +437,25 @@ class RayPPOTrainer:
             total_len = int(config.data.get('max_prompt_length', 0)) + int(
                 config.data.get('max_response_length', 0)
             )
-            self.trajectory_store: TrajectoryStore | None = TrajectoryStore(
-                max_size=int(replay_cfg.buffer_size),
-                staleness_cutoff_k=int(replay_cfg.staleness_cutoff_k),
+            # LiveStore (slot 5.4) lives in a sidecar over UDS at S1+. The
+            # client's surface mirrors today's TrajectoryStore so call sites
+            # below are unchanged.
+            #
+            # ``buffer_size`` and ``staleness_cutoff_k`` are configured at
+            # the LiveStore service launcher (scripts/_internal/s0_5_live_store.sh)
+            # via env vars; the values here are stamped on the client only
+            # for legacy code paths that still try to read ``store._max_size``.
+            socket_path = str(
+                replay_cfg.get('live_store_socket', '/tmp/prorl_live_store.sock')
+            )
+            policy_id = str(config.actor_rollout_ref.get('policy_id', 'qwen3-4b-skyrl'))
+            environment_id = str(
+                config.actor_rollout_ref.rollout.get('environment_id', 'prorl_default')
+            )
+            self.trajectory_store: LiveStoreClient | None = LiveStoreClient(
+                socket_path=socket_path,
+                policy_id=policy_id,
+                environment_id=environment_id,
                 pad_token_id=int(pad_token_id),
                 prompt_length_cap=max_starting_message_length or None,
                 response_length_cap=total_len or None,
@@ -1411,19 +1429,22 @@ class RayPPOTrainer:
             time.sleep(poll_interval_s)
 
     def _publish_lora_adapter(self, local_global_step_folder: str) -> None:
-        # Broadcasts the rank-16 LoRA adapter emitted by
-        # verl/workers/fsdp_workers.py::save_checkpoint (when _is_lora=True) to
-        # every vLLM pool child listed in
-        # config.actor_rollout_ref.rollout.external_llm_endpoints. Trainer mints
-        # the monotonic policy_version — pool only echoes what it installed.
-        # Any endpoint failure aborts the run (mixed-version batches would be
-        # a correctness bug). See plans-n-solutions/stages/weight_sync_lora.md §5.
-        import io  # noqa: PLC0415
-        import tarfile  # noqa: PLC0415
-        import time  # noqa: PLC0415
-        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415
+        """S4 — one-liner publish via the gRPC PolicyRegistry.
 
-        import requests  # noqa: PLC0415
+        Pre-S4 this method owned the pool fanout, the §3.3 abort gate,
+        and (briefly, at S2) the JSON manifest write. All three move
+        into :class:`policy_registry.server.PolicyRegistryServicer`
+        at S4: ``publish_policy_version`` runs the fanout, gates on
+        all-endpoints-ACK (success implies endpoints_failed == 0),
+        commits to the registry's SQLite, and wakes server-streaming
+        subscribers atomically. The trainer raises on
+        :class:`PublishFailedError`; the pre-S4 ``RuntimeError`` raise
+        path is preserved through the same call site.
+        """
+        from policy_registry.client import (  # noqa: PLC0415
+            PolicyRegistryClient,
+            PublishFailedError,
+        )
 
         adapter_dir = os.path.join(local_global_step_folder, 'actor', 'lora_adapter')
         required = ('adapter_model.safetensors', 'adapter_config.json')
@@ -1432,112 +1453,53 @@ class RayPPOTrainer:
         ]
         if missing:
             raise RuntimeError(
-                f'PEFT adapter missing from checkpoint at {adapter_dir}: {missing}. '
-                "verl's _is_lora save path (fsdp_workers.py) did not emit shards."
+                f'PEFT adapter missing from checkpoint at {adapter_dir}: '
+                f'{missing}. verl _is_lora save path did not emit shards.'
             )
 
         new_version = self.policy_version + 1
+        policy_id = str(
+            self.config.actor_rollout_ref.get('policy_id', 'qwen3-4b-skyrl')
+        )
+        adapter_uri = f'file://{os.path.abspath(adapter_dir)}'
 
-        # Build tarball in memory (adapter ≤ ~80 MiB at rank=16 for Qwen3-4B).
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode='w:gz') as tar:
-            for fname in required:
-                tar.add(os.path.join(adapter_dir, fname), arcname=fname)
-        adapter_bytes = buf.tell()
-        buf.seek(0)
-        payload = buf.getvalue()
-
-        endpoints = list(self.config.actor_rollout_ref.rollout.external_llm_endpoints)
-        if not endpoints:
-            raise RuntimeError(
-                'external_llm_endpoints is empty — nothing to publish LoRA to.'
+        socket_path = str(
+            self.config.replay.get(
+                'policy_registry_socket', '/tmp/prorl_policy_registry.sock'
             )
-
-        # Pre-publish backpressure: in path-versioned pinning mode (the
-        # default in scripts/serving/_remote_vllm_runner.sh), in-flight
-        # trajectories pinned to older versions still serve from those
-        # versions. Wait briefly for distinct in-flight version count to drop
-        # back under max_loras headroom before adding another one.
-        backpressure_metrics = self._wait_for_publish_headroom(endpoints)
-
-        def _post(endpoint: str) -> dict:
-            url = endpoint.rstrip('/') + '/reload_lora'
-            started = time.monotonic()
-            try:
-                resp = requests.post(
-                    url,
-                    files={'adapter': ('adapter.tgz', payload, 'application/gzip')},
-                    data={'policy_version': str(new_version)},
-                    timeout=60,
-                )
-                wall_s = time.monotonic() - started
-                body: dict = {}
-                try:
-                    body = resp.json()
-                except ValueError:
-                    body = {'detail': resp.text[:512]}
-                return {
-                    'endpoint': endpoint,
-                    'status': resp.status_code,
-                    'wall_s': wall_s,
-                    'body': body,
-                }
-            except requests.RequestException as exc:
-                return {
-                    'endpoint': endpoint,
-                    'status': -1,
-                    'wall_s': time.monotonic() - started,
-                    'body': {'detail': f'{type(exc).__name__}: {exc}'},
-                }
-
-        with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
-            responses = list(pool.map(_post, endpoints))
-
-        # 409 = pool rejected because new_version <= active_policy_version,
-        # i.e. this exact version is already installed on that child. Treat
-        # as success (idempotent replay after a partial-failure retry); the
-        # body's `policy_version` still lets us surface the ack latency.
-        ok = [r for r in responses if r['status'] in (200, 409)]
-        failed = [r for r in responses if r['status'] not in (200, 409)]
-        if failed:
-            raise RuntimeError(
-                f'ABORT: {len(failed)}/{len(endpoints)} endpoints failed /reload_lora '
-                f'at pv={new_version}: {failed}'
+        )
+        client = PolicyRegistryClient(socket_path)
+        try:
+            metrics = client.publish_policy_version(
+                policy_id=policy_id,
+                version=int(new_version),
+                adapter_uri=adapter_uri,
+                trainer_id=str(getattr(self, 'trainer_id', 'trainer-0')),
             )
+        except PublishFailedError as exc:
+            # §3.3 abort gate — registry returned partial failure;
+            # do not commit; raise so the trainer aborts the run.
+            raise RuntimeError(str(exc)) from exc
+        finally:
+            client.close()
 
-        # Commit only after every endpoint ACKed.
+        # Commit only after the registry has fully acknowledged.
         self.policy_version = new_version
         self._last_publish_step = self.global_steps
         if getattr(self, 'async_rollout_manager', None) is not None:
             self.async_rollout_manager.policy_version = new_version
 
-        publish_latency_s = max(r['wall_s'] for r in ok)
-        vllm_load_latency_s = (
-            max(float(r['body'].get('vllm_load_latency_ms', 0.0)) for r in ok) / 1000.0
-        )
-        transfer_latency_s = max(0.0, publish_latency_s - vllm_load_latency_s)
-
-        self._last_publish_metrics = {
-            'weight_sync/policy_version': new_version,
-            'weight_sync/adapter_mib': adapter_bytes / (1024 * 1024),
-            'weight_sync/publish_latency_s': publish_latency_s,
-            'weight_sync/transfer_latency_s': transfer_latency_s,
-            'weight_sync/vllm_load_latency_s': vllm_load_latency_s,
-            'weight_sync/endpoints_ok': len(ok),
-            'weight_sync/endpoints_failed': len(failed),
-            **backpressure_metrics,
-        }
+        self._last_publish_metrics = metrics
 
         print(
             json.dumps(
                 {
                     'event': 'publish_lora_adapter',
                     'policy_version': new_version,
-                    'adapter_bytes': adapter_bytes,
-                    'endpoints_ok': len(ok),
-                    'publish_latency_s': round(publish_latency_s, 3),
-                    'transfer_latency_s': round(transfer_latency_s, 3),
-                    'vllm_load_latency_s': round(vllm_load_latency_s, 3),
+                    'endpoints_ok': metrics['weight_sync/endpoints_ok'],
+                    'publish_latency_s': round(
+                        metrics['weight_sync/publish_latency_s'], 3
+                    ),
                 },
                 separators=(',', ':'),
             )
@@ -1769,115 +1731,25 @@ class RayPPOTrainer:
         return _generate
 
     def _start_continuous_producer_if_needed(self) -> None:
-        """Wake the pool and spin up the rollout-producer daemon thread.
+        """S2 — no-op. The producer lives in the rollout_worker process.
 
-        No-op unless ``config.replay.enable`` and
-        ``config.replay.continuous_producer`` are both True. Requires
-        ``actor_rollout_ref.rollout.mode == 'async'`` — the producer
-        relies on ``async_rollout_manager.generate_sequences``.
+        Pre-S2: this method spun up an in-trainer daemon thread that called
+        ``async_rollout_manager.generate_sequences`` and pushed the
+        results into the in-process replay store.
 
-        Subclasses override :meth:`_make_continuous_producer` to swap
-        the ``generate_fn`` (DAPO uses ``generate_sequences_dapo``).
+        Post-S2: the worker process owns the dataloader, the rollout
+        manager, the producer loop, and the eager-push seam (§3.7). The
+        trainer is a pure consumer of :class:`LiveStoreClient`. This
+        method exists only so the trainer's ``fit()`` callers don't need
+        edits at the cut.
         """
         self._producer = None
         self._step_counter = None
-        if not self._continuous_producer_mode():
-            return
-
-        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-            StepCounter,
-        )
-
-        if not self.async_rollout_mode:
-            raise RuntimeError(
-                'replay.continuous_producer=True requires '
-                'actor_rollout_ref.rollout.mode=async'
-            )
-        assert self.trajectory_store is not None  # enable=True → store built
-
-        self._step_counter = StepCounter(initial=self.global_steps)
-        # Cut 5: wire the eager-push closure into the DAPO manager (no-op
-        # for plain GRPO, whose manager has no ``_push_fn`` attribute).
-        # The manager calls this once per survivor as soon as
-        # ``filter_easy_hard_instance`` clears it — the trainer sees
-        # content in the store during the 53 min DAPO iteration, not
-        # only after it.
-        if hasattr(self.async_rollout_manager, '_push_fn'):
-            store = self.trajectory_store
-            manager = self.async_rollout_manager
-            step_counter = self._step_counter
-
-            def _eager_push(single_group_dp):
-                policy_version = int(getattr(manager, 'policy_version', 0))
-                current_step = step_counter.get()
-                store.push_from_dataproto(
-                    single_group_dp,
-                    behavior_policy_version=policy_version,
-                    current_step=current_step,
-                )
-
-            self.async_rollout_manager._push_fn = _eager_push
-        self._producer = self._make_continuous_producer()
-        self._producer.start()
-
-    def _make_continuous_producer(self):
-        """Build a ``ContinuousRolloutProducer`` for plain GRPO.
-
-        Uses ``generate_sequences`` over a private dataloader iterator.
-        Override in subclasses (e.g., ``RayPPOTrainerDAPO``) to wire a
-        different ``generate_fn`` / ``prompts_iter_factory``.
-        """
-        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-            ContinuousRolloutProducer,
-        )
-
-        def _factory():
-            # Infinite iterator: re-iterate the dataloader every epoch.
-            # The trainer's main loop still iterates its own dataloader
-            # view (ignoring batch_dict), but DataLoader creates isolated
-            # worker state per ``iter()`` call so the two iterators do
-            # not share cursors.
-            while True:
-                for batch_dict in self.train_dataloader:
-                    yield batch_dict
-
-        replay_cfg = self.config.replay
-        return ContinuousRolloutProducer(
-            rollout_manager=self.async_rollout_manager,
-            generate_fn=self._build_grpo_producer_generate_fn(),
-            store=self.trajectory_store,
-            step_counter=self._step_counter,
-            prompts_iter_factory=_factory,
-            poll_interval_s=float(replay_cfg.get('poll_interval_s', 0.05)),
-        )
 
     def _stop_continuous_producer_if_needed(self) -> bool:
-        """Stop the producer and drop the reference on clean exit.
-
-        Drains unconditionally — ``producer.stop()`` blocks until the
-        current ``generate_sequences`` call completes naturally, so the
-        publish boundary is aligned to producer-batch completion. No
-        finite timeout: a timeout that fires mid-batch would leave an
-        orphan thread running across the publish, causing a
-        mid-trajectory policy-version switch.
-
-        Always returns ``True`` once stop returns. Genuine wedges
-        (vLLM/OpenHands hung) are caught by the trainer's no-progress
-        detector at the next ``_acquire_training_batch`` call
-        (``replay.no_progress_timeout_s``).
-        """
-        producer = getattr(self, '_producer', None)
-        if producer is None:
-            return True
-        stopped = producer.stop()
-        if stopped:
-            self._producer = None
-            # Cut 5: drop the eager-push closure so the manager goes
-            # back to lockstep/terminal-push semantics in any subsequent
-            # classic path. Preserved only while a producer is active.
-            if hasattr(self.async_rollout_manager, '_push_fn'):
-                self.async_rollout_manager._push_fn = None
-        return stopped
+        """S2 — no-op. Returns True so callers' ``if stopped:`` branches behave."""
+        self._producer = None
+        return True
 
     def _acquire_training_batch(
         self, batch_dict: dict, metrics: dict, timing_raw: dict
@@ -1893,55 +1765,28 @@ class RayPPOTrainer:
         In classic mode, performs the existing pop → generate → stamp
         uid → repeat → union → push+sample pipeline.
         """
-        if self._producer is not None:
-            # Continuous-producer path.
-            from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-                wait_until_with_progress,
-            )
-
-            self._producer.check_background_error()
-            # Cut 5: ``train_batch_size`` is now groups-per-step (mirror of
-            # ray_trainer_dapo.py change). The old ``max(1, tbs // n)``
-            # floor collapsed to 1 whenever ``n >= tbs``, starving the
-            # FSDP trainer. The replay buffer + ingest filter already
-            # guarantee every sampled group has gradient content.
+        # S2 — pure consumer path. Trainer always reads from the gRPC
+        # LiveStore via :class:`LiveStoreClient`. The server-side
+        # no-progress detector raises :class:`NoProgressError` when the
+        # producer is wedged for ``no_progress_timeout_s``; busy-loop
+        # waiting at the trainer is gone.
+        if self.trajectory_store is not None:
             n_groups = int(self.config.data.train_batch_size)
-            # No-progress detector (mirror of ray_trainer_dapo.py). See
-            # that file for the prep-100 step-44 incident this replaces.
-            no_progress_timeout_s = float(
-                self.config.replay.get('no_progress_timeout_s', 1800.0)
-            )
             with _timer('gen', timing_raw):
-                # Predicate uses non-stale group count (run4-step-11
-                # race). Progress uses monotonic ``total_pushes`` so a
-                # slow-but-healthy producer doesn't trip the guardrail.
-                filled = wait_until_with_progress(
-                    lambda: self.trajectory_store.num_fresh_groups(self.global_steps)
-                    >= n_groups,
-                    self.trajectory_store.total_pushes,
-                    no_progress_timeout=no_progress_timeout_s,
+                metrics.update(
+                    self.trajectory_store.metrics(
+                        self.global_steps, suffix='_pre_sample'
+                    )
                 )
-            if not filled:
-                self._producer.check_background_error()
-                raise RuntimeError(
-                    f'Replay store made no forward progress for '
-                    f'{no_progress_timeout_s:.1f}s while waiting for '
-                    f'{n_groups} fresh groups (current='
-                    f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
-                    f'fresh / {self.trajectory_store.num_groups()} total, '
-                    f'total_pushes={self.trajectory_store.total_pushes()}). '
-                    'Producer is wedged — check pool /health and producer logs.'
+                sampled = self.trajectory_store.sample_mini_batch(
+                    n_groups=n_groups, current_step=self.global_steps
                 )
-            metrics.update(
-                self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
-            )
-            sampled = self.trajectory_store.sample_mini_batch(
-                n_groups=n_groups, current_step=self.global_steps
-            )
-            metrics.update(self.trajectory_store.metrics(self.global_steps))
-            metrics.update(
-                self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
-            )
+                metrics.update(self.trajectory_store.metrics(self.global_steps))
+                metrics.update(
+                    self.trajectory_store.metrics(
+                        self.global_steps, suffix='_post_sample'
+                    )
+                )
             return DataProto.from_dict(
                 tensors=sampled.tensors,
                 non_tensors=sampled.non_tensors,
@@ -2032,17 +1877,9 @@ class RayPPOTrainer:
             self.policy_version = self.global_steps
             self.async_rollout_manager.policy_version = self.global_steps
 
-        # perform validation before training
-        # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get(
-            'val_before_train', True
-        ):
-            val_metrics = self._validate()
-            assert val_metrics, f'{val_metrics=}'
-            pprint(f'Initial validation metrics: {val_metrics}')
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get('val_only', False):
-                return
+        # S2 — validation removed (operating-principle 5 in the
+        # implementation plan). Trainer never validates; deferred to a
+        # later cut.
 
         # add tqdm
         progress_bar = tqdm(
@@ -2295,43 +2132,7 @@ class RayPPOTrainer:
                         with _timer('publish_lora', timing_raw):
                             self._publish_lora_adapter(local_global_step_folder)
 
-                    # validate
-                    if (
-                        self.val_reward_fn is not None
-                        and self.config.trainer.test_freq > 0
-                        and (
-                            is_last_step
-                            or self.global_steps % self.config.trainer.test_freq == 0
-                            or self.timeout.last_saved
-                        )
-                    ):
-                        # Producer + validation share one OpenHands session;
-                        # validation's /stop at teardown kills the producer's
-                        # in-flight /process. Pause producer around _validate
-                        # and resume afterwards. Buffer stays warm across the
-                        # pause; K-staleness evicts naturally at next sample.
-                        # Gotcha §19: if the producer is mid-asyncio.run the
-                        # stop() timeout fires without the thread exiting —
-                        # skip validate to avoid concurrent OH dispatch and
-                        # let the producer finish its call; retry on the next
-                        # save boundary.
-                        if self._stop_continuous_producer_if_needed():
-                            try:
-                                with _timer('testing', timing_raw):
-                                    val_metrics: dict = self._validate()
-                                    if is_last_step:
-                                        last_val_metrics = val_metrics
-                                metrics.update(val_metrics)
-                            finally:
-                                if not is_last_step:
-                                    self._start_continuous_producer_if_needed()
-                        else:
-                            _logger.warning(
-                                'step=%d skipping _validate: producer stop '
-                                'timed out (still mid-generate_sequences); '
-                                'will retry on next save boundary',
-                                self.global_steps,
-                            )
+                    # S2 — validation removed (operating-principle 5).
 
                 # training metrics
                 metrics.update(
