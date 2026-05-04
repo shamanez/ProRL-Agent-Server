@@ -199,7 +199,10 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                                 kl_metrics
                             )  # TODO: This will be cleared if we use multiple genenration batches
 
-                    assert self.config.algorithm.filter_groups.enable
+                    # S2: filter_groups is now handled by the RolloutWorker before
+                    # pushing to LiveStore. The trainer is a pure consumer; the
+                    # assertion that filter_groups.enable must be True is a pre-S2
+                    # invariant that no longer applies here.
 
                     # === Updating ===
 
