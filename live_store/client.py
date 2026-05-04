@@ -108,10 +108,13 @@ class LiveStoreClient:
         """Compatibility shim: get_batch + local pad → SampledMiniBatch."""
         from trainer_adapters.verl.pad import pack_unpadded_groups  # noqa: PLC0415
 
+        # Timeout must cover the full no-progress window (server default 1800s).
+        # 10 s was too short — the server blocked waiting for groups then
+        # returned DEADLINE_EXCEEDED before the worker pushed enough groups.
         samples = self.get_batch(
             n_groups=n_groups,
             current_step=current_step,
-            timeout_ms=10_000,
+            timeout_ms=5_400_000,  # 90 min — matches no_progress_timeout_s=5400
         )
         return pack_unpadded_groups(
             samples,
