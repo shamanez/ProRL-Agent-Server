@@ -224,8 +224,29 @@ class RolloutWorkerLoop:
             )
             for ep in raw_episodes
         ]
+        # Drop samples with no response tokens — these cannot be trained on
+        # (response_mask would be all-zeros → AssertionError in actor update).
+        valid_pre_bind = [s for s in samples_pre_bind if len(s.response_token_ids) > 0]
+        if len(valid_pre_bind) < len(samples_pre_bind):
+            logger.warning(
+                'Dropped %d/%d samples with empty response_token_ids '
+                'group_uid=%s task_id=%s',
+                len(samples_pre_bind) - len(valid_pre_bind),
+                len(samples_pre_bind),
+                group_uid,
+                task_id,
+            )
+        if not valid_pre_bind:
+            logger.warning(
+                'All samples in group have empty responses — skipping push '
+                'group_uid=%s task_id=%s',
+                group_uid,
+                task_id,
+            )
+            return
+
         # Bind all siblings to the shared group_uid (§3.2 group integrity).
-        group_samples = build_group(samples_pre_bind, group_uid)
+        group_samples = build_group(valid_pre_bind, group_uid)
 
         # Step 5: tee ALL episodes to ReplayArchive BEFORE filter (BC-12).
         if self._archive is not None:
