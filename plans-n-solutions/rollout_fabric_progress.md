@@ -9,6 +9,188 @@ This doc is the **operational companion**: what exists, how to start it, what br
 
 ---
 
+## 0. Training Dataset — Creation and Maintenance
+
+### 0.1 Overview
+
+Training requires two artifacts per instance:
+1. **A parquet row** in the train dataset (prompt + metadata)
+2. **A Singularity `.sif` image** for the sandboxed execution environment
+
+Both must exist for an instance to be trainable. The workflow is:
+
+```
+Full dataset (293 rows)   +   SIF images (232 GB cached blobs, 1+ built)
+         │                              │
+         └─────── filter_parquet_to_built_sifs.py ──────► train.ready.parquet
+                                                            (only rows with SIF)
+```
+
+**You can start training immediately** with as few as 1 built SIF.
+More SIFs = more training diversity; they can be built in the background.
+
+### 0.2 Dataset Location
+
+| Path | Contents |
+|---|---|
+| `/home/ubuntu/data/SkyRL-v0-293/train.parquet` | Full 293-row training set (SkyRL-v0-293) |
+| `/home/ubuntu/data/SkyRL-v0-293/validation.parquet` | 23-row validation set |
+| `/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet` | **Filtered to built SIFs — use this for training** |
+| `singularity_images/*.sif` | Built SIF images (grows as `pull_swe_images.py` runs) |
+| `scripts/_singularity_cache/apptainer_cachedir/cache/blob/` | **232 GB pre-downloaded OCI layer cache** (329 manifests — no re-download needed) |
+
+### 0.3 Filtering the Dataset to Built SIFs
+
+After each SIF build, regenerate `train.ready.parquet`:
+
+```bash
+cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
+
+poetry run python scripts/_internal/filter_parquet_to_built_sifs.py \
+  --source /home/ubuntu/data/SkyRL-v0-293/train.parquet \
+  --sif-dir singularity_images \
+  --dest /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet \
+  --min-rows 1
+```
+
+Output: `[INFO] N SIFs in singularity_images` then `[INFO] K/293 rows survive filter`.
+
+**Run this script before starting the RolloutWorker** so it reads the freshest filtered
+parquet. Also re-run after each batch of SIF builds finishes.
+
+The naming mapping (from `scripts/pull_swe_images.py`):
+```
+instance_id:  getmoto__moto-7365
+SIF name:     xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7365.sif
+```
+
+### 0.4 Building SIF Images (from 232 GB cached OCI blobs)
+
+The OCI layer cache means no network download — each conversion takes ~3–5 min/image.
+Build a small batch first, then run the full set overnight.
+
+```bash
+source /home/ubuntu/.prorl_creds.env
+cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
+
+CACHE_BASE="$(pwd)/scripts/_singularity_cache"
+mkdir -p "${CACHE_BASE}/apptainer_tmpdir" "${CACHE_BASE}/apptainer_localcachedir"
+
+# Build first 10 images (enough for a meaningful training run)
+APPTAINER_CACHEDIR="${CACHE_BASE}/apptainer_cachedir" \
+APPTAINER_LOCALCACHEDIR="${CACHE_BASE}/apptainer_localcachedir" \
+APPTAINER_TMPDIR="${CACHE_BASE}/apptainer_tmpdir" \
+APPTAINER_DOCKER_USERNAME="${SINGULARITY_DOCKER_USERNAME}" \
+APPTAINER_DOCKER_PASSWORD="${SINGULARITY_DOCKER_PASSWORD}" \
+SINGULARITY_DOCKER_USERNAME="${SINGULARITY_DOCKER_USERNAME}" \
+SINGULARITY_DOCKER_PASSWORD="${SINGULARITY_DOCKER_PASSWORD}" \
+nohup poetry run python scripts/pull_swe_images.py \
+  --parquet-file /home/ubuntu/data/SkyRL-v0-293/train.parquet \
+  --dest-dir singularity_images \
+  --start-index 1 --end-index 10 \
+  --log-name build_first10.log > /tmp/sif_build.log 2>&1 &
+
+# Monitor:
+watch -n 30 "ls singularity_images/*.sif | wc -l"
+```
+
+Build ALL 293 images (background, takes ~15h total):
+```bash
+# Use --start-index 2 if index 1 is already built
+APPTAINER_CACHEDIR="${CACHE_BASE}/apptainer_cachedir" \
+... (same env vars) ... \
+poetry run python scripts/pull_swe_images.py \
+  --parquet-file /home/ubuntu/data/SkyRL-v0-293/train.parquet \
+  --dest-dir singularity_images \
+  --start-index 2 \
+  --log-name build_all.log
+```
+
+### 0.5 Quick Training with Minimal SIFs
+
+**With just 1 SIF** we can start a real training run:
+
+```bash
+source /home/ubuntu/.prorl_creds.env
+
+# 1. Filter parquet to available SIFs
+poetry run python scripts/_internal/filter_parquet_to_built_sifs.py \
+  --source /home/ubuntu/data/SkyRL-v0-293/train.parquet \
+  --sif-dir singularity_images \
+  --dest /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet
+
+# 2. Start services (LiveStore + PolicyRegistry + ProRL must be running)
+# See Section 2 below
+
+# 3. Start RolloutWorker with filtered dataset
+PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
+nohup $PYTHON -m rollout_worker.main \
+  --live-store-socket /tmp/prorl_live_store.sock \
+  --prorl-url http://localhost:8006 \
+  --policy-id qwen3-4b-skyrl \
+  --environment-id swe_agent \
+  --data-files /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet \
+  --group-size 4 \
+  --filter-zero-variance \
+  --archive-disabled \
+  > /tmp/rollout_worker.log 2>&1 &
+
+# 4. Wait for LiveStore warm-up (BC-16)
+$PYTHON -c "
+import sys, time; sys.path.insert(0, '.')
+from live_store.client import LiveStoreClient
+cli = LiveStoreClient('/tmp/prorl_live_store.sock',
+    policy_id='qwen3-4b-skyrl', environment_id='swe_agent')
+for _ in range(120):
+    if cli.total_pushes() > 0:
+        print('WARM — groups in store:', cli.num_groups()); break
+    time.sleep(5)
+cli.close()
+"
+
+# 5. Start Docker trainer (reads from LiveStore, not internal producer)
+REPLAY_ENABLE=True \
+CONTINUOUS_PRODUCER=False \
+FILTER_GROUPS=False \
+TOTAL_TRAINING_STEPS=10 \
+DATA_PATH=/data/SkyRL-v0-293 \
+  bash scripts/_internal/s3_fullasync_docker.sh \
+  data.train_files=[/data/SkyRL-v0-293/train.ready.parquet]
+```
+
+**Why `CONTINUOUS_PRODUCER=False`**: The external RolloutWorker IS the producer.
+Setting `continuous_producer=False` tells the trainer not to spin up its internal
+producer thread — it reads from `LiveStoreClient` exclusively (BC-15).
+
+### 0.6 Two-Speed Strategy (recommended)
+
+Run SIF building in the background while training proceeds with available images:
+
+```
+Background: pull_swe_images.py (builds all 293 SIFs over ~15h)
+Foreground: RolloutWorker → only reads train.ready.parquet (grows as SIFs finish)
+            → re-run filter_parquet_to_built_sifs.py every hour to pick up new images
+Trainer:    reads from LiveStore (unaffected by which SIFs are available)
+```
+
+Refresh the filtered dataset without restarting the worker:
+```bash
+# Re-run filter every hour as more SIFs are built
+while true; do
+  poetry run python scripts/_internal/filter_parquet_to_built_sifs.py \
+    --source /home/ubuntu/data/SkyRL-v0-293/train.parquet \
+    --sif-dir singularity_images \
+    --dest /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet
+  sleep 3600
+done &
+```
+
+Then restart the RolloutWorker (it re-reads the parquet on startup) after each refresh
+if you want more diversity. The trainer is unaffected — it reads from the LiveStore
+queue, which is continuously refilled by whatever the worker is producing.
+
+---
+
 ## 1. What Was Implemented
 
 ### Stage S0.5 — Substrate (schemas + protocols + invariant tests)
