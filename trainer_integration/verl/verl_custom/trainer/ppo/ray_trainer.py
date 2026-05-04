@@ -435,7 +435,10 @@ class RayPPOTrainer:
             total_len = int(config.data.get('max_prompt_length', 0)) + int(
                 config.data.get('max_response_length', 0)
             )
-            _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '')
+            # Prefer env var; fall back to Hydra config value if present.
+            _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '') or str(
+                replay_cfg.get('live_store_socket', '')
+            )
             if _live_store_socket:
                 # S2 migration: use external gRPC LiveStore instead of
                 # in-process TrajectoryStore (BC-15).
