@@ -9,6 +9,86 @@ This doc is the **operational companion**: what exists, how to start it, what br
 
 ---
 
+## 0.1 The Architecture (One-Paragraph Thesis)
+
+The rollout fabric is **five independent services wired by three contracts**.
+No service knows the internals of another. Every boundary condition is enforced
+in code and tested in `tests/invariants/` and `tests/slots/`.
+
+```
+  SkyRL-v0-293/train.ready.parquet
+         │  (ParquetDataLoader — RolloutWorker owns it, §3.8 / BC-14)
+         │  filter_parquet_to_built_sifs.py keeps only rows with a .sif
+         ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  RolloutWorker  (scripts/services/start_rollout_worker.sh)  │
+  │  Zero VERL / OpenHands imports (BC-13)                       │
+  │                                                             │
+  │  for each task in dataloader:                               │
+  │    snap = policy_cache.snapshot()    ← ONE read per group   │
+  │    for i in range(group_size):       ← all N use snap.ver   │
+  │      ep = prorl_client.POST /process (token IDs, §3.1)      │
+  │    samples = build_group(episodes, snap)  ← BC-0 / §3.2     │
+  │    archive.submit(record)            ← tee pre-filter, BC-12│
+  │    if not zero_variance: store.push_group(samples)  ← §3.7  │
+  └─────────────────────────────────────────────────────────────┘
+         │  gRPC push_group (packed int32 bytes, BC-1, BC-2)
+         ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  LiveStore  (scripts/services/start_live_store.sh)          │
+  │  Bounded FIFO, pop-on-sample (§3.6 / BC-3)                  │
+  │  Server-side blocking get_batch (BC-4, BC-5)                │
+  │  Staleness eviction by created_at_step (§3.6)               │
+  └────────────────────────────────────────────────────────────┘
+         │  gRPC get_batch → unpadded TrainingSample list (BC-11)
+         ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  TrainerAdapter  (scripts/_internal/s3_fullasync_docker.sh) │
+  │  VERL FSDP inside Docker, 8× A100                           │
+  │  Connects ONLY to LiveStore + PolicyRegistry (BC-15)        │
+  │  sample_mini_batch() → pad locally → FSDP forward/backward  │
+  │  No dataloader, no producer thread (§3.8)                   │
+  │  After save_freq steps → publish_policy_version()           │
+  └────────────────────────────────────────────────────────────┘
+         │  gRPC publish_policy_version (§3.3 abort gate, BC-9)
+         ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  PolicyRegistry  (scripts/services/start_policy_registry.sh)│
+  │  Single source of truth for LoRA version + adapter URI       │
+  │  Fans out /reload_lora to all pool children synchronously    │
+  │  endpoints_failed > 0 → hard abort (BC-9)                   │
+  └────────────────────────────────────────────────────────────┘
+         │  HTTP POST /reload_lora (multipart, §3.4 pinning)
+         ▼
+  ┌────────────────────────────────────────────────────────────┐
+  │  InferenceBackend  (vLLM pool :8100-8103 on EC2)            │
+  │  Frozen through S4 — _vllm_child.py unchanged               │
+  │  /v{N}/generate pins each trajectory to dispatch-time PV    │
+  │  LRU eviction of old LoRA slots                             │
+  └────────────────────────────────────────────────────────────┘
+         ↑
+  ┌──────────────────────────────────────────────────────────┐
+  │  EnvironmentProvider  (ProRL FastAPI :8006)                │
+  │  Frozen through S4 — async_server.py unchanged             │
+  │  POST /process → Singularity sandbox → tool loop           │
+  │  Returns token IDs + logprobs (§3.1 token-in/token-out)    │
+  └──────────────────────────────────────────────────────────┘
+```
+
+**The invariant that holds this together (BC-0):**
+One `PolicyVersionSnapshot` is read at the START of each group dispatch.
+All N sibling episodes are submitted with the same `policy_version`.
+All N resulting samples are stamped with the same `behavior_policy_version`.
+No trajectory in one group ever spans two policies.
+
+**The invariant that makes the trainer pluggable (BC-15):**
+The trainer connects to exactly two services: LiveStore (read) and
+PolicyRegistry (write). It has no parquet files, no dataloader, no ProRL
+address, and no vLLM address. Swapping VERL for ROLL or slime requires
+only changing the Docker image and the Hydra command — nothing else.
+
+---
+
 ## 1. What Was Implemented
 
 ### Stage S0.5 — Substrate (schemas + protocols + invariant tests)
