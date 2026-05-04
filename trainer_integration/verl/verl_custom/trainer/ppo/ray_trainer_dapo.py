@@ -52,81 +52,23 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
 
-    def _make_continuous_producer(self):
-        """DAPO producer: ``generate_sequences_dapo`` owns its dataloader."""
-        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-            ContinuousRolloutProducer,
-        )
-
-        replay_cfg = self.config.replay
-        return ContinuousRolloutProducer(
-            rollout_manager=self.async_rollout_manager,
-            # DAPO pulls prompts from its internal loader; no factory.
-            generate_fn=self.async_rollout_manager.generate_sequences_dapo,
-            store=self.trajectory_store,
-            step_counter=self._step_counter,
-            prompts_iter_factory=None,
-            poll_interval_s=float(replay_cfg.get('poll_interval_s', 0.05)),
-        )
-
     def _acquire_training_batch_dapo(
         self, metrics: dict, timing_raw: dict
     ) -> 'DataProto':  # noqa: F821 — forward ref, DataProto imported in ray_trainer
-        """Produce one DAPO training batch.
+        """S2 — pure consumer: sample from the gRPC LiveStore.
 
-        Classic: wake, call ``generate_sequences_dapo``, push+sample.
-        Continuous: wait for the store, sample (producer already pushed).
+        Pre-S2 had a "classic" path (in-trainer ``generate_sequences_dapo``)
+        and a "continuous" path (in-trainer producer thread). Both are
+        gone after S2: the rollout_worker process owns the dataloader,
+        the DAPO async manager, and the producer loop. The trainer is
+        purely a consumer of :class:`LiveStoreClient`. The server-side
+        no-progress detector replaces the busy-loop wait — wedged
+        producer surfaces as :class:`NoProgressError`, not a silent stall.
         """
         from verl import DataProto  # noqa: PLC0415
 
-        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-            wait_until_with_progress,
-        )
-
-        # S2 migration: use the store path whenever trajectory_store is set.
-        # Previously gated on LIVE_STORE_SOCKET env var AND _producer — that
-        # caused the classic in-process path to be taken when
-        # CONTINUOUS_PRODUCER=False (external RolloutWorker), because
-        # _producer=None and the env var was not forwarded into the container.
-        # Fix: trajectory_store being non-None is sufficient; the socket path
-        # is already resolved inside LiveStoreClient at construction time.
-        _use_store_path = self.trajectory_store is not None
-        if _use_store_path:
-            if self._producer is not None:
-                self._producer.check_background_error()
-            n_groups = int(self.config.data.train_batch_size)
-            no_progress_timeout_s = float(
-                self.config.replay.get('no_progress_timeout_s', 1800.0)
-            )
-            with _timer('gen', timing_raw):
-                if self._producer is not None:
-                    # In-process producer path: poll until n_groups fresh
-                    # groups are available (busy-poll at 10 ms — acceptable
-                    # for the in-process store where gRPC overhead is zero).
-                    filled = wait_until_with_progress(
-                        lambda: self.trajectory_store.num_fresh_groups(
-                            self.global_steps
-                        )
-                        >= n_groups,
-                        self.trajectory_store.total_pushes,
-                        no_progress_timeout=no_progress_timeout_s,
-                    )
-                    if not filled:
-                        self._producer.check_background_error()
-                        raise RuntimeError(
-                            f'Replay store made no forward progress for '
-                            f'{no_progress_timeout_s:.1f}s while waiting for '
-                            f'{n_groups} fresh groups (current='
-                            f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
-                            f'fresh / {self.trajectory_store.num_groups()} total, '
-                            f'total_pushes={self.trajectory_store.total_pushes()}). '
-                            'Producer is wedged — check pool /health and producer logs.'
-                        )
-                # External worker path (CONTINUOUS_PRODUCER=False):
-                # sample_mini_batch → LiveStoreClient.get_batch blocks
-                # server-side until n_groups are ready; NoProgressError is
-                # raised by the server after no_progress_timeout_s. No
-                # busy-poll needed here — avoid hammering the gRPC socket.
+        n_groups = int(self.config.data.train_batch_size)
+        with _timer('gen', timing_raw):
             metrics.update(
                 self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
             )
@@ -137,21 +79,11 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             metrics.update(
                 self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
             )
-            return DataProto.from_dict(
-                tensors=sampled.tensors,
-                non_tensors=sampled.non_tensors,
-                meta_info=sampled.meta_info,
-            )
-
-        # Classic path.
-        with _timer('gen', timing_raw):
-            assert self.async_rollout_mode
-            self.async_rollout_manager.wake_up()
-            batch = self.async_rollout_manager.generate_sequences_dapo()
-            self.async_rollout_manager.sleep()
-            timing_raw.update(batch.meta_info['timing'])
-            batch.meta_info.pop('timing', None)
-        return self._push_and_sample_replay(batch, metrics)
+        return DataProto.from_dict(
+            tensors=sampled.tensors,
+            non_tensors=sampled.non_tensors,
+            meta_info=sampled.meta_info,
+        )
 
     def fit(self):
         """
@@ -185,17 +117,11 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             self.policy_version = self.global_steps
             self.async_rollout_manager.policy_version = self.global_steps
 
-        # perform validation before training
-        # currently, we only support validation using the reward_function.
-        if self.val_reward_fn is not None and self.config.trainer.get(
-            'val_before_train', True
-        ):
-            val_metrics = self._validate()
-            assert val_metrics, f'{val_metrics=}'
-            pprint(f'Initial validation metrics: {val_metrics}')
-            logger.log(data=val_metrics, step=self.global_steps)
-            if self.config.trainer.get('val_only', False):
-                return
+        # S2 — validation removed. Operating-principle 5 in the
+        # implementation plan: validation flow deferred to a later cut.
+        # Trainer never validates; the worker process owns the val
+        # parquet (still in its dataloader config), but no RPC drives
+        # it through the trainer.
 
         # add tqdm
         progress_bar = tqdm(
@@ -451,43 +377,7 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                         with _timer('publish_lora', timing_raw):
                             self._publish_lora_adapter(local_global_step_folder)
 
-                    # validate
-                    if (
-                        self.val_reward_fn is not None
-                        and self.config.trainer.test_freq > 0
-                        and (
-                            is_last_step
-                            or self.global_steps % self.config.trainer.test_freq == 0
-                            or self.timeout.last_saved
-                        )
-                    ):
-                        # Producer + validation share one OpenHands session;
-                        # validation's /stop at teardown kills the producer's
-                        # in-flight /process. Pause producer around _validate
-                        # and resume afterwards. Buffer stays warm across the
-                        # pause; K-staleness evicts naturally at next sample.
-                        # Gotcha §19: if the producer is mid-asyncio.run the
-                        # stop() timeout fires without the thread exiting —
-                        # skip validate to avoid concurrent OH dispatch and
-                        # let the producer finish its call; retry on the next
-                        # save boundary.
-                        if self._stop_continuous_producer_if_needed():
-                            try:
-                                with _timer('testing', timing_raw):
-                                    val_metrics: dict = self._validate()
-                                    if is_last_step:
-                                        last_val_metrics = val_metrics
-                                metrics.update(val_metrics)
-                            finally:
-                                if not is_last_step:
-                                    self._start_continuous_producer_if_needed()
-                        else:
-                            _logger.warning(
-                                'step=%d skipping _validate: producer stop '
-                                'timed out (still mid-generate_sequences); '
-                                'will retry on next save boundary',
-                                self.global_steps,
-                            )
+                    # S2 — validation removed (operating-principle 5).
 
                     # training metrics
                     metrics.update(
@@ -519,15 +409,15 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
 
                     progress_bar.update(1)
                     self.global_steps += 1
-                    # Cut 4: propagate the new step into the producer so
-                    # records pushed from now on carry the fresh tag.
-                    if self._step_counter is not None:
-                        self._step_counter.set(self.global_steps)
-                    if self._producer is not None:
-                        self._producer.check_background_error()
+                    # S2 — no in-trainer producer / step counter / health
+                    # check needed: the worker process owns those; the
+                    # gRPC LiveStore's no-progress detector surfaces
+                    # wedged producers as :class:`NoProgressError` at
+                    # the next ``sample_mini_batch`` call.
                     if is_last_step:
                         pprint(f'Final validation metrics: {last_val_metrics}')
                         progress_bar.close()
                         return
         finally:
+            # S2 no-op (kept for symmetry with pre-S2 fit() flow).
             self._stop_continuous_producer_if_needed()
