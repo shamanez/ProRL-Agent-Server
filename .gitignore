@@ -271,3 +271,4 @@ docs/*.pdf
 # Training outputs and experiment tracking
 outputs/
 wandb/
+scripts/log/
