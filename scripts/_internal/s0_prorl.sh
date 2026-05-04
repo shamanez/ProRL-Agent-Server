@@ -10,10 +10,13 @@ echo "[prorl] starting $(date -u +%FT%TZ)"
 # any future ProRL restart without needing POST /add_llm_server again.
 VLLM_ADDR_ARGS=()
 if [[ -n "${REMOTE_DNS:-}" ]]; then
-  for port in 8100 8101 8102 8103; do
-    VLLM_ADDR_ARGS+=(--llm-server-address "http://${REMOTE_DNS}:${port}")
-  done
-  echo "[prorl] baking in vLLM endpoints: ${REMOTE_DNS}:8100-8103"
+  # --llm-server-address uses nargs='*' so pass ALL ports as ONE flag invocation.
+  VLLM_ADDR_ARGS=(--llm-server-address \
+    "http://${REMOTE_DNS}:8100" \
+    "http://${REMOTE_DNS}:8101" \
+    "http://${REMOTE_DNS}:8102" \
+    "http://${REMOTE_DNS}:8103")
+  echo "[prorl] baking in vLLM endpoints: http://${REMOTE_DNS}:8100-8103"
 fi
 
 poetry run python scripts/start_server.py \
