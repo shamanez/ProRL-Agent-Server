@@ -229,9 +229,21 @@ class TaskRunner:
             config.data.val_files, config.data, tokenizer, processor
         )
         train_sampler = create_rl_sampler(config.data, train_dataset)
+        # S2: RayPPOTrainerDAPO is the target class for all LiveStore-backed
+        # runs (filter_groups may be False while still using the external
+        # worker → LiveStore → trainer path). Select DAPO whenever
+        # replay.live_store_socket is set (S2 mode) or filter_groups is on.
+        _live_store_socket = (
+            str(config.replay.get('live_store_socket', ''))
+            if hasattr(config, 'replay')
+            else ''
+        )
         trainer_cls = (
             RayPPOTrainerDAPO
-            if config.algorithm.get('filter_groups', {}).get('enable', False)
+            if (
+                config.algorithm.get('filter_groups', {}).get('enable', False)
+                or bool(_live_store_socket)
+            )
             else RayPPOTrainer
         )
         print(f'Using trainer: {trainer_cls.__name__}')
