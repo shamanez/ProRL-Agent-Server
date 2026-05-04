@@ -157,6 +157,9 @@ def pack_unpadded_groups(
         'resolved': np.array(resolveds, dtype=object),
         'finish': np.array(finishes, dtype=object),
         'instance': np.array(instances, dtype=object),
+        # SWEBenchRewardManager groups metrics by ability; default to 'swe_agent'
+        # since all samples in this fabric are SWE-Bench tasks.
+        'ability': np.array(['swe_agent'] * len(uids), dtype=object),
     }
     for k, vals in extras_by_key.items():
         non_tensors[k] = np.array(vals, dtype=object)
