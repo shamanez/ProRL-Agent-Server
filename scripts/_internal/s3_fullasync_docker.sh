@@ -124,6 +124,7 @@ docker run --rm --name "$CNAME" \
   --ulimit stack=67108864 \
   -v "$REPO":/workspace \
   -v /tmp/verl:/opt/verl \
+  -v /tmp:/tmp \
   -v /home/ubuntu/data:/data:ro \
   -v /home/ubuntu/.prorl_creds.env:/creds.env:ro \
   -v /home/ubuntu/.cache/huggingface:/root/.cache/huggingface \

@@ -1,0 +1,206 @@
+[LOG] Writing combined stdout/stderr to /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/scripts/log/build_1_30.log
+[DEBUG] No 'docker_image' column in /home/ubuntu/data/SkyRL-v0-293/train.parquet: No match for FieldRef.Name(docker_image) in prompt: list<element: struct<content: string, role: string>>
+data_source: string
+ability: string
+instance: struct<FAIL_TO_PASS: list<element: string>, PASS_TO_PASS: list<element: string>, base_commit: string, created_at: string, hints_text: string, instance_id: string, patch: string, problem_statement: string, repo: string, test_patch: string, version: string>
+__fragment_index: int32
+__batch_index: int32
+__last_in_fragment: bool
+__filename: string
+[INFO] Detected 293 images via instance_id conversion
+--------------------------------
+[INFO] 293 images detected (sequence preserved)
+[INFO] Processing 1-30 (1-based indices)
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7365 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7365.sif
+[SKIP] Exists
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4950 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4950.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4950: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4950 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4950 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6178 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6178.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6178: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6178 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6178 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4986 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4986.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4986: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4986 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4986 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7023.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7023 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5865 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5865.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5865: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5865 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5865 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5072 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5072.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5072: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5072 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5072 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6159 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6159.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6159: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6159 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6159 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7105 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7105.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7105: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7105 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7105 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6212 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6212.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6212: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6212 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6212 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5862 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5862.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5862: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5862 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5862 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6469 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6469.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6469: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6469 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6469 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4918 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4918.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4918: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4918 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4918 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5587 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5587.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5587: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5587 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5587 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7111 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7111.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7111: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7111 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7111 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5286 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5286.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5286: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5286 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5286 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7061 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7061.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7061: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7061 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7061 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7212 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7212.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7212: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7212 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7212 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7081 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7081.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7081: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7081 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7081 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6536 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6536.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6536: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6536 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6536 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6410 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6410.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6410: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6410 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6410 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7635 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7635.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7635: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7635 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7635 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7490 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7490.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7490: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7490 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7490 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5699 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5699.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5699: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5699 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5699 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5794 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5794.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5794: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5794 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5794 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4972 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4972.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4972: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4972 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4972 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5043 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5043.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5043: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5043 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5043 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5959 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5959.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5959: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5959 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5959 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5134 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5134.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5134: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5134 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5134 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6802 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6802.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6802: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6802 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6802 --force_rebuild --platform linux/amd64
+[DONE] Built 1/30 images
+[LOG] Writing combined stdout/stderr to /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/scripts/log/build_1_30.log
+[DEBUG] No 'docker_image' column in /home/ubuntu/data/SkyRL-v0-293/train.parquet: No match for FieldRef.Name(docker_image) in prompt: list<element: struct<content: string, role: string>>
+data_source: string
+ability: string
+instance: struct<FAIL_TO_PASS: list<element: string>, PASS_TO_PASS: list<element: string>, base_commit: string, created_at: string, hints_text: string, instance_id: string, patch: string, problem_statement: string, repo: string, test_patch: string, version: string>
+__fragment_index: int32
+__batch_index: int32
+__last_in_fragment: bool
+__filename: string
+[INFO] Detected 293 images via instance_id conversion
+--------------------------------
+[INFO] 293 images detected (sequence preserved)
+[INFO] Processing 1-30 (1-based indices)
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7365 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7365.sif
+[SKIP] Exists
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4950 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4950.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4950: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4950 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4950 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6178 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6178.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6178: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6178 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6178 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4986 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4986.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4986: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4986 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4986 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7023.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7023 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7023 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5865 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5865.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5865: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5865 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5865 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5072 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5072.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5072: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5072 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5072 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6159 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6159.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6159: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6159 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6159 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7105 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7105.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7105: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7105 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7105 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6212 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6212.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6212: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6212 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6212 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5862 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5862.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5862: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5862 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5862 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6469 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6469.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6469: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6469 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6469 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4918 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4918.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4918: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4918 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4918 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5587 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5587.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5587: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5587 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5587 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7111 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7111.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7111: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7111 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7111 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5286 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5286.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5286: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5286 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5286 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7061 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7061.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7061: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7061 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7061 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7212 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7212.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7212: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7212 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7212 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7081 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7081.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7081: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7081 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7081 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6536 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6536.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6536: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6536 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6536 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6410 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6410.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6410: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6410 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6410 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7635 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7635.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7635: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7635 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7635 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7490 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7490.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7490: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-7490 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-7490 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5699 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5699.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5699: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5699 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5699 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5794 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5794.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5794: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5794 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5794 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4972 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4972.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4972: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-4972 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-4972 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5043 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5043.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5043: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5043 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5043 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5959 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5959.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5959: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5959 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5959 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5134 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5134.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5134: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-5134 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-5134 --force_rebuild --platform linux/amd64
+[BUILD] xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6802 -> singularity_images/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6802.sif
+[STEP 1] Generating Singularity build context…
+[ERROR] Failed processing xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6802: Command failed with exit code 1: python -m openhands.runtime.utils.singularity_runtime_build --base_image xingyaoww/sweb.eval.x86_64.getmoto_s_moto-6802 --build_folder singularity_images/temp_dif/xingyaoww_sweb.eval.x86_64.getmoto_s_moto-6802 --force_rebuild --platform linux/amd64
+[DONE] Built 1/30 images

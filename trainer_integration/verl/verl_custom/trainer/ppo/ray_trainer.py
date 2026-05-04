@@ -435,13 +435,41 @@ class RayPPOTrainer:
             total_len = int(config.data.get('max_prompt_length', 0)) + int(
                 config.data.get('max_response_length', 0)
             )
-            self.trajectory_store: TrajectoryStore | None = TrajectoryStore(
-                max_size=int(replay_cfg.buffer_size),
-                staleness_cutoff_k=int(replay_cfg.staleness_cutoff_k),
-                pad_token_id=int(pad_token_id),
-                prompt_length_cap=max_starting_message_length or None,
-                response_length_cap=total_len or None,
-            )
+            _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '')
+            if _live_store_socket:
+                # S2 migration: use external gRPC LiveStore instead of
+                # in-process TrajectoryStore (BC-15).
+                from live_store.client import LiveStoreClient  # noqa: PLC0415
+
+                _policy_id = str(
+                    config.actor_rollout_ref.model.get('policy_id', 'qwen3-4b-skyrl')
+                )
+                _env_id = str(
+                    config.actor_rollout_ref.rollout.get('environment_id', 'swe_agent')
+                )
+                _logger.info(
+                    '[trainer] LIVE_STORE_SOCKET=%s — using LiveStoreClient '
+                    '(policy_id=%s, environment_id=%s)',
+                    _live_store_socket,
+                    _policy_id,
+                    _env_id,
+                )
+                self.trajectory_store: TrajectoryStore | None = LiveStoreClient(  # type: ignore[assignment]
+                    socket_path=_live_store_socket,
+                    policy_id=_policy_id,
+                    environment_id=_env_id,
+                    pad_token_id=int(pad_token_id),
+                    prompt_length_cap=max_starting_message_length or None,
+                    response_length_cap=total_len or None,
+                )
+            else:
+                self.trajectory_store = TrajectoryStore(
+                    max_size=int(replay_cfg.buffer_size),
+                    staleness_cutoff_k=int(replay_cfg.staleness_cutoff_k),
+                    pad_token_id=int(pad_token_id),
+                    prompt_length_cap=max_starting_message_length or None,
+                    response_length_cap=total_len or None,
+                )
         else:
             self.trajectory_store = None
 
