@@ -512,10 +512,16 @@ evicts by staleness, returns batches sized for the trainer step.
 - `push_group(records: list[TrainingSample], group_uid, producer_id) →
    {accepted, store_size, backpressure_hint}`
 - `get_batch(n_groups, current_step, staleness_cutoff_k, timeout_ms) →
-   {tensors, non_tensors, behavior_policy_versions, created_at_steps,
-    sample_ages, metrics_pre, metrics_post}`
+   {samples: list[TrainingSample] (unpadded),
+    behavior_policy_versions, created_at_steps, sample_ages,
+    metrics_pre, metrics_post}`
 - `get_metrics(current_step) → store_metrics`
 - `notify_policy_version(version, adapter_uri) → ack`
+
+`get_batch` returns **unpadded** `TrainingSample` records (token-id
+lists, masks, scalars). Padding, sequence-packing, and any other compute
+shape transform are the **trainer adapter's** responsibility — see §6.2's
+padding stance. The store does not know tensor shapes.
 
 `get_batch` blocks server-side up to `timeout_ms` if the store has fewer
 than `n_groups` non-stale groups. The no-progress detector (invariant
@@ -524,8 +530,10 @@ analog from `continuous_producer.py:357-392`) lives inside the store: if
 returns an error. The trainer is no longer responsible for the busy-loop.
 
 **Current adapter.** In-process `TrajectoryStore`: `deque(maxlen=256)`,
-single `threading.Lock`, K-staleness eviction, re-pad to sample-local max
-inside `_pack`.
+single `threading.Lock`, K-staleness eviction. Today's `_pack` (re-pad
+to sample-local max) lives inside the store; in the new design that
+code migrates to the VERL trainer adapter (per §6.2). The successor
+LiveStore returns unpadded records.
 
 **Future adapters.** Colocated gRPC server (Stage 1), Ray actor store,
 shared-memory store for same-machine deployments. The hot path is
@@ -770,16 +778,30 @@ trainer adapter samples in groups; the wire format groups them together.
   EnvironmentProvider behind `task_id` (invariant 3.8). Trainer never
   resolves `task_id` back to a problem statement.
 
-**What gets re-padded server-side at `get_batch`:**
+**Padding stance — trainer-adapter local, not LiveStore:**
 
-The current `_pack` method (`trajectory_store.py:470-621`) re-pads to
-sample-local max at pack time. The successor LiveStore preserves this:
-the wire schema stores token sequences unpadded, the `get_batch` response
-returns padded tensors. Padding caps come from the trainer's request, not
-from the wire schema.
+The wire schema is **unpadded everywhere** — both on push (S0 today) and
+on `get_batch` return (S1+). Padding, sequence-packing, and any other
+compute-shape transform are **trainer-adapter responsibilities**, not
+LiveStore responsibilities. The store returns raw `TrainingSample`
+records; each trainer adapter pads/packs to its own compute shape:
 
-The current tensor shapes the trainer adapter receives (from
-`trajectory_store.py:90-101`):
+- **VERL / FSDP**: `(B, T_max)` padded tensors, sample-local max.
+- **ROLL**: packed sequences with `cu_seqlens` (FlashAttention path).
+- **slime / Megatron**: sequence-packed with the framework's expected
+  layout.
+- **SFT / distillation**: variable-length tokenizer-native, no padding
+  required.
+
+Today's `_pack` (`trainer_integration/verl/verl_custom/replay/trajectory_store.py:470-621`)
+relocates to the VERL trainer adapter as a local helper (e.g.
+`verl_adapter/pad.py`). The LiveStore stops knowing about tensor shapes
+entirely. This is option B in the live-store padding decision: it makes
+the LiveStore truly adapter-neutral (per principle 4.4) at the cost of
+each adapter owning its own padding code.
+
+For reference, the VERL adapter's compute shape **after its local pad**
+— **not** what comes off the wire — is:
 
 | Tensor key | Shape | dtype |
 |---|---|---|
@@ -795,9 +817,9 @@ The current tensor shapes the trainer adapter receives (from
 | `raw_reward` | `(B,)` | float32 (NEW, per §6.2) |
 | `truncated` | `(B,)` | bool (NEW, per §6.2) |
 
-These are adapter-shape tensors, not part of the wire schema — the
-trainer adapter could reshape them per its own preference; the wire only
-guarantees the field inventory and dtypes.
+Other adapters produce different shapes from the same unpadded wire; the
+LiveStore guarantees only the wire field inventory and dtypes
+(token-id lists, masks, scalars).
 
 ### 6.3 Algorithm-fields matrix and trust routing
 
@@ -1692,6 +1714,204 @@ adapter would have to do.
 | **ROLL** (Alibaba) | 5.6 TrainerAdapter | Async controller + DeepSpeed/Megatron/FSDP2. Already first-class on `behavior_policy_version` and supports six off-policy IS variants. Adapter consumes `TrainingGroup` via `get_batch`, computes ROLL's flavor of advantages and IS correction, publishes via PolicyRegistry. ROLL's `SampleBuffer` is replaced by the fabric's LiveStore. |
 | **slime** (THUDM) | 5.4 + 5.6 (paired) | slime separates training, rollout, and data buffer. Its data-buffer concept is closest to LiveStore; its training module (Megatron-based) is the trainer adapter; its rollout module is conceptually the RolloutWorker. Plug-in: replace slime's data buffer with a LiveStoreClient; replace its rollout module with a RolloutWorkerClient. The Megatron training module becomes the adapter. |
 | **Aggregation services** (FedAvg etc.) | 5.7 (extension) | S8 only. Operate on adapter URIs from the PolicyRegistry. Out of scope for this document. |
+
+---
+
+## Appendix D — Execution discipline (skills, teams, progress)
+
+This document is contract-first; the planner and the execution agent should
+treat the migration as a sequenced set of cuts, not a single rewrite. This
+appendix names the skills, the team shape, and the running progress
+artifact that keep S0–S8 tractable.
+
+### D.1 Most-needed skills
+
+These Claude Code skills are available on this repo. Activate by name when
+relevant — the table is a directory, not a checklist.
+
+| Skill | Role in this work |
+|---|---|
+| `repo-architecture` | Orient before the first edit in any module; map slot ↔ files via Appendix B; avoid guessing in cross-cutting subsystems. |
+| `karpathy-guidelines` | Surgical changes; surface assumptions; verifiable success criteria; no speculative abstractions. |
+| `strategic-compact` | Compact at stage boundaries (e.g. S1 → S2) to keep long sessions tractable without losing invariant context. |
+| `tdd-workflow` | Author Protocol contract tests (Appendix A) before implementing each slot adapter. |
+| `python-testing` | Pytest fixtures, markers (`integration`/`slow`/`real_data`), mocking at adapter boundaries, coverage targets. |
+| `python-patterns` | Type hints, dataclasses, asyncio idioms for new slot services. |
+| `api-design` | Wire-schema versioning (`schema_version`), Protocol method shapes, query semantics for ReplayArchive (§5.5). |
+| `documentation-lookup` | Live API docs via Context7 for external adapters (ROCK, GEM, ORS, SGLang, ROLL, slime). |
+| `eval-harness` | Codify each per-stage `Validation` gate as a pass/fail eval; gate stage close on it. |
+| `verification-loop` | End-of-stage close-out: `make lint`, fast pytest loop, coverage report. |
+| `security-review` | Trust-level routing review at S5+ when partner trajectories arrive (per §6.3). |
+
+The four context-management skills (`repo-architecture`,
+`karpathy-guidelines`, `strategic-compact`, `documentation-lookup`) are the
+ones most likely to determine whether a stage lands cleanly or sprawls.
+They keep the working set small and bounded across the seven slots.
+
+### D.2 Agent-team shape — track components, not turns
+
+The slot model has **seven components** (§5). The natural execution shape
+mirrors that: a **team lead** coordinates the migration; **teammates** own
+per-slot adapter work and challenge each other's slot interactions. This
+is the [agent-teams](https://code.claude.com/docs/en/agent-teams#start-your-first-agent-team)
+pattern, not subagent delegation — teammates have their own context
+windows and message each other directly.
+
+Why use a team here:
+
+- **Per-slot ownership.** Keeping each slot's invariants resident in a
+  dedicated teammate's working memory is the tightest fit to the
+  architecture: invariants 3.1 (token-in/out) and 3.4 (pinning) live with
+  EnvProvider/InferenceBackend teammates; 3.2 / 3.6 / 3.7 live with
+  RolloutWorker / LiveStore teammates; 3.3 / 3.5 live with TrainerAdapter
+  / PolicyRegistry teammates; 3.8 (data ownership) is the lead's
+  cross-cutting responsibility.
+- **Parallel investigation.** §12's open questions (transport, storage,
+  schema migration timing, archive ingest semantics) benefit from
+  independent exploration before convergence. Teammates with explicit
+  adversarial roles surface failure modes a single session under-explores.
+- **Bounded coordination cost.** Tokens scale linearly with active
+  teammates. Use 3–5 teammates per stage; not all seven slots are active
+  in any single stage. S1–S4 are sequential cuts; S5–S8 are parallel
+  proofs, where teams are most valuable.
+
+Bootstrap sequence:
+1. **Planning team** (3 teammates: architect, reviewer, devil's-advocate)
+   to resolve §12 open questions per stage before implementation begins.
+2. **Per-stage execution team** scoped to the slots that stage touches
+   (e.g. S1 = LiveStore + TrainerAdapter teammates; S6 = TrainerAdapter +
+   PolicyRegistry + RolloutWorker teammates).
+3. **Cleanup discipline.** Per the agent-teams contract, only the lead
+   runs cleanup; teammates shut down on request before the lead cleans up.
+
+### D.3 Step-by-step execution and the running progress artifact
+
+The plan is sequenced (S1 → S2 → S3 → S4) with parallel proofs (S5–S8).
+The execution agent works **one stage at a time** and only opens a new
+stage when the previous stage's `Validation` gates are green and
+`Reversibility` is preserved. No stage runs partially in production while
+the next is begun.
+
+**Maintain a running progress artifact** at
+`plans-n-solutions/rollout_fabric_progress.md`. It is the migration's
+single source of truth for "where are we now" and its audit log.
+
+Discipline:
+- One section per stage (S0 … S8), each with:
+  - **Goal** — copied verbatim from §9.
+  - **Tasks** — checkbox list, expanded as the stage starts.
+  - **Validation gates** — checkbox per item from the §9 stage's
+    `Validation` subsection.
+  - **Invariant tests** — checkbox per §3.x invariant the stage touches.
+  - **Status** — `not started` / `in progress` / `green` / `rolled back`.
+  - **Notes** — links to commits, PRs, decisions on §12 open questions.
+- Update on every meaningful checkpoint, not at end-of-stage. A merged
+  PR, a failed test, a rollback all warrant an update.
+- Never delete entries; mark them done. The artifact is also the
+  migration's audit log.
+- The artifact's header records: the active stage, the wire
+  `schema_version`, and the latest `policy_version` anchor commit. A
+  teammate joining mid-migration should be able to orient in under 60
+  seconds from the header alone.
+
+Skeleton to paste at the start of S1:
+
+```markdown
+# Rollout Fabric Migration — Progress
+
+**Active stage:** S0
+**Schema version:** v0 (current TrajectoryStore shape)
+**Policy version anchor:** <commit-sha>
+
+## S0 — Today (reference baseline)
+- [x] Goal: full async loop runs end-to-end as today
+- Validation
+  - [x] val_before_train pass
+  - [x] step-1 trainer step
+  - [x] step-20 wedge stabilization
+- Notes: starting commit is <sha>.
+
+## S1 — LiveStore behind a network boundary
+- [ ] Goal: prove the LiveStore slot is real (see §9.S1)
+- Tasks
+  - [ ] LiveStore Protocol contract tests (§A.4) authored
+  - [ ] Same-machine LiveStore service implemented
+  - [ ] Trainer client + push_group / get_batch wiring
+  - [ ] No-progress detector moved server-side
+  - [ ] Wire-schema §6.2 sealed at v1
+- Validation gates
+  - [ ] Trainer step times within X% of S0
+  - [ ] WandB curves indistinguishable from S0 over 20 steps
+  - [ ] Live-store kill-restart recovery via no-progress detector
+- Invariants exercised
+  - [ ] 3.1 token-in/out preserved on the wire
+  - [ ] 3.2 group integrity preserved
+  - [ ] 3.5 per-row behavior_policy_version stamped
+  - [ ] 3.6 pop-on-sample preserved
+  - [ ] 3.7 eager-push seam preserved
+- Status: not started
+```
+
+The progress artifact supersedes ad-hoc status updates in chat or PR
+descriptions. If it disagrees with chat, the artifact is correct by
+construction.
+
+### D.4 Target file layout — modularity over legacy
+
+The current repo layout is a historical artifact. Slot 5.1 internals
+sit under `openhands/` and `openhands/nvidia/`; the live store, producer,
+and trainer customizations sit under `trainer_integration/verl/verl_custom/`;
+serving lives under `scripts/serving/`; tests are organized by today's
+process topology. None of that layout is a contract. The slot model
+(§5) is.
+
+The execution agent **is authorized** to define a target file layout
+that aligns with the slot model, and to migrate code into it
+stage-by-stage. The migration **is not** a single rename PR; each move
+lands with its slot's stage cut and is verified by the same `Validation`
+gate that proves the slot.
+
+Suggested target shape (planner picks the names):
+
+```
+openhands_env_provider/   # slot 5.1 — ProRL adapter today
+inference_backend/        # slot 5.2 — vLLM child + future SGLang/TGI/...
+rollout_worker/           # slot 5.3 — was continuous_producer + async_server_dapo
+live_store/               # slot 5.4 — was trajectory_store + client/server split
+replay_archive/           # slot 5.5 — new at S3
+trainer_adapters/
+  verl/                   # slot 5.6 — was trainer_integration/verl/...
+  roll/                   # slot 5.6 — added at S6
+  slime/                  # slot 5.6 — added at S6
+policy_registry/          # slot 5.7 — was _publish_lora_adapter, new home at S4
+schemas/                  # §6 wire schemas, single source of truth
+tests/
+  invariants/             # §3.1–§3.8 regression gates
+  contracts/              # §A.1–§A.7 protocol contract tests
+  slots/                  # per-slot internal tests
+```
+
+**Constraints — what does NOT move (per CLAUDE.md):**
+1. **Token-in/out files** (`openhands/llm/nvidia/qwen3.py`,
+   `qwen2_5_vl.py`) stay at their current path. They own invariant 3.1
+   by location and are explicitly off-limits.
+2. **Frozen siblings** (`scripts/_internal/s2_weightsync_docker.sh`,
+   `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh`)
+   stay where they are — they are a matched lock-step A/B baseline. Make
+   new siblings; do not move or rename these.
+3. **Upstream OpenHands tree** (`openhands/` excluding `openhands/nvidia/`)
+   stays largely intact so upstream merges are tractable. Slot 5.1 is
+   the ProRL **adapter** wrapping OpenHands, not a re-layout of
+   OpenHands itself.
+
+Outside those constraints, default to the slot-aligned layout. The doc
+takes the position that **a clean target structure is worth the cost**
+of moving files — it is part of what proves the slot model is real.
+
+The `git mv`-vs-`git rm + git add` decision (preserve history vs clean
+break) is the planner's call per move; both are acceptable. The
+progress artifact (§D.3) records every move as a Note on the relevant
+stage so reviewers can trace history.
 
 ---
 
