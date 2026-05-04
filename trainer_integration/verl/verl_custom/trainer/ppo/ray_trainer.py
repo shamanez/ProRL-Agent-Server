@@ -61,10 +61,19 @@ from verl.utils.tracking import ValidationGenerationsLogger
 
 from verl_custom.nvidia.reward_manager.length_penalty import LengthPenalty
 from verl_custom.nvidia.utils.timer import TimeoutChecker
-from verl_custom.replay.trajectory_store import (
-    InsufficientTrajectoriesError,
-    TrajectoryStore,
-)
+
+try:
+    # S2: trajectory_store is removed when the repo ships with
+    # LiveStoreClient-only mode. Import is still needed on legacy setups
+    # where the in-process store is kept alongside LiveStoreClient.
+    from verl_custom.replay.trajectory_store import (  # noqa: PLC0415
+        InsufficientTrajectoriesError,
+        TrajectoryStore,
+    )
+except ModuleNotFoundError:
+    # S2 LiveStore-only mode: these symbols are unused at runtime.
+    TrajectoryStore = None  # type: ignore[assignment,misc]
+    InsufficientTrajectoriesError = Exception  # type: ignore[assignment,misc]
 from verl_custom.trainer.ppo import core_algos
 from verl_custom.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl_custom.trainer.ppo.metric_utils import (
