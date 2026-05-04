@@ -70,6 +70,7 @@ class ProRLClient:
         self._base = base_url.rstrip('/')
         self._default_params: dict[str, Any] = {
             'token_level_generation': True,  # §3.1 — token IDs + logprobs in response
+            'custom_tokenizer': 'Qwen/Qwen3-4B-Instruct-2507',  # required by llm.py for token-level generation
             'temperature': 0.7,
             'top_p': 0.95,
             'max_output_tokens': 2048,
