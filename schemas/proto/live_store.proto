@@ -1,0 +1,104 @@
+// LiveStore (§A.4) gRPC schema.
+//
+// Token-bearing fields are `bytes` carrying packed int32 token ids
+// (little-endian), not repeated int32, to avoid parser overhead.
+//
+// Padding stance (§6.2): the wire is unpadded. Padding is the trainer
+// adapter's responsibility (trainer_adapters/verl/pad.py).
+
+syntax = "proto3";
+
+package rollout_fabric.live_store;
+
+service LiveStore {
+  rpc PushGroup(PushGroupRequest) returns (PushGroupResponse);
+  rpc GetBatch(GetBatchRequest) returns (GetBatchResponse);
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  rpc NotifyPolicyVersion(NotifyPolicyVersionRequest) returns (Ack);
+}
+
+message TrainingSample {
+  string sample_uid = 1;
+  string group_uid = 2;
+  string episode_uid = 3;
+
+  bytes prompt_token_ids = 10;        // packed int32 LE
+  bytes response_token_ids = 11;
+  bytes response_loss_mask = 12;      // packed int8 (0/1)
+  bytes behavior_log_probs = 13;      // packed float32 LE; empty => null
+  bool has_behavior_log_probs = 14;
+
+  float reward = 20;
+  float raw_reward = 21;
+  bool truncated = 22;
+
+  int32 behavior_policy_version = 30;
+  int64 created_at_step = 31;
+
+  string task_id = 40;
+  string split = 41;
+  string policy_id = 42;
+  string environment_id = 43;
+  string environment_version = 44;
+  string verifier_version = 45;
+  string trust_level = 46;
+
+  bytes sample_indices = 50;          // packed int32 LE; empty => null
+  string instance_json = 51;
+  string error = 52;                  // empty => null
+  bool is_padded = 53;
+}
+
+message PushGroupRequest {
+  string group_uid = 1;
+  string producer_id = 2;
+  repeated TrainingSample records = 3;
+}
+
+message PushGroupResponse {
+  bool accepted = 1;
+  int32 store_size = 2;
+  int32 backpressure_hint_ms = 3;
+}
+
+message GetBatchRequest {
+  int32 n_groups = 1;
+  int64 current_step = 2;
+  int32 staleness_cutoff_k = 3;
+  int32 timeout_ms = 4;
+}
+
+message GetBatchResponse {
+  repeated TrainingSample samples = 1;
+  repeated int32 behavior_policy_versions = 2;
+  repeated int64 created_at_steps = 3;
+  repeated int32 sample_ages = 4;
+  map<string, double> metrics_pre = 5;
+  map<string, double> metrics_post = 6;
+  bool no_progress = 7;
+  string no_progress_reason = 8;
+}
+
+message GetMetricsRequest {
+  int64 current_step = 1;
+}
+
+message GetMetricsResponse {
+  int32 store_size = 1;
+  double fill_ratio = 2;
+  int32 num_trajectories = 3;
+  double age_p50 = 4;
+  double age_p95 = 5;
+  int32 dropped_by_staleness_total = 6;
+  int64 total_pushes = 7;
+}
+
+message NotifyPolicyVersionRequest {
+  int32 version = 1;
+  string adapter_uri = 2;
+}
+
+message Ack {
+  bool ok = 1;
+  string detail = 2;
+}

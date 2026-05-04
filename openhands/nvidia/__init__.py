@@ -50,3 +50,7 @@ for code_dataset in ['codecontests', 'apps', 'codeforces', 'taco']:
 # Optional aliases for GUI tasks
 for gui_name in ['gui', 'visual_browsing', 'browsergym']:
     add_name_mapping(gui_name, 'gui')
+
+# SkyRL-v0-293 and other SWE-Gym datasets use data_source="swe-gym";
+# route them to the existing SweAgentHandler (instance format is standard SWEBench).
+add_name_mapping('swe-gym', 'swebench')

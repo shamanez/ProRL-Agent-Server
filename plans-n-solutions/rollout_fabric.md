@@ -6,26 +6,30 @@ environments, inference backends, rollout workers, live stores, replay
 archives, trainers, and policy coordination are independently replaceable
 adapter slots.
 
-**Status:** Design-only. No code changes implied by this document.
+**Status:** Design-only. No code changes implied by this document. Need a solid plan first.
 **Author:** Architecture review, 2026-04-30.
 
 **Reading order:**
-1. §1 Vision — the one-paragraph thesis.
-2. §2 Current state — what runs in this repo right now.
-3. §3 Architectural invariants — what cannot change across the migration.
-4. §4 Pluggability principles — the four design rules.
-5. §5 The slot model — seven adapter slots with current and future
+0. Sec.0 Target operating model — the running system after S4: startup sequence,
+   five service contracts, smoke-test harness. **Read this first** to understand
+   the destination before following the migration path.
+1. Sec.1 Vision — the one-paragraph thesis.
+2. Sec.2 Current state — what runs in this repo right now.
+3. Sec.3 Architectural invariants — what cannot change across the migration.
+4. Sec.4 Pluggability principles — the four design rules.
+5. Sec.5 The slot model — seven adapter slots with current and future
    implementations named.
-6. §6 Wire schemas — the two data contracts (episode and training sample).
-7. §7 Live store vs durable replay archive — why they are different
+6. Sec.6 Wire schemas — the two data contracts (episode and training sample).
+7. Sec.7 Live store vs durable replay archive — why they are different
    systems from day one.
-8. §8 Component placement — where each slot naturally runs.
-9. §9 Stage-wise migration plan — S0 (today) through S8 (federation).
-10. §10 What does NOT change.
-11. §11 Non-goals.
-12. §12 Open questions for the planning agent.
+8. Sec.8 Component placement — where each slot naturally runs.
+9. Sec.9 Stage-wise migration plan — S0–S4 (sequential core boundary cuts) and
+   S5–S8 (independent pluggability proofs).
+10. Sec.10 What does NOT change.
+11. Sec.11 Non-goals.
+12. Sec.12 Open questions for the planning agent.
 13. Appendices — slot interfaces, code-to-slot mapping, external-framework
-    mapping.
+    mapping, recursive implementation loop, progress artifact format.
 
 **What this document is for.** It is the input to a downstream planning
 agent. The planner's job is to take the contracts and stages here and
@@ -33,7 +37,155 @@ produce an implementation plan: pick transports, pick storage, sequence
 service extraction, write migration scripts, and define the test matrix. The
 planner is explicitly authorized to choose between options when this
 document leaves them open. The planner is explicitly *not* authorized to
-soften or skip any of the invariants in §3 or the principles in §4.
+soften or skip any of the invariants in Sec.3 or the principles in Sec.4.
+
+---
+
+## 0. Target operating model
+
+Five independently launched services behind stable contracts. This is what the
+system looks like after S4 is complete. The migration stages in Sec.9 are steps
+toward this picture, not alternatives to it.
+
+### 0.1 Services and startup sequence
+
+Services start in strict order. Each step blocks until the service reports
+healthy before the next begins. The scripts listed are S4-target names; S0–S4
+replace them incrementally as the services are extracted.
+
+```
+Step 1 — Environment provider     (no upstream service dependencies)
+  Script:   scripts/services/start_env_provider.sh   [S4 target; today: s0_prorl.sh]
+  Health:   GET :8006/health → 200
+  Contract: EnvironmentProvider (Sec.5.1)
+  Role:     Task registry, sandbox lifecycle, reward computation.
+            Owns training and validation task datasets (invariant 3.8).
+
+Step 2 — Inference backend        (no upstream service dependencies)
+  Script:   scripts/serving/launch_remote_vllm_pool.sh start   [unchanged across stages]
+  Health:   GET :8100/health, :8101/health, :8102/health, :8103/health → 200 each
+  Contract: InferenceBackend (Sec.5.2)
+  Role:     Token-level generation with policy pinning. Owns model weights
+            and LoRA cache. Does not own policy version semantics.
+
+Step 3a — Live store              (no upstream service dependencies)
+  Script:   scripts/services/start_live_store.sh     [S1 target; today: in-process]
+  Health:   GET <host>:<port>/health → 200
+  Contract: LiveStore (Sec.5.4)
+  Role:     Bounded hot FIFO between rollout workers and trainer.
+            Pop-on-sample. Staleness eviction by created_at_step.
+
+Step 3b — Policy registry         (no upstream service dependencies)
+  Script:   scripts/services/start_policy_registry.sh [S4 target; today: int in trainer]
+  Health:   GET <host>:<port>/health → 200
+  Contract: PolicyRegistry (Sec.5.7)
+  Role:     Source of truth for policy versions and adapter URIs. Fans out
+            reload_lora to inference backend on publish. Preserves the
+            endpoints_failed > 0 abort gate (invariant 3.3).
+
+Step 4 — Rollout worker(s)        (depends on steps 1, 2, 3a)
+  Script:   scripts/services/start_rollout_worker.sh [S2 target; today: daemon thread]
+  Health:   Worker registers with live store; live store reports producer_id active.
+  Contract: RolloutWorker (Sec.5.3)
+  Role:     Executes agent loop against environment provider and inference
+            backend. Owns task datasets. Pushes to live store and replay archive.
+
+Step 5 — Trainer adapter          (depends on steps 3a, 3b, 4)
+  Script:   scripts/_internal/s3_fullasync_docker.sh  [evolves across stages]
+  Health:   Trainer calls get_batch without timeout; begins step 1.
+  Contract: TrainerAdapter (Sec.5.6)
+  Role:     Consumes training groups, computes algorithm-specific fields,
+            publishes policy versions to policy registry.
+```
+
+Steps 3a and 3b can start in parallel. Steps 1 and 2 can start in parallel.
+Step 4 requires steps 1, 2, and 3a. Step 5 requires steps 3a, 3b, and 4.
+
+Stop in reverse order. The trainer must stop before the live store or the
+policy registry; the rollout worker before the environment provider or the
+inference backend.
+
+### 0.2 Why this ordering
+
+The ordering follows dependency, not latency. The environment provider and
+inference backend have no upstream service dependencies — they start first.
+The live store and policy registry are coordination infrastructure with no
+upstream service dependencies. The rollout worker needs all three: a place to
+dispatch episodes (environment provider), generate tokens (inference backend),
+and push results (live store). The trainer is last: it depends on the live
+store (get_batch) and the policy registry (publish_policy_version), and it
+pre-flight-probes the rollout worker before beginning optimizer steps.
+
+### 0.3 Contracts, not implementations
+
+The startup sequence is defined in slot contracts (Sec.5), not in specific
+software. VERL is one TrainerAdapter implementation. ProRL is one
+EnvironmentProvider implementation. The vLLM child pool is one
+InferenceBackend implementation. The in-process TrajectoryStore is one
+LiveStore implementation. The trainer's Python int and direct `/reload_lora`
+call are one PolicyRegistry implementation.
+
+When a new trainer, environment, or inference backend is plugged in (S5–S8),
+the startup sequence does not change — only the concrete script for that step
+changes. If adding a new component requires changing the startup sequence or
+the slot contracts, the component boundary is wrong.
+
+The test of this claim is S5–S8. Each of those stages swaps one adapter into
+a slot without the other four services needing changes.
+
+### 0.4 Smoke-test harness
+
+A minimal harness bootstrapped at S0 and updated incrementally through S4.
+It starts all services in order, exercises each contract boundary, and exits
+clean. All S0–S4 validation gates use this harness — not full training runs.
+
+```
+Smoke-test harness
+
+SETUP
+  1. Start all services in startup-sequence order.
+     Health-probe each before proceeding to the next.
+
+CONTRACT CHECKS (before trainer starts)
+  2. Rollout worker: dispatch 1 episode batch.
+        Assert: push_group returns accepted=True.
+        Assert: live store reports ≥ 1 group.
+        Assert: all token-id fields are list[int], not list[str].
+  3. Live store: call get_batch(n_groups=1, current_step=0, staleness_cutoff_k=4).
+        Assert: returns ≥ 1 TrainingGroup.
+        Assert: behavior_policy_version is an int, not None.
+        Assert: group_uid is the same across all n siblings in the group.
+
+TRAINING SMOKE TEST
+  4. Trainer: let the trainer run until the first policy publish checkpoint.
+        Assert: loss at publish step is finite (not NaN, not inf).
+        Assert: no worker thread or subprocess crashes during the run.
+
+POLICY PUBLISH CHECK
+  5. Trainer: first policy publish.
+        Assert: endpoints_failed == 0 (invariant 3.3).
+        Assert: policy registry records the new version and adapter URI.
+  6. Rollout worker: subscribe or poll for new version.
+        Assert: worker receives the new version within 10 s.
+
+SHUTDOWN
+  7. Stop in reverse order: trainer → worker → live store + registry → backend → env.
+        Assert: all processes exit with code 0.
+        Assert: no orphan processes remain (check with ps / pgrep).
+```
+
+**The smoke-test harness runs once — after S4 is structurally complete.**
+
+Stages S1–S3 validate each extracted service in isolation using unit tests
+and contract tests, not end-to-end training. Running training at each
+intermediate stage is impractical: the system is partially extracted during
+S1–S3 and cannot form a complete training loop. Instead, each stage writes
+down what to verify when training eventually runs (the "training checklist",
+Sec.D.4). After S4, when all five services are wired together, this harness
+runs once and works through the full checklist.
+
+Longer training runs (multi-step curves, WandB sweeps) start only after the
+S4 harness is green.
 
 ---
 
@@ -244,34 +396,29 @@ to terminal-push under `filter_groups=True`.
 This is the invariant that prevents the trainer from sneaking back into
 being the orchestrator after the migration. State this precisely:
 
-> Training and validation **task datasets** belong to the environment
-> provider or the rollout scheduler. The trainer **does not sample raw
-> tasks directly.** The trainer samples `TrainingGroup` records from the
-> live store. Validation is expressed as **evaluation episodes against
-> named task splits**, dispatched by the rollout worker against the
-> environment provider — not as trainer-local token batches drawn from a
-> trainer-local parquet file.
+> **Training task datasets** belong to the rollout worker. The trainer
+> **does not sample raw tasks directly.** The trainer samples
+> `TrainingGroup` records from the live store only. The trainer has no
+> parquet files, no dataloader, and no knowledge of task IDs beyond the
+> provenance fields stamped on each `TrainingGroup`.
 
 Consequences and tests of this invariant:
 
 - The trainer image after migration **does not import a dataloader.** The
-  current `data.train_files` and `data.val_files` Hydra fields become
-  rollout-worker config, not trainer config.
-- The trainer **does not know task IDs.** A `TrainingGroup` references the
-  task by `task_id` and `environment_id`/`environment_version` (provenance
-  fields), but the trainer never resolves a `task_id` back to a raw task
-  description.
-- Validation runs are RPCs from the trainer to the rollout worker:
-  *"please run an evaluation pass against env=X, split=val, return the
-  resulting `TrainingGroup` records."* The trainer scores; the rollout
-  worker dispatches. Where the FSDP actor must compute `old_log_prob` /
-  `ref_log_prob` on validation tokens, it does so on records returned by
-  the rollout worker, not on records loaded from local parquet.
+  current `data.train_files` Hydra field becomes rollout-worker config.
+- The trainer **does not know task IDs.** A `TrainingGroup` carries `task_id`
+  and `environment_id`/`environment_version` as provenance, but the trainer
+  never resolves a `task_id` back to a raw task description.
 - A second trainer (S6 onward) plugs in **without bringing its own dataset
-  loader.** It subscribes to the same live store. The dataset stays where
-  it belongs: at the environment provider.
-- A new environment provider (S5: ROCK, GEM, ORS) brings its own dataset
-  / task registry / split definitions. The trainer never knows.
+  loader.** It subscribes to the same live store.
+- A new environment provider (S5: ROCK, GEM, ORS) brings its own task
+  registry and split definitions. The trainer never knows.
+
+**Validation (trainer-requested eval passes) is not part of this invariant
+and is explicitly deferred** — see Sec.11. The `data.val_files` field is
+removed from the trainer config at S2 and not replaced with an RPC. How
+validation is handled in an async decoupled setup is an open problem left
+for after S4.
 
 If this invariant is violated, the architecture has failed: the trainer
 becomes the hidden orchestrator, and pluggability collapses to
@@ -299,7 +446,7 @@ not a redesign of the system.
 ### 4.2 Two-tier data contract
 
 The system has two distinct data records, with different lifetimes and
-different consumers (§6 specifies them in full):
+different consumers (Sec.6 specifies them in full):
 
 ```
 EpisodeRecord  →  TrainingTrajectory  →  TrainingGroup  →  TrainerAdapter batch
@@ -322,7 +469,7 @@ two-tier contract is non-negotiable.
 The current draft treats persistence as a "later WAL feature." This
 document treats them as **separate products from the start**, even if the
 first archive implementation is a simple append-only log of
-`EpisodeRecord`s. §7 makes the property comparison explicit. The summary:
+`EpisodeRecord`s. Sec.7 makes the property comparison explicit. The summary:
 the live store is bounded RAM, FIFO, pop-on-sample, ephemeral, optimized
 for trainer `GetBatch` latency. The archive is unbounded durable storage,
 append-only, queryable, optimized for offline use, weeks-to-months horizon.
@@ -478,13 +625,12 @@ mostly a callee, not a callable):**
   - tee `EpisodeRecord` to ReplayArchive (S3+)
 
 **RPC surface exposed to the trainer.**
-- `pause_production() → ack`
-- `resume_production() → ack`
-- `run_validation(env_id, split, options) → list[TrainingGroup]` (the
-  validation flow per invariant 3.8 — trainer asks worker to run an eval
-  pass and returns the resulting groups for trainer-side scoring)
 - `get_dataloader_state() / load_dataloader_state()` (for the worker's
-  own resume)
+  own resume after a crash or restart)
+
+Validation (trainer-requested eval passes against the environment) is
+**deferred** — see Sec.11. `pause_production`, `resume_production`, and
+`run_validation` are not part of this interface in S0–S4.
 
 **Current adapter.** `ContinuousRolloutProducer` (daemon thread) +
 `AsyncLLMServerManagerDAPO`. Today it lives in the trainer process and
@@ -520,7 +666,7 @@ evicts by staleness, returns batches sized for the trainer step.
 
 `get_batch` returns **unpadded** `TrainingSample` records (token-id
 lists, masks, scalars). Padding, sequence-packing, and any other compute
-shape transform are the **trainer adapter's** responsibility — see §6.2's
+shape transform are the **trainer adapter's** responsibility — see Sec.6.2's
 padding stance. The store does not know tensor shapes.
 
 `get_batch` blocks server-side up to `timeout_ms` if the store has fewer
@@ -532,13 +678,13 @@ returns an error. The trainer is no longer responsible for the busy-loop.
 **Current adapter.** In-process `TrajectoryStore`: `deque(maxlen=256)`,
 single `threading.Lock`, K-staleness eviction. Today's `_pack` (re-pad
 to sample-local max) lives inside the store; in the new design that
-code migrates to the VERL trainer adapter (per §6.2). The successor
+code migrates to the VERL trainer adapter (per Sec.6.2). The successor
 LiveStore returns unpadded records.
 
 **Future adapters.** Colocated gRPC server (Stage 1), Ray actor store,
 shared-memory store for same-machine deployments. The hot path is
 `get_batch`, which is called once per trainer step; minimizing this
-latency is the placement constraint (§8).
+latency is the placement constraint (Sec.8).
 
 **Pop-on-sample is mandatory** (invariant 3.6). Push semantics are queue,
 not pub/sub. Staleness eviction uses `created_at_step`, not policy version
@@ -583,7 +729,7 @@ not for everything else.
 
 **Trust and provenance.** Records carry `trust_level` (own-fabric,
 partner-validated, partner-untrusted) and full provenance fields
-(§6.1). External-trajectory routing (§10.3 of the old draft, §6.3 here)
+(Sec.6.1). External-trajectory routing (Sec.10.3 of the old draft, Sec.6.3 here)
 depends on these fields being first-class, not tacked on.
 
 **State ownership.** Owns durable storage, indexes, and query plans. Does
@@ -602,9 +748,10 @@ optimizer step, and publishes new policy versions to the PolicyRegistry.
 - `save_checkpoint(step, dir) → checkpoint_uri`
 - `publish_policy_version(step, adapter_uri, policy_id) → publish_result`
    (calls PolicyRegistry)
-- `request_validation(env_id, split) → list[TrainingGroup]`
-   (calls RolloutWorker per invariant 3.8)
-- `score_validation(groups) → val_metrics`
+
+`request_validation` and `score_validation` are **deferred** — see Sec.11.
+Connecting trainer-triggered validation to an async decoupled worker is
+deferred until after S4 is stable.
 
 **Current adapter.** VERL `RayPPOTrainerDAPO`. Currently owns the
 dataloader; in the migration that ownership moves to RolloutWorker (S2),
@@ -711,20 +858,20 @@ Fields:
 | `messages_or_turns` | list[Message] | Optional structured turn-level view; redundant with events but useful for trainers that want a turn-level shape. |
 | `total_reward` | float | Episode-final reward. |
 | `reward_events` | list[RewardEvent] | Per-event reward deltas with provenance (verifier ID, judge model ID if any). |
-| `behavior_log_probs` | list[float] OR null | Per-token log-probabilities from the inference backend at generation time. Required for async RL correction; `null` only if the backend cannot provide them (in which case `trust_level` and routing are restricted; see §6.3). |
+| `behavior_log_probs` | list[float] OR null | Per-token log-probabilities from the inference backend at generation time. Required for async RL correction; `null` only if the backend cannot provide them (in which case `trust_level` and routing are restricted; see Sec.6.3). |
 | `prompt_token_ids` | list[int] | Initial prompt tokens. |
 | `response_token_ids` | list[int] | All model-emitted tokens across turns, concatenated. |
 | `response_loss_mask` | list[int] (0/1) | 1 on assistant turns; 0 on tool/observation tokens. |
 | `tool_calls` | list[ToolCall] | Structured representation of the tool calls made by the agent. |
 | `provenance` | dict | `{worker_id, worker_version, dataset_uri, dispatch_time, ...}`. |
-| `trust_level` | enum | `own-fabric`, `partner-validated`, `partner-untrusted`, `external-eval-only`. Routing per §6.3 depends on this. |
+| `trust_level` | enum | `own-fabric`, `partner-validated`, `partner-untrusted`, `external-eval-only`. Routing per Sec.6.3 depends on this. |
 | `schema_version` | str | EpisodeRecord schema version (semver). |
 
 `events` is the load-bearing field: an EpisodeRecord can always be
 reconstructed from its event stream. The flat fields above are summaries
 and indexes for query.
 
-**Tokenizer constraint.** The token-in/token-out invariant (§3.1) requires
+**Tokenizer constraint.** The token-in/token-out invariant (Sec.3.1) requires
 that `tokenizer_id` matches across all consumers of the record. An archive
 record with a different `tokenizer_id` than the trainer's expected
 tokenizer is routed to mismatched-tokenizer handling (drop, re-tokenize
@@ -750,7 +897,7 @@ trainer adapter samples in groups; the wire format groups them together.
 | `prompt_token_ids` | list[int] OR packed bytes | Unpadded. Re-padding is the LiveStore's `get_batch` job, not the wire's. |
 | `response_token_ids` | list[int] OR packed bytes | Same. |
 | `response_loss_mask` | list[int] (0/1) OR packed bytes | 1 on assistant tokens. |
-| `behavior_log_probs` | list[float] OR packed bytes | Per-token logprobs from the inference backend at generation time. Default-required (per §4.4 and the algorithm matrix in §6.3). |
+| `behavior_log_probs` | list[float] OR packed bytes | Per-token logprobs from the inference backend at generation time. Default-required (per Sec.4.4 and the algorithm matrix in Sec.6.3). |
 | `reward` | float | Episode-final reward, or aggregated. Trainers compute advantages from this; not from a pre-computed `advantage`. |
 | `raw_reward` | float | Pre-normalization reward (slime/ROLL carry this; VERL DataProto today does not — add it). |
 | `truncated` | bool | True if the rollout was cut by length (slime/ROLL carry this; useful for reward shaping decisions). |
@@ -769,7 +916,7 @@ trainer adapter samples in groups; the wire format groups them together.
 | `is_padded` | bool | Padding row flag (preserves current behavior). |
 
 **What the schema deliberately does not carry:**
-- `advantage` — computed by trainer adapter (per §4.4).
+- `advantage` — computed by trainer adapter (per Sec.4.4).
 - `returns` — same.
 - `KL penalty / ref_log_probs` — recomputed by FSDP/Megatron actor on
   sample.
@@ -814,8 +961,8 @@ For reference, the VERL adapter's compute shape **after its local pad**
 | `is_padded` | `(B,)` | bool |
 | `error_mask` | `(B,)` | bool |
 | `reward` | `(B,)` | float32 |
-| `raw_reward` | `(B,)` | float32 (NEW, per §6.2) |
-| `truncated` | `(B,)` | bool (NEW, per §6.2) |
+| `raw_reward` | `(B,)` | float32 (NEW, per Sec.6.2) |
+| `truncated` | `(B,)` | bool (NEW, per Sec.6.2) |
 
 Other adapters produce different shapes from the same unpadded wire; the
 LiveStore guarantees only the wire field inventory and dtypes
@@ -860,17 +1007,16 @@ The `trust_level` field plus the routing matrix above (which algorithms
 admit which trust levels) is the policy mechanism. The planner specifies
 the per-trainer-adapter routing rules, not this document.
 
-**Validation samples.** Validation `TrainingGroup`s (per invariant 3.8)
-carry `split=val` and are tagged so the trainer adapter routes them to
-`score_validation`, not `step`. The trainer adapter's `request_validation`
-RPC to the RolloutWorker is the one path that produces `split=val`
-records; trainer-local val-loaders are abolished.
+**Validation samples.** The `split` field (`train` / `val` / `test`) is
+a provenance field on `TrainingSample` records. In S0–S4 all live-store
+groups come from the `train` split. How val-split rollouts are triggered
+and scored in a fully decoupled async setup is **deferred** — see Sec.11.
 
 ---
 
 ## 7. Live store vs durable replay archive
 
-The two systems described in §5.4 and §5.5 are different products, with
+The two systems described in Sec.5.4 and Sec.5.5 are different products, with
 different optimization targets. Design rule 4.3 makes this explicit.
 Stating the property comparison directly:
 
@@ -902,7 +1048,7 @@ Stating the property comparison directly:
 **The first archive implementation can be simple.** Append-only Parquet
 files in S3 partitioned by `(policy_id, date, environment_id)`, with a
 small Postgres index for `query`. The minimum data unit is `EpisodeRecord`
-(§6.1). `TrainingSample` derivation can run on demand or be pre-cached as
+(Sec.6.1). `TrainingSample` derivation can run on demand or be pre-cached as
 secondary Parquet. The planner picks the storage stack.
 
 **Tee from the producer, not from the live store.** The producer writes
@@ -942,38 +1088,69 @@ Three implications:
 
 ## 9. Stage-wise migration plan
 
-Stages S0–S8. Each stage is defined by:
-- **Goal** — what the stage proves at the end.
-- **Scope** — which slot(s) gain a network boundary or new behavior;
-  which contracts get sealed.
-- **Invariants preserved** — referenced from §3.
-- **Validation** — the test that says the stage is done.
-- **Reversibility** — can we roll back to the previous stage if it
-  regresses.
+Nine stages. Each stage is defined by Goal, Scope, Invariants preserved,
+Validation, and Reversibility.
 
-Stages **S1–S4 are sequential** (each depends on the previous). Stages
-**S5–S8 are parallel proofs of pluggability** — they exercise specific
-slots independently and can be ordered by need, not by dependency.
+**S0–S4 are sequential core boundary cuts.** Each depends on the previous.
+After S4, the startup sequence from Sec.0 works end-to-end and the Sec.0
+smoke-test harness passes clean. No stage runs partially in production while
+the next begins.
 
-**This document does not prescribe how to extract services**. The planner
+**Training runs once — after S4, not at each intermediate stage.** During
+S1–S3 the system is partially extracted and cannot form a complete training
+loop; forcing training mid-migration produces failures that say nothing about
+the architecture. S1–S3 validate each extracted service with unit tests and
+contract tests in isolation. Each stage also appends items to a plain-text
+training checklist (Sec.D.4) recording what to verify when training eventually
+runs. The smoke-test harness (Sec.0.4) runs for the first time at S4, working
+through the full accumulated checklist.
+
+**S5–S8 are independent pluggability proofs.** They exercise specific slot
+adapters without altering the core pipeline. They can be ordered by need,
+not by dependency. They open only after S4 is green.
+
+**Each stage is executed with the recursive loop in Sec.D.3.** Update the
+progress artifact first, write the failing test first, implement, run the
+smoke-test harness, record failures verbatim, fix, rerun until green.
+
+**This document does not prescribe how to extract services.** The planner
 chooses transports, sequencing within a stage, deployment topology, and
 test strategy. What this section fixes: what each stage proves, what
-contracts must be intact at the end of each stage, and what the rollback
-path is.
+contracts must be intact at the end, and what the rollback path is.
 
 ### S0. Today (no changes) — reference baseline
 
 **Goal.** Reference baseline. The full async loop runs in one process,
-one container, one trainer host plus one EC2 vLLM box.
+one container, one trainer host plus one EC2 vLLM box. **The smoke-test
+harness is created at this stage** and anchors all subsequent validation.
 
-**Scope.** No changes. This is the starting point of the migration.
+**Scope.** No code changes to the training path. One deliverable: the
+smoke-test harness script (`tests/harness/smoke_test.sh` or equivalent)
+that encodes the Sec.0.4 sequence for the current in-process topology. The
+harness must run end-to-end cleanly before S1 begins.
 
-**Invariants preserved.** All of §3, all already.
+**Stage harness at S0.** Restart ProRL (`:8006`) and the remote vLLM
+pool, then start the Docker trainer container. The harness then:
+1. Waits for all health probes to pass.
+2. Asserts the in-process live store starts empty (`size == 0`, producer
+   not yet running).
+3. Waits for the producer to push ≥ 1 group (up to 120 s; fails if none).
+4. Asserts the pushed group has `token_ids` as `list[int]`, not strings.
+5. Asserts `behavior_policy_version` is an int, not None.
+6. Asserts the first policy publish returns `endpoints_failed == 0`.
+7. Shuts down in reverse order; asserts clean exits.
 
-**Validation.** Whatever currently certifies a healthy training run:
-`val_before_train` validation pass, step-1 trainer step, step-20 wedge
-stabilization (referenced in `s3_fullasync_docker.sh`), no spurious
-abort, healthy WandB metrics.
+The harness is the source of truth for "the system is working." All later
+stages update it to reflect the new process topology without changing the
+contract assertions (steps 3–8 above).
+
+**Invariants preserved.** All of Sec.3, all already.
+
+**Validation.** Already done. The baseline was run against the current
+in-process topology: ProRL and vLLM workers restarted, trainer started,
+producer pushed groups, policy publish returned `endpoints_failed == 0`,
+clean shutdown. Record the step-time and loss curve as the reference
+values the S4 harness will be compared against.
 
 **Reversibility.** Trivial — this is the current shape.
 
@@ -981,7 +1158,7 @@ abort, healthy WandB metrics.
 
 **Goal.** Prove the LiveStore slot is real. The in-process
 `TrajectoryStore` is replaced by a same-machine LiveStore service
-implementing the §5.4 interface. Trainer and producer both call the
+implementing the Sec.5.4 interface. Trainer and producer both call the
 service rather than the in-process object.
 
 **Scope.**
@@ -994,14 +1171,14 @@ service rather than the in-process object.
 - Re-padding still happens server-side.
 - `get_batch`'s server-side blocking and no-progress detector replace
   the current `wait_until_with_progress` busy-loop.
-- The wire schema is the §6.2 TrainingSample / TrainingGroup. **Sealing
+- The wire schema is the Sec.6.2 TrainingSample / TrainingGroup. **Sealing
   the live-path schema is the load-bearing artifact of S1.**
 
 **What does not change.** RolloutWorker, EnvironmentProvider,
 InferenceBackend, TrainerAdapter (modulo the swap of `self.trajectory_store`
 for a client). Data ownership is still in the trainer process; that's S2.
 
-**Invariants preserved.** All §3 invariants. In particular:
+**Invariants preserved.** All Sec.3 invariants. In particular:
 - 3.1 token-in/token-out: schema carries token IDs.
 - 3.2 group integrity: the wire groups; pop-on-sample preserves it.
 - 3.5 per-row `behavior_policy_version`: stamped at push.
@@ -1009,12 +1186,31 @@ for a client). Data ownership is still in the trainer process; that's S2.
 - 3.7 eager-push seam: still owned by RolloutWorker; the seam is now a
   network call rather than a function pointer.
 
-**Validation.**
-- Trainer step times within X% of S0 (the planner picks X based on a
-  benchmark of `_pack` + serialize vs in-process `_pack`).
-- WandB curves indistinguishable from S0 over a 20-step run.
-- Live store can be killed and restarted; trainer recovers via the
-  no-progress detector → checkpoint-and-wait pattern.
+**Validation — contract tests (no training at this stage).**
+
+Run these tests against the extracted LiveStore service in isolation:
+- Service starts and health-probe returns 200.
+- `push_group` → `get_batch` round-trip: token IDs on the wire are
+  `list[int]`, not strings (invariant 3.1).
+- `get_batch` pops: a group pushed once cannot be retrieved twice
+  (invariant 3.6).
+- Staleness eviction: push a group with `created_at_step=0`, call
+  `get_batch(current_step=5, staleness_cutoff_k=4)`; the group is
+  evicted (not returned).
+- No-progress detector: do not push for `no_progress_timeout_s`; assert
+  `get_batch` returns an error, not a hang.
+- Kill-restart: stop and restart the service; assert a fresh client
+  reconnects and can push/get successfully.
+- `behavior_policy_version` is stamped as an `int` on every returned
+  `TrainingSample` (invariant 3.5).
+
+**Training checklist items added at S1** (verified at S4):
+- [ ] Trainer step time is within X% of S0 baseline with the network
+      boundary in place. (Measure at S4; X determined by S0 baseline.)
+- [ ] The trainer client reconnects cleanly after a LiveStore restart
+      mid-training (kill-restart during an actual training run).
+- [ ] No tensor-shape mismatches introduced by the wire serialization
+      round-trip (compare output tensors at S4 vs S0).
 
 **Reversibility.** Trivial — keep S0 launcher available; the LiveStore
 service is feature-flagged.
@@ -1028,22 +1224,22 @@ and does not know task IDs.
 
 **Scope.**
 - RolloutWorker becomes a standalone process. It owns:
-  - the SkyRL-v0-293 train and val parquet files,
+  - the SkyRL-v0-293 train parquet files (val split is not exercised — validation is deferred per Sec.11),
   - the `StatefulDataLoader` and its checkpoint,
   - the `AsyncLLMServerManagerDAPO` (or successor) dispatch logic,
   - producer-side filters (zero-variance drop, length cuts),
-  - the eager-push seam (§3.7) — now a network call to LiveStore.
+  - the eager-push seam (Sec.3.7) — now a network call to LiveStore.
 - TrainerAdapter no longer instantiates `ContinuousRolloutProducer`,
   `AsyncLLMServerManagerDAPO`, the DAPO manager, or the `_push_fn`
-  closure. It only calls `get_batch` and `request_validation`.
+  closure. It only calls `get_batch`.
 - The launcher splits: `s3_fullasync_docker.sh` becomes one launcher per
   service (planner picks names).
 - Trainer dependencies removed: `openhands`, `aiohttp`, `fastapi`,
   `uvicorn`, `async_generator` — none are training-time concerns.
-- Validation flow becomes RPC: trainer asks worker
-  `request_validation(env_id, split=val)`, worker dispatches against the
-  EnvironmentProvider, returns groups, trainer scores. **No trainer-local
-  val parquet.**
+- `data.train_files` and `data.val_files` Hydra fields are removed from
+  the trainer config entirely. The trainer has no parquet files.
+  **Validation is not replaced by an RPC at this stage — it is deferred
+  (see Sec.11).**
 - PolicyRegistry exists in minimal form: the trainer keeps direct pool
   publish (no change), and writes the current `policy_version` plus
   `adapter_uri` to a small registry the worker polls. The registry
@@ -1056,17 +1252,36 @@ LiveStore (still S1's same-machine service), TrainerAdapter math.
 (eager-push seam). Also 3.5 (`behavior_policy_version` stamping moves to
 worker, but stamping happens at push, exactly as today).
 
-**Validation.**
-- Trainer image (Docker) shrinks: `openhands` removed.
-- Trainer config no longer references `data.train_files` or
-  `data.val_files`.
-- Validation results match S0/S1 within tolerance (val score variance is
-  the planner's concern; specify a bound).
-- Worker can be restarted independently; trainer no-progress detector
-  fires correctly.
-- Producer-side data ownership is verifiable: kill the trainer mid-run,
-  the worker keeps generating episodes (which the live store will
-  eventually evict, but the worker survives).
+**Validation — contract tests (no training at this stage).**
+
+Run these tests against the extracted RolloutWorker process in isolation:
+- Worker starts, health-probes, and registers with the LiveStore (S1
+  service); live store metrics show the producer_id active.
+- Worker pushes ≥ 1 group to LiveStore within 120 s of starting. Assert
+  token IDs are `list[int]` (invariant 3.1) and `group_uid` is the same
+  across all n siblings (invariant 3.2).
+- `behavior_policy_version` on pushed groups is an `int` stamped by the
+  worker, not None (invariant 3.5).
+- `filter_easy_hard_instance` operates on the worker side: inject a
+  synthetic zero-variance group; assert it does not appear in LiveStore
+  (invariant 3.7).
+- Image check: `docker inspect` the trainer image; assert `openhands`,
+  `aiohttp`, `fastapi`, `uvicorn` are absent.
+- Config check: trainer Hydra config has no `data.train_files` or
+  `data.val_files` fields and imports no dataloader.
+- Isolation check: start worker + LiveStore only (no trainer); verify
+  the worker continues pushing; groups accumulate in the store.
+
+**Training checklist items added at S2** (verified at S4):
+- [ ] Trainer starts from `get_batch` on the network boundary, not from
+      a local dataloader — confirm by checking no parquet I/O in trainer
+      process during a training run.
+- [ ] Worker independence: kill the trainer mid-run; the worker keeps
+      generating (live store push-count increases); trainer restart picks
+      up where it left off via the live store.
+- [ ] `behavior_policy_version` on groups consumed by the trainer matches
+      the version the worker stamped — no off-by-one across the network
+      boundary (row-level invariant 3.5).
 
 **Reversibility.** Higher cost than S1 — the trainer image shrinks and
 the dataloader migrates. Roll back by reverting both image changes and
@@ -1077,7 +1292,7 @@ the other reads from local parquet) so a regression can fall back.
 ### S3. ReplayArchive — durable canonical record
 
 **Goal.** Prove the ReplayArchive slot is real. Every episode the worker
-produces is teed to the archive in canonical `EpisodeRecord` form (§6.1).
+produces is teed to the archive in canonical `EpisodeRecord` form (Sec.6.1).
 The archive is queryable.
 
 **Scope.**
@@ -1087,22 +1302,41 @@ The archive is queryable.
 - The archive supports `append_episodes` and `query`. The minimum query
   predicate set: by `policy_id`, `policy_version`, `environment_id`,
   `split`, and time range. `derive_training_samples` may be deferred.
-- Trust and provenance fields (§6.1) are populated.
+- Trust and provenance fields (Sec.6.1) are populated.
 
 **What does not change.** Hot path. Trainer never reads the archive. Live
 store unchanged.
 
-**Invariants preserved.** All §3. Archive is a tee, not a bottleneck —
+**Invariants preserved.** All Sec.3. Archive is a tee, not a bottleneck —
 push to archive is async-fire-and-forget from the worker's perspective
 (planner specifies durability semantics: at-least-once vs at-most-once
 etc.).
 
-**Validation.**
-- Sample size of N episodes from S2 → archive has N records (within
-  at-least-once semantics).
-- Query by `(policy_id, version_range, env_id)` returns expected counts.
-- One offline job (planner's choice — maybe a reward-distribution
-  histogram) consumes the archive end-to-end.
+**Validation — contract tests (no training at this stage).**
+
+Run these tests against the extracted ReplayArchive in isolation, then
+together with the RolloutWorker from S2:
+- Archive starts and health-probes.
+- `append_episodes` → `query` round-trip: insert a synthetic
+  `EpisodeRecord`; query by `(policy_id, environment_id)`; assert the
+  record is returned.
+- Schema check: the record retrieved has `episode_uid`, `token_ids` as
+  `list[int]`, `trust_level`, and all required provenance fields from Sec.6.1.
+- Tee check: start Worker + LiveStore + Archive together; let the worker
+  produce 1 group; assert (a) the group appears in LiveStore and (b) the
+  pre-filter EpisodeRecord (including episodes dropped by
+  `filter_easy_hard_instance`) appears in the Archive. The live store must
+  not contain the filtered episode.
+- Offline consumer check: a standalone script queries the archive and
+  computes a reward histogram; it does not touch the live store.
+
+**Training checklist items added at S3** (verified at S4):
+- [ ] After a 2-step training run, the archive contains ≥ 1 EpisodeRecord
+      with all provenance fields populated (policy_id, version, env_id,
+      token_ids as list[int]).
+- [ ] Filtered episodes (zero-variance groups) appear in the archive but
+      not in the live store — confirm via archive query count vs live
+      store push-count metric after a real training run.
 
 **Reversibility.** Trivial — disable the tee.
 
@@ -1130,14 +1364,59 @@ The pool itself (vLLM child) is unchanged — it still serves
 **Invariants preserved.** 3.3 (abort gate), 3.4 (pinning), 3.5 (per-row
 version stamping moves but is not changed semantically).
 
-**Validation.**
-- A simulated pool-child failure aborts the trainer (preserves §3.3).
-- Worker version subscription latency below a target bound.
-- Adapter URI manifest is queryable.
+**Validation — contract tests, then the first training run.**
+
+Contract tests (run before training):
+- Registry starts and health-probes.
+- `publish_policy_version` → `get_latest_version` round-trip: published
+  version is the one returned.
+- Abort gate: kill one vLLM child process, then call
+  `publish_policy_version`; assert `endpoints_failed > 0` and the
+  trainer halts (invariant 3.3).
+- Subscription latency: worker receives version update from the registry
+  within the target bound (planner specifies; suggested 5 s locally).
+- Adapter URI manifest: after publish, query the registry; assert the
+  URI is a resolvable path.
+
+**First training run — smoke-test harness (2 steps).** After contract
+tests pass, run the Sec.0.4 harness for the first time against the full
+five-service topology. Work through every item on the accumulated training
+checklist from S1, S2, and S3:
+- Loss at the first publish checkpoint is finite (not NaN, not inf).
+- `endpoints_failed == 0` on publish (invariant 3.3).
+- Token IDs across the full network path are `list[int]`, not strings
+  (invariant 3.1).
+- `behavior_policy_version` per row matches the version the worker stamped
+  (invariant 3.5).
+- Groups consumed by the trainer have all n siblings present (invariant
+  3.2) — no split groups across the wire.
+- Worker receives the published version within the latency target.
+- Archive contains ≥ 1 EpisodeRecord with full provenance fields.
+- All five services shut down cleanly (exit 0, no orphans).
+- All S1, S2, S3 training checklist items checked off.
+
+Step time is compared against the S0 baseline. The delta is the cost of
+the network boundaries added in S1–S4. If it exceeds the planner's
+threshold, investigate before opening S5.
+
+Longer training runs (multi-step curves, WandB sweeps) start after this
+harness is green.
 
 **Reversibility.** Roll back to S3 by re-enabling direct pool publish on
 the trainer and disabling the registry subscription on the worker.
 Higher-cost rollback than S2 because the publish path moves.
+
+---
+
+### Pluggability proofs — S5 through S8
+
+S5–S8 are independent. Each proves one slot is genuinely replaceable by
+swapping in a second adapter without touching the other four services or the
+core pipeline. They open only after S4 is green. They can run in any order.
+Each still uses the smoke-test harness (updated to route a subset of traffic
+to the new adapter) as the primary validation gate.
+
+---
 
 ### S5. Multi-producer with heterogeneous EnvironmentProvider adapters
 
@@ -1215,7 +1494,7 @@ versioning), 3.6 (pop-on-sample), 3.8 (no trainer owns data).
 second backend; verify pinning equivalent and per-token logprobs.
 
 **Scope.**
-- An SGLang adapter implements the §5.2 interface plus a pinning
+- An SGLang adapter implements the Sec.5.2 interface plus a pinning
   guarantee (invariant 3.4).
 - A subset of RolloutWorkers route to SGLang; others stay on vLLM.
 - TrainerAdapter is unchanged.
@@ -1245,7 +1524,7 @@ async cross-region replication).
 - Per-trainer adapter namespaces in the PolicyRegistry.
 - Cross-region archive replication if multi-region is in scope.
 
-**Invariants preserved.** All §3. The aggregation service's output is
+**Invariants preserved.** All Sec.3. The aggregation service's output is
 itself a publish, so 3.3 (abort gate) and 3.4 (pinning) extend naturally.
 
 **Validation.** Long-running. The criterion is qualitative: "the
@@ -1258,32 +1537,46 @@ single-trainer publish.
 ### Stage map
 
 ```
-                 S0 (today)
+═══════════════════════════════════════════════
+  SEQUENTIAL CORE BOUNDARY CUTS (S0 → S4)
+  Each depends on the previous.
+  Smoke-test harness gates every stage.
+═══════════════════════════════════════════════
+
+             S0  reference baseline
+                 └─ smoke-test harness created here
                     │
                     ▼
-                 S1  LiveStore network boundary
+             S1  LiveStore extracted as a service
+                 └─ live-path wire schema sealed
                     │
                     ▼
-                 S2  RolloutWorker is its own process
-                     └── data ownership migrates here
+             S2  RolloutWorker extracted as a service
+                 └─ data ownership leaves the trainer
                     │
                     ▼
-                 S3  ReplayArchive exists
+             S3  ReplayArchive wired as a tee
+                 └─ every episode durable from here
                     │
                     ▼
-                 S4  PolicyRegistry is single source of truth
-                    │
-       ┌────────────┼────────────┬─────────────┐
-       ▼            ▼            ▼             ▼
-       S5           S6           S7            S8
-   multi-          alt          alt        federation
-  producer       trainer     inference     (multi-trainer
-  (heterog       (ROLL or     (SGLang)      + aggregation
-   envs)          slime)                    + multi-region)
+             S4  PolicyRegistry is single source of truth
+                 └─ Sec.0 startup sequence fully operational
+
+═══════════════════════════════════════════════
+  INDEPENDENT PLUGGABILITY PROOFS (S5 – S8)
+  Any order. Open only after S4 is green.
+  Prove each slot is replaceable.
+═══════════════════════════════════════════════
+
+     S5           S6           S7            S8
+ multi-worker    alt-trainer  alt-backend  federation
+ (heterog envs)  (ROLL/slime) (SGLang)     (multi-trainer
+                                            + aggregation)
 ```
 
-S5–S8 ordering is by need, not by dependency. They are independent
-proofs that the slot model is real.
+S5–S8 are independent proofs that the slot model is real. They do not need
+to run in order. Each swaps one adapter into one slot and verifies the other
+four services are unaffected.
 
 ---
 
@@ -1301,23 +1594,23 @@ preserves, recast in slot terms:
    the three-stage pipeline (init → run → eval), the agent handler
    registry. ProRL is the current adapter for slot 5.1; its internal
    shape stays. The boundary is the EnvironmentProvider interface
-   (§5.1, Appendix A); the planner exposes ProRL's existing operations
+   (Sec.5.1, Appendix A); the planner exposes ProRL's existing operations
    as adapter methods, not the other way around.
 
 3. **Token-in/token-out invariant** —
    `openhands/llm/nvidia/qwen3.py`, `qwen2_5_vl.py`. Unchanged. Wire
-   schemas store token IDs (§3.1).
+   schemas store token IDs (Sec.3.1).
 
 4. **Chat template logic** — `chat_template_manager.py`. Unchanged.
 
 5. **`filter_easy_hard_instance` (zero-variance drop)** — stays
-   producer-side. The store never sees zero-variance groups (§3.7).
+   producer-side. The store never sees zero-variance groups (Sec.3.7).
 
 6. **GRPO/DAPO advantage computation** — stays trainer-side
-   (per principle 4.4). Whole-group integrity (§3.2).
+   (per principle 4.4). Whole-group integrity (Sec.3.2).
 
 7. **Temporal IS correction** — `core_algos.py:664-690` stays trainer-side.
-   `behavior_log_probs` come from the wire (§6.2); `old_log_prob`
+   `behavior_log_probs` come from the wire (Sec.6.2); `old_log_prob`
    recomputed by the FSDP actor.
 
 8. **Reward computation** — stays trainer-side via the reward manager;
@@ -1339,10 +1632,37 @@ The following are intentionally **not** in scope of this design document.
 Some are explicit non-goals (won't happen). Others are deferred to the
 planner.
 
-**Explicit non-goals:**
+**Explicitly deferred — trainer-triggered validation:**
+
+Connecting trainer-triggered evaluation passes (the trainer asking the
+rollout worker to run a val split and return scored groups) to an async
+decoupled setup is a hard scheduling problem: the trainer must pause or
+interleave production rollouts, the worker must switch task splits, and
+results must be routed back to the trainer in a form the FSDP actor can
+consume without a separate forward pass across a network boundary. Getting
+this wrong is a common source of silent failures and unexpected latency
+spikes.
+
+**Validation is therefore out of scope for S0–S4.** Specifically:
+- `run_validation` is not on the RolloutWorker RPC surface.
+- `request_validation` and `score_validation` are not on the TrainerAdapter
+  interface.
+- `pause_production` and `resume_production` are not implemented.
+- `data.val_files` is removed from trainer config at S2 and not replaced.
+- The 23-instance val set (SkyRL-v0-293) is not exercised by any S0–S4
+  validation gate.
+
+The smoke-test harness (Sec.0.4) covers training correctness (finite loss,
+group integrity, token IDs, publish abort gate) without needing val rollouts.
+
+Validation design resumes after S4. At that point, the service boundaries
+and the async scheduling model will be clear enough to reason about the
+problem without speculative abstractions.
+
+**Explicit non-goals (won't happen in this document):**
 - Authentication, authorization, mTLS, per-producer API keys.
   In-cluster trust is assumed (same VPC / security group). External
-  partner contributions are gated by `trust_level` routing (§6.3) but
+  partner contributions are gated by `trust_level` routing (Sec.6.3) but
   **not** by network-layer auth in this document.
 - High availability for the LiveStore. The buffer is ephemeral; loss
   is acceptable.
@@ -1360,7 +1680,7 @@ planner.
 - Tensor serialization format (single large message vs streamed
   chunks).
 - Backpressure model (advisory hint vs blocking; both are workable —
-  see §12 question 4).
+  see Sec.12 question 4).
 - Service extraction order *within* a stage. The stages here say what
   must be true at the end of each; the planner chooses how to get there.
 - Deployment topology for S5–S8 (multi-region, K8s manifests, autoscale
@@ -1368,7 +1688,7 @@ planner.
 - Cost / capacity / throughput numbers — none have been measured against
   the new shape; the planner specifies a benchmark plan.
 - Exact adapter mapping for ROCK / GEM / ORS environment integrations
-  beyond the §5.1 interface — the planner specifies the first concrete
+  beyond the Sec.5.1 interface — the planner specifies the first concrete
   second adapter and writes the integration plan.
 
 ---
@@ -1420,7 +1740,7 @@ specific implementation path.
    (simplest); migrate when S5 makes the worker fan-out.
 
 7. **External / partner trajectory routing.** Trust levels and routing
-   matrix are sketched in §6.3, but the planner specifies the
+   matrix are sketched in Sec.6.3, but the planner specifies the
    per-trainer-adapter routing rules (which trust levels each adapter
    admits, what filtering happens at LiveStore ingest, etc.).
 
@@ -1433,7 +1753,7 @@ specific implementation path.
    simplicity), NFS (multi-machine simplicity), S3 (multi-region).
    Planner picks per deployment.
 
-10. **`TrainingSample` / `TrainingGroup` schema versioning.** §6.2
+10. **`TrainingSample` / `TrainingGroup` schema versioning.** Sec.6.2
     states `schema_version`. The planner specifies the compatibility
     policy: forward-compatible field addition (adapters ignore unknown
     fields), strict version match, semver minor for additions only?
@@ -1454,7 +1774,7 @@ specific implementation path.
     on failure, dedup at archive) vs at-most-once (worker
     fire-and-forget; some data loss tolerated). Planner picks.
 
-14. **Aggregation algorithm in S8.** Out of scope per §11, but the
+14. **Aggregation algorithm in S8.** Out of scope per Sec.11, but the
     planner identifies the prerequisite work (adapter-delta arithmetic
     in the relevant trainer adapter; namespace conventions in the
     PolicyRegistry).
@@ -1535,15 +1855,8 @@ class RolloutWorker(Protocol):
         filter_strategy: FilterStrategy,
     ) -> None: ...
 
-    # RPC surface for the trainer.
-    def pause_production(self) -> Ack: ...
-    def resume_production(self) -> Ack: ...
-    def run_validation(
-        self,
-        env_id: str,
-        split: str,
-        options: dict,
-    ) -> list[TrainingGroup]: ...
+    # RPC surface for the trainer (S0–S4 scope).
+    # pause_production / resume_production / run_validation are deferred (Sec.11).
     def get_dataloader_state(self) -> bytes: ...
     def load_dataloader_state(self, state: bytes) -> Ack: ...
 ```
@@ -1625,16 +1938,10 @@ class TrainerAdapter(Protocol):
         adapter_uri: str,
     ) -> PublishResult: ...
 
-    def request_validation(
-        self,
-        env_id: str,
-        split: str,
-    ) -> list[TrainingGroup]: ...
-
-    def score_validation(
-        self,
-        groups: list[TrainingGroup],
-    ) -> ValidationMetrics: ...
+    # request_validation and score_validation are deferred (Sec.11).
+    # Trainer-triggered async validation requires solving scheduling,
+    # flow control, and result routing across decoupled services — left
+    # for after S4 is stable.
 ```
 
 ### A.7 PolicyRegistry
@@ -1686,14 +1993,14 @@ where, what stays.
 | `scripts/serving/_vllm_child.py` | 5.2 InferenceBackend | Stays. Becomes the vLLM-pinning adapter. |
 | `scripts/serving/launch_remote_vllm_pool.sh` | 5.2 (orchestration) | Stays. Pool orchestration is internal to the vLLM adapter. |
 | `trainer_integration/verl/verl_custom/replay/continuous_producer.py` | 5.3 RolloutWorker | Migrates to the worker process at S2. Daemon thread becomes a service main loop. |
-| `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | 5.3 RolloutWorker | Migrates. The DAPO eager-push seam (§3.7) lives here. |
+| `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | 5.3 RolloutWorker | Migrates. The DAPO eager-push seam (Sec.3.7) lives here. |
 | `trainer_integration/verl/verl_custom/replay/trajectory_store.py` | 5.4 LiveStore | The data structure stays; the process boundary changes at S1. |
 | (none today) | 5.5 ReplayArchive | New at S3. |
-| `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py`, `ray_trainer_dapo.py` | 5.6 TrainerAdapter | Stays as the VERL adapter. Loses dataloader, val-loader, and direct rollout-mgr at S2; loses direct pool publish at S4. |
+| `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py`, `ray_trainer_dapo.py` | 5.6 TrainerAdapter | Stays as the VERL adapter. Loses dataloader and direct rollout-mgr at S2; loses direct pool publish at S4. Validation logic removed (deferred per Sec.11). |
 | `_publish_lora_adapter` in `ray_trainer.py` | 5.7 PolicyRegistry (today) | Migrates to PolicyRegistry at S4. |
 | `s3_fullasync_docker.sh` launcher | (cross-cutting) | Splits across stages: into worker launcher, trainer launcher, store launcher, registry launcher per the planner's choice. |
 | `data.train_files` Hydra config | 5.6 today, 5.3 after S2 | Moves from trainer config to worker config. |
-| `data.val_files` Hydra config | same | Same. Validation flow becomes RPC after S2. |
+| `data.val_files` Hydra config | same | Removed from trainer config at S2. Not replaced by an RPC — validation is deferred (Sec.11). |
 
 ---
 
@@ -1704,10 +2011,10 @@ adapter would have to do.
 
 | Framework | Slot(s) | Adapter notes |
 |---|---|---|
-| **ROCK** (Alibaba) | 5.1 EnvProvider | ROCK is sandbox provisioning + GEM-compatible env interface. Adapter wraps ROCK's `Sandbox` lifecycle and `rock.make()` / `reset()` / `step()` to the §5.1 five-method interface. State: ROCK's Admin/Worker/Rocklet topology is internal to the adapter; the fabric only sees `EnvironmentProvider`. |
-| **GEM** (axon-rl) | 5.1 EnvProvider | GEM is the standard agentic-LLM Gymnasium. Adapter wraps `make/reset/step` (with text observations and tool-call actions) to the §5.1 interface. GEM's tool wrappers become the `act(ToolCall)` argument's input dict. |
-| **ORS / OpenReward** | 5.1 EnvProvider | HTTP+SSE protocol. Adapter is essentially a thin HTTP client mapping the §5.1 methods to ORS endpoints (`/tasks` → `list_tasks`, `/create_session` → `create_episode`, `/{env}/prompt` → `get_prompt`, `/{env}/call` → `act`). Streamed reward updates from `/{env}/call` aggregate into `StepResult.reward`. |
-| **vLLM** (current) | 5.2 InferenceBackend | Already implemented (`_vllm_child.py`). Pinning swap protocol is the reference for the §5.2 pinning constraint. |
+| **ROCK** (Alibaba) | 5.1 EnvProvider | ROCK is sandbox provisioning + GEM-compatible env interface. Adapter wraps ROCK's `Sandbox` lifecycle and `rock.make()` / `reset()` / `step()` to the Sec.5.1 five-method interface. State: ROCK's Admin/Worker/Rocklet topology is internal to the adapter; the fabric only sees `EnvironmentProvider`. |
+| **GEM** (axon-rl) | 5.1 EnvProvider | GEM is the standard agentic-LLM Gymnasium. Adapter wraps `make/reset/step` (with text observations and tool-call actions) to the Sec.5.1 interface. GEM's tool wrappers become the `act(ToolCall)` argument's input dict. |
+| **ORS / OpenReward** | 5.1 EnvProvider | HTTP+SSE protocol. Adapter is essentially a thin HTTP client mapping the Sec.5.1 methods to ORS endpoints (`/tasks` → `list_tasks`, `/create_session` → `create_episode`, `/{env}/prompt` → `get_prompt`, `/{env}/call` → `act`). Streamed reward updates from `/{env}/call` aggregate into `StepResult.reward`. |
+| **vLLM** (current) | 5.2 InferenceBackend | Already implemented (`_vllm_child.py`). Pinning swap protocol is the reference for the Sec.5.2 pinning constraint. |
 | **SGLang** (and sgl-router) | 5.2 InferenceBackend | Adapter wraps SGLang's generation API plus router. Must verify per-token logprobs and a pinning-equivalent guarantee. slime uses SGLang as its inference module, so an SGLang adapter unlocks easier slime trainer plug-in. |
 | **TGI / TRT-LLM / hosted APIs** | 5.2 InferenceBackend | Adapters as needed. Hosted APIs without per-token logprobs are usable for eval-only flows (matches `trust_level=external-eval-only` routing). |
 | **VERL `RayPPOTrainerDAPO`** (current) | 5.6 TrainerAdapter | Already implemented. Loses dataloader at S2 per invariant 3.8. |
@@ -1737,11 +2044,11 @@ relevant — the table is a directory, not a checklist.
 | `tdd-workflow` | Author Protocol contract tests (Appendix A) before implementing each slot adapter. |
 | `python-testing` | Pytest fixtures, markers (`integration`/`slow`/`real_data`), mocking at adapter boundaries, coverage targets. |
 | `python-patterns` | Type hints, dataclasses, asyncio idioms for new slot services. |
-| `api-design` | Wire-schema versioning (`schema_version`), Protocol method shapes, query semantics for ReplayArchive (§5.5). |
+| `api-design` | Wire-schema versioning (`schema_version`), Protocol method shapes, query semantics for ReplayArchive (Sec.5.5). |
 | `documentation-lookup` | Live API docs via Context7 for external adapters (ROCK, GEM, ORS, SGLang, ROLL, slime). |
 | `eval-harness` | Codify each per-stage `Validation` gate as a pass/fail eval; gate stage close on it. |
 | `verification-loop` | End-of-stage close-out: `make lint`, fast pytest loop, coverage report. |
-| `security-review` | Trust-level routing review at S5+ when partner trajectories arrive (per §6.3). |
+| `security-review` | Trust-level routing review at S5+ when partner trajectories arrive (per Sec.6.3). |
 
 The four context-management skills (`repo-architecture`,
 `karpathy-guidelines`, `strategic-compact`, `documentation-lookup`) are the
@@ -1750,7 +2057,7 @@ They keep the working set small and bounded across the seven slots.
 
 ### D.2 Agent-team shape — track components, not turns
 
-The slot model has **seven components** (§5). The natural execution shape
+The slot model has **seven components** (Sec.5). The natural execution shape
 mirrors that: a **team lead** coordinates the migration; **teammates** own
 per-slot adapter work and challenge each other's slot interactions. This
 is the [agent-teams](https://code.claude.com/docs/en/agent-teams#start-your-first-agent-team)
@@ -1766,7 +2073,7 @@ Why use a team here:
   RolloutWorker / LiveStore teammates; 3.3 / 3.5 live with TrainerAdapter
   / PolicyRegistry teammates; 3.8 (data ownership) is the lead's
   cross-cutting responsibility.
-- **Parallel investigation.** §12's open questions (transport, storage,
+- **Parallel investigation.** Sec.12's open questions (transport, storage,
   schema migration timing, archive ingest semantics) benefit from
   independent exploration before convergence. Teammates with explicit
   adversarial roles surface failure modes a single session under-explores.
@@ -1777,93 +2084,224 @@ Why use a team here:
 
 Bootstrap sequence:
 1. **Planning team** (3 teammates: architect, reviewer, devil's-advocate)
-   to resolve §12 open questions per stage before implementation begins.
+   to resolve Sec.12 open questions per stage before implementation begins.
 2. **Per-stage execution team** scoped to the slots that stage touches
    (e.g. S1 = LiveStore + TrainerAdapter teammates; S6 = TrainerAdapter +
    PolicyRegistry + RolloutWorker teammates).
 3. **Cleanup discipline.** Per the agent-teams contract, only the lead
    runs cleanup; teammates shut down on request before the lead cleans up.
 
-### D.3 Step-by-step execution and the running progress artifact
+### D.3 Recursive implementation loop — how to execute a stage
 
-The plan is sequenced (S1 → S2 → S3 → S4) with parallel proofs (S5–S8).
-The execution agent works **one stage at a time** and only opens a new
-stage when the previous stage's `Validation` gates are green and
-`Reversibility` is preserved. No stage runs partially in production while
-the next is begun.
+Each stage S in S0–S8 runs the same recursive loop. The agent does not move
+to S(n+1) until this loop exits green for S(n).
 
-**Maintain a running progress artifact** at
+```
+STAGE LOOP for stage S:
+
+1. OPEN the progress artifact (plans-n-solutions/rollout_fabric_progress.md).
+   a. Mark stage S status → "in progress".
+   b. Record the opening commit SHA in Notes.
+   c. Copy the Goal verbatim from Sec.9.
+   d. Expand the task list into implementation checkboxes.
+
+2. WRITE TESTS FIRST.
+   For each validation gate in Sec.9.S, author the test or harness assertion
+   before writing production code.
+   For each Sec.3.x invariant the stage touches, author or extend the
+   corresponding invariant test in tests/invariants/.
+
+3. IMPLEMENT.
+   Work through tasks one checkpoint at a time. Mark each checkbox done
+   when the test for that task passes. Do not expand scope beyond the stage.
+
+4. RUN TESTS.
+   For S1, S2, S3: run the stage's contract tests and unit tests in
+   isolation (not a training loop — the system is partially extracted and
+   cannot form a complete training loop at these stages).
+   For S4: run the full smoke-test harness (Sec.0.4), including the
+   accumulated training checklist from S1–S3. This is the first training
+   run after S0.
+
+   a. If tests pass:
+        Record "tests: green @ <timestamp>" in Notes.
+        Go to step 5.
+   b. If tests fail:
+        Record the failure verbatim in the Errors section of the progress
+        artifact (include: timestamp, error message, stack trace if short).
+        Fix the root cause.
+        Go back to step 4.
+   c. If looping ≥ 3 times without green tests:
+        Stop. Describe the stuck point to the user before continuing.
+
+5. RUN FAST PYTEST LOOP.
+   pytest -m "not integration and not slow and not real_data" tests/ -q
+   a. If all pass: go to step 6.
+   b. If any fail: record failure in Errors, fix, go back to step 4.
+
+6. CHECK COVERAGE.
+   Run coverage on the new slot's module.
+   Minimum: 80% overall; 100% for reward-scorer, message-format,
+   serialization, and token-handling paths.
+   If below threshold: add tests, go back to step 5.
+
+7. MARK GREEN.
+   a. Check all validation-gate checkboxes in the progress artifact.
+   b. Check all invariant-test checkboxes.
+   c. Set stage status → "green".
+   d. Record the closing commit SHA in Notes.
+   e. Update the artifact header: active stage → S(n+1), schema_version
+      if changed, last harness run result.
+
+8. VERIFY REVERSIBILITY.
+   Start the S(n-1) launcher; confirm it runs cleanly.
+   Record the rollback note in the progress artifact.
+   Only then open stage S(n+1).
+```
+
+**Rules:**
+- Never skip step 2 (write tests first). If time pressure is the reason,
+  that is a scope problem — reduce the stage, do not skip the test.
+- Never skip step 8 (reversibility). A stage that cannot be rolled back
+  is not green.
+- Never start S(n+1) while S(n) is "in progress". The progress artifact
+  enforces this — there is no "partially green" status.
+- Steps 4 and 5 iterate until both are simultaneously green. A green step 5
+  after a red step 4 is not sufficient.
+
+### D.4 Progress artifact — format and discipline
+
+Maintain a running progress artifact at
 `plans-n-solutions/rollout_fabric_progress.md`. It is the migration's
-single source of truth for "where are we now" and its audit log.
+single source of truth for "where are we now." If it disagrees with chat
+or PR descriptions, the artifact is correct by construction.
 
-Discipline:
-- One section per stage (S0 … S8), each with:
-  - **Goal** — copied verbatim from §9.
-  - **Tasks** — checkbox list, expanded as the stage starts.
-  - **Validation gates** — checkbox per item from the §9 stage's
-    `Validation` subsection.
-  - **Invariant tests** — checkbox per §3.x invariant the stage touches.
-  - **Status** — `not started` / `in progress` / `green` / `rolled back`.
-  - **Notes** — links to commits, PRs, decisions on §12 open questions.
-- Update on every meaningful checkpoint, not at end-of-stage. A merged
-  PR, a failed test, a rollback all warrant an update.
-- Never delete entries; mark them done. The artifact is also the
-  migration's audit log.
-- The artifact's header records: the active stage, the wire
-  `schema_version`, and the latest `policy_version` anchor commit. A
-  teammate joining mid-migration should be able to orient in under 60
-  seconds from the header alone.
-
-Skeleton to paste at the start of S1:
+**Artifact header** (always visible at the top):
 
 ```markdown
 # Rollout Fabric Migration — Progress
 
-**Active stage:** S0
-**Schema version:** v0 (current TrajectoryStore shape)
+**Active stage:** S{n}
+**Schema version:** v{x} (description of shape)
 **Policy version anchor:** <commit-sha>
-
-## S0 — Today (reference baseline)
-- [x] Goal: full async loop runs end-to-end as today
-- Validation
-  - [x] val_before_train pass
-  - [x] step-1 trainer step
-  - [x] step-20 wedge stabilization
-- Notes: starting commit is <sha>.
-
-## S1 — LiveStore behind a network boundary
-- [ ] Goal: prove the LiveStore slot is real (see §9.S1)
-- Tasks
-  - [ ] LiveStore Protocol contract tests (§A.4) authored
-  - [ ] Same-machine LiveStore service implemented
-  - [ ] Trainer client + push_group / get_batch wiring
-  - [ ] No-progress detector moved server-side
-  - [ ] Wire-schema §6.2 sealed at v1
-- Validation gates
-  - [ ] Trainer step times within X% of S0
-  - [ ] WandB curves indistinguishable from S0 over 20 steps
-  - [ ] Live-store kill-restart recovery via no-progress detector
-- Invariants exercised
-  - [ ] 3.1 token-in/out preserved on the wire
-  - [ ] 3.2 group integrity preserved
-  - [ ] 3.5 per-row behavior_policy_version stamped
-  - [ ] 3.6 pop-on-sample preserved
-  - [ ] 3.7 eager-push seam preserved
-- Status: not started
+**Last training run:** S0 baseline | S4 harness — pass | fail | not yet run
+**Open training checklist items:** {count} (from S1+S2+S3; resolved at S4)
 ```
 
-The progress artifact supersedes ad-hoc status updates in chat or PR
-descriptions. If it disagrees with chat, the artifact is correct by
-construction.
+**Per-stage entry format:**
 
-### D.4 Target file layout — modularity over legacy
+```markdown
+## S{n} — {Stage name}
+
+**Status:** not started | in progress | green | rolled back
+**Opening commit:** <sha>
+**Closing commit:** <sha> (when green)
+
+### Goal
+{Copied verbatim from Sec.9.}
+
+### Tasks
+- [ ] {Task description}
+
+### Validation gates
+For S1–S3: contract and unit tests (no training).
+For S4: smoke-test harness + full training checklist.
+- [ ] {Gate from Sec.9.S{n} Validation}
+
+### Invariant tests
+- [ ] 3.{x} {invariant name} — {test file and line}
+
+### Training checklist
+<!-- Items added during this stage that must be verified when training
+     runs for the first time (at S4). Plain text. Never delete entries.
+     Format: "what to check" — "how to check it". -->
+- {what to check} — {how to verify at S4}
+
+### Errors
+<!-- Record every test or harness failure verbatim during the recursive
+     loop. Never delete. Format: [timestamp] description + resolution. -->
+
+### Rollback notes
+<!-- What state to restore, and how, if this stage must be rolled back.
+     Filled in at step 8 of the recursive loop before opening S{n+1}. -->
+
+### Notes
+<!-- Commits, PRs, decisions on Sec.12 open questions, transport and storage
+     choices, any other decisions made during this stage. -->
+```
+
+The **training checklist** accumulates across stages. Before opening the
+S4 harness run, collect all checklist items from S1, S2, S3 into a single
+checklist at the top of the S4 section. The harness run works through each
+item and checks it off. An unchecked item at the end of the S4 harness run
+is a blocking failure — the system is not green until every item is resolved.
+
+**Discipline:**
+- Update on every meaningful checkpoint, not only at end-of-stage. A
+  merged PR, a failed test, a rollback decision, and a Sec.12 open-question
+  resolution all warrant an update.
+- Never delete entries; mark them done. The artifact doubles as the
+  migration's audit log.
+- A teammate joining mid-migration must be able to orient in under 60
+  seconds from the artifact header alone.
+
+**Skeleton — paste at the start of S0:**
+
+```markdown
+# Rollout Fabric Migration — Progress
+
+**Active stage:** S1
+**Schema version:** v0 (current in-process TrajectoryStore shape)
+**Policy version anchor:** <starting-commit-sha>
+**Last training run:** S0 baseline — pass
+**Open training checklist items:** 0 (grows as S1–S3 run)
+
+## S0 — Reference baseline
+
+**Status:** green
+**Opening commit:** <sha>
+**Closing commit:** <sha>
+
+### Goal
+Reference baseline. Full async loop runs in one process, one container.
+Smoke-test harness is created at this stage.
+
+### Tasks
+- [x] Harness script created at tests/harness/smoke_test.sh
+- [x] Harness runs end-to-end cleanly (restart ProRL + vLLM workers, start trainer)
+- [x] Harness asserts token IDs are list[int], not list[str]
+- [x] Harness asserts behavior_policy_version is int
+- [x] Harness asserts endpoints_failed == 0 on first publish
+- [x] Harness shuts down cleanly (all exit 0)
+
+### Validation gates
+- [x] Harness runs cleanly against S0 in-process topology
+- [x] S0 step time, loss, and endpoints_failed recorded as reference values
+
+### Invariant tests
+- [ ] 3.1 token-in/out — tests/invariants/test_token_ids.py
+- [ ] 3.3 endpoints_failed abort — tests/invariants/test_publish_abort.py
+- [ ] 3.5 behavior_policy_version per-row — tests/invariants/test_version_stamp.py
+- [ ] 3.6 pop-on-sample — tests/invariants/test_pop_on_sample.py
+
+### Errors
+<!-- none yet -->
+
+### Rollback notes
+N/A — this is the baseline; no prior stage to roll back to.
+
+### Notes
+Starting commit: <sha>.
+```
+
+### D.5 Target file layout — modularity over legacy
 
 The current repo layout is a historical artifact. Slot 5.1 internals
 sit under `openhands/` and `openhands/nvidia/`; the live store, producer,
 and trainer customizations sit under `trainer_integration/verl/verl_custom/`;
 serving lives under `scripts/serving/`; tests are organized by today's
 process topology. None of that layout is a contract. The slot model
-(§5) is.
+(Sec.5) is.
 
 The execution agent **is authorized** to define a target file layout
 that aligns with the slot model, and to migrate code into it
@@ -1884,10 +2322,10 @@ trainer_adapters/
   roll/                   # slot 5.6 — added at S6
   slime/                  # slot 5.6 — added at S6
 policy_registry/          # slot 5.7 — was _publish_lora_adapter, new home at S4
-schemas/                  # §6 wire schemas, single source of truth
+schemas/                  # Sec.6 wire schemas, single source of truth
 tests/
-  invariants/             # §3.1–§3.8 regression gates
-  contracts/              # §A.1–§A.7 protocol contract tests
+  invariants/             # Sec.3.1–Sec.3.8 regression gates
+  contracts/              # Sec.A.1–Sec.A.7 protocol contract tests
   slots/                  # per-slot internal tests
 ```
 
@@ -1910,7 +2348,7 @@ of moving files — it is part of what proves the slot model is real.
 
 The `git mv`-vs-`git rm + git add` decision (preserve history vs clean
 break) is the planner's call per move; both are acceptable. The
-progress artifact (§D.3) records every move as a Note on the relevant
+progress artifact (Sec.D.3) records every move as a Note on the relevant
 stage so reviewers can trace history.
 
 ---

@@ -16,34 +16,35 @@
 
 import argparse
 import asyncio
+import multiprocessing
 import os
+import threading
+import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing import Process
+from typing import Any, Dict, List, Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from openhands.nvidia.async_server_process import OpenHandsServer as OpenHandsServer_Process
 from openhands.nvidia.async_server import OpenHandsServer as OpenHandsServer_Thread
+from openhands.nvidia.async_server_process import (
+    OpenHandsServer as OpenHandsServer_Process,
+)
+from openhands.nvidia.logger import nvidia_logger as logger
 from openhands.nvidia.registry import FunctionNotRegisteredError
 from openhands.nvidia.utils import (
+    CancelRequest,
     JobTimeoutError,
     LLMServerRequest,
     NoLLMServerError,
     ProcessRequest,
-    CancelRequest,
     ServerNotRunningError,
     process_with_timeout,
 )
-from openhands.nvidia.logger import nvidia_logger as logger
 from openhands.runtime.impl.singularity.singularity_runtime import kill_process_tree
-
-import multiprocessing
-from multiprocessing import Process, Queue
-import threading
-import uuid
-import traceback
-from typing import Optional, Dict, Any, List
 
 app = FastAPI(title='OpenHands Async Server API')
 
@@ -57,7 +58,7 @@ request_queue: Optional[multiprocessing.queues.Queue] = None
 job_result_queue: Optional[multiprocessing.queues.Queue] = None
 control_response_queue: Optional[multiprocessing.queues.Queue] = None
 response_thread: Optional[threading.Thread] = None
-result_futures: Dict[str, "asyncio.Future"] = {}
+result_futures: Dict[str, 'asyncio.Future'] = {}
 futures_lock = threading.Lock()
 accepting_requests = False
 accepting_requests_lock = threading.Lock()
@@ -111,7 +112,9 @@ def _response_listener():
 
             # Check if future is already done (completed, cancelled, or has exception)
             if fut.done():
-                logger.debug(f'Future for job {job_id} is already done (cancelled: {fut.cancelled()}), skipping result')
+                logger.debug(
+                    f'Future for job {job_id} is already done (cancelled: {fut.cancelled()}), skipping result'
+                )
                 continue
 
             if ok:
@@ -123,17 +126,25 @@ def _response_listener():
                         try:
                             fut.set_exception(e)
                         except Exception:
-                            logger.debug(f'Could not set exception on future for job {job_id}: {e}')
+                            logger.debug(
+                                f'Could not set exception on future for job {job_id}: {e}'
+                            )
                     else:
-                        logger.debug(f'Future for job {job_id} was completed while setting exception: {e}')
+                        logger.debug(
+                            f'Future for job {job_id} was completed while setting exception: {e}'
+                        )
             else:
                 try:
                     fut.set_exception(RuntimeError(msg.get('error', 'Unknown error')))
                 except Exception:
                     if not fut.done():
-                        logger.debug(f'Could not set exception on future for job {job_id}')
+                        logger.debug(
+                            f'Could not set exception on future for job {job_id}'
+                        )
                     else:
-                        logger.debug(f'Future for job {job_id} was completed while setting exception')
+                        logger.debug(
+                            f'Future for job {job_id} was completed while setting exception'
+                        )
         except Exception as e:
             logger.warning(f'Response listener encountered error: {e}')
 
@@ -173,14 +184,21 @@ def server_worker(
         server.start()
 
         # Internal executors for job concurrency and any threaded work inside process_with_timeout
-        job_executor_workers = server.max_init_workers + server.max_run_workers + server.max_eval_workers + 30
+        job_executor_workers = (
+            server.max_init_workers
+            + server.max_run_workers
+            + server.max_eval_workers
+            + 30
+        )
         job_executor = ThreadPoolExecutor(max_workers=job_executor_workers)
         inner_thread_pool = ThreadPoolExecutor(max_workers=job_executor_workers)
 
         running = True
-        submitted_futures: Dict[str, "concurrent.futures.Future"] = {}
+        submitted_futures: Dict[str, 'concurrent.futures.Future'] = {}
 
-        def _submit_job(job_id: str, instance: dict, sampling_params: dict, timeout: Optional[float]):
+        def _submit_job(
+            job_id: str, instance: dict, sampling_params: dict, timeout: Optional[float]
+        ):
             t = timeout if timeout is not None else global_timeout_local
 
             def job_fn():
@@ -196,7 +214,14 @@ def server_worker(
                             job_id=job_id,
                         )
                     )
-                    result_q.put({'type': 'result', 'job_id': job_id, 'ok': True, 'result': result})
+                    result_q.put(
+                        {
+                            'type': 'result',
+                            'job_id': job_id,
+                            'ok': True,
+                            'result': result,
+                        }
+                    )
                 except Exception as ex:
                     result_q.put(
                         {
@@ -237,12 +262,24 @@ def server_worker(
                     if fut is not None:
                         fut.cancel()
                     # Acknowledge cancel
-                    ctrl_resp_q.put({'type': 'cancel_ack', 'request_id': msg.get('request_id'), 'ok': True})
+                    ctrl_resp_q.put(
+                        {
+                            'type': 'cancel_ack',
+                            'request_id': msg.get('request_id'),
+                            'ok': True,
+                        }
+                    )
 
                 elif msg_type == 'add_llm_server':
                     try:
                         server.add_llm_server_address(msg['address'])
-                        ctrl_resp_q.put({'type': 'add_llm_server_ack', 'request_id': msg.get('request_id'), 'ok': True})
+                        ctrl_resp_q.put(
+                            {
+                                'type': 'add_llm_server_ack',
+                                'request_id': msg.get('request_id'),
+                                'ok': True,
+                            }
+                        )
                     except Exception as ex:
                         ctrl_resp_q.put(
                             {
@@ -256,7 +293,13 @@ def server_worker(
                 elif msg_type == 'clear_llm_server':
                     try:
                         server.clear_llm_server_addresses()
-                        ctrl_resp_q.put({'type': 'clear_llm_server_ack', 'request_id': msg.get('request_id'), 'ok': True})
+                        ctrl_resp_q.put(
+                            {
+                                'type': 'clear_llm_server_ack',
+                                'request_id': msg.get('request_id'),
+                                'ok': True,
+                            }
+                        )
                     except Exception as ex:
                         ctrl_resp_q.put(
                             {
@@ -272,7 +315,14 @@ def server_worker(
                         status = server.status()
                     except Exception as ex:
                         status = {'error': str(ex)}
-                    ctrl_resp_q.put({'type': 'status_ack', 'request_id': msg.get('request_id'), 'ok': True, 'status': status})
+                    ctrl_resp_q.put(
+                        {
+                            'type': 'status_ack',
+                            'request_id': msg.get('request_id'),
+                            'ok': True,
+                            'status': status,
+                        }
+                    )
 
                 elif msg_type == 'stop':
                     running = False
@@ -295,7 +345,13 @@ def server_worker(
                         server.stop()
                     except Exception:
                         pass
-                    ctrl_resp_q.put({'type': 'stop_ack', 'request_id': msg.get('request_id'), 'ok': True})
+                    ctrl_resp_q.put(
+                        {
+                            'type': 'stop_ack',
+                            'request_id': msg.get('request_id'),
+                            'ok': True,
+                        }
+                    )
                     break
 
                 else:
@@ -305,7 +361,9 @@ def server_worker(
             except Exception as loop_ex:
                 # Log and continue
                 try:
-                    logger.warning(f'Worker loop error: {loop_ex}\n{traceback.format_exc()}')
+                    logger.warning(
+                        f'Worker loop error: {loop_ex}\n{traceback.format_exc()}'
+                    )
                 except Exception:
                     pass
 
@@ -387,7 +445,13 @@ async def function_not_registered_handler(request, exc):
 
 def _start_child_process():
     """Start the child process and background response listener."""
-    global server_process, request_queue, job_result_queue, control_response_queue, response_thread, accepting_requests
+    global \
+        server_process, \
+        request_queue, \
+        job_result_queue, \
+        control_response_queue, \
+        response_thread, \
+        accepting_requests
     if _is_server_running():
         raise RuntimeError('Server process already running')
 
@@ -402,13 +466,20 @@ def _start_child_process():
 
     server_process = Process(
         target=server_worker,
-        args=(request_queue, job_result_queue, control_response_queue, effective_config),
+        args=(
+            request_queue,
+            job_result_queue,
+            control_response_queue,
+            effective_config,
+        ),
         daemon=False,
     )
     server_process.start()
 
     # Start background thread to collect job results
-    response_thread = threading.Thread(target=_response_listener, name='response-listener', daemon=False)
+    response_thread = threading.Thread(
+        target=_response_listener, name='response-listener', daemon=False
+    )
     response_thread.start()
 
     with accepting_requests_lock:
@@ -433,7 +504,13 @@ async def start_server():
 
 @app.post('/stop')
 async def stop_server():
-    global server_process, request_queue, job_result_queue, control_response_queue, response_thread, accepting_requests
+    global \
+        server_process, \
+        request_queue, \
+        job_result_queue, \
+        control_response_queue, \
+        response_thread, \
+        accepting_requests
     if not _is_server_running():
         logger.warning('Server is not running. But user requested to stop.')
         raise ServerNotRunningError()
@@ -460,7 +537,9 @@ async def stop_server():
             try:
                 kill_process_tree(server_process.pid)
             except Exception as e:
-                logger.warning(f'kill_process_tree failed for pid {server_process.pid}: {e}')
+                logger.warning(
+                    f'kill_process_tree failed for pid {server_process.pid}: {e}'
+                )
             server_process.join(timeout=10)
 
         # Clean up queues and response listener
@@ -530,13 +609,18 @@ async def cancel(request: CancelRequest):
     try:
         req_id = str(uuid.uuid4())
         if request_queue is not None:
-            request_queue.put({'type': 'cancel', 'job_id': request.job_id, 'request_id': req_id})
+            request_queue.put(
+                {'type': 'cancel', 'job_id': request.job_id, 'request_id': req_id}
+            )
         # Await acknowledgment from control response queue
         if control_response_queue is not None:
             try:
                 ack = control_response_queue.get(timeout=10)
                 if not ack.get('ok', False):
-                    raise HTTPException(status_code=500, detail=f"Failed to cancel job: {ack.get('error', 'unknown')}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f'Failed to cancel job: {ack.get("error", "unknown")}',
+                    )
             except Exception:
                 pass
         return {'status': f'Cancel requested for job {request.job_id}'}
@@ -560,19 +644,26 @@ async def add_llm_server(request: LLMServerRequest):
 
         req_id = str(uuid.uuid4())
         if request_queue is not None:
-            request_queue.put({'type': 'add_llm_server', 'address': address, 'request_id': req_id})
+            request_queue.put(
+                {'type': 'add_llm_server', 'address': address, 'request_id': req_id}
+            )
 
         if control_response_queue is not None:
             try:
                 ack = control_response_queue.get(timeout=5)
                 if not ack.get('ok', False):
-                    raise HTTPException(status_code=500, detail=f"Failed to add LLM server: {ack.get('error', 'unknown')}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f'Failed to add LLM server: {ack.get("error", "unknown")}',
+                    )
             except Exception:
                 pass
         return {'status': f'Added LLM server address: {address}'}
     except Exception as e:
         logger.error(f'Failed to add LLM server: {str(e)}')
-        raise HTTPException(status_code=500, detail=f'Failed to add LLM server: {str(e)}')
+        raise HTTPException(
+            status_code=500, detail=f'Failed to add LLM server: {str(e)}'
+        )
 
 
 @app.post('/clear_llm_server')
@@ -592,13 +683,18 @@ async def clear_llm_server():
             try:
                 ack = control_response_queue.get(timeout=5)
                 if not ack.get('ok', False):
-                    raise HTTPException(status_code=500, detail=f"Failed to clear LLM servers: {ack.get('error', 'unknown')}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f'Failed to clear LLM servers: {ack.get("error", "unknown")}',
+                    )
             except Exception:
                 pass
         return {'status': 'Cleared all LLM server addresses'}
     except Exception as e:
         logger.error(f'Failed to clear LLM servers: {str(e)}')
-        raise HTTPException(status_code=500, detail=f'Failed to clear LLM servers: {str(e)}')
+        raise HTTPException(
+            status_code=500, detail=f'Failed to clear LLM servers: {str(e)}'
+        )
 
 
 @app.post('/process')
@@ -656,13 +752,19 @@ async def process(request: ProcessRequest):
         # Await result with timeout
         try:
             # WARNING: We set the timeout to be 2x the global timeout for final timeout
-            result = await asyncio.wait_for(fut, timeout=global_timeout*2+10)
+            result = await asyncio.wait_for(fut, timeout=global_timeout * 2 + 10)
             # result = await fut
         except asyncio.TimeoutError:
             # On timeout, send cancel and raise 504
             try:
                 if request_queue is not None:
-                    request_queue.put({'type': 'cancel', 'job_id': job_id, 'request_id': str(uuid.uuid4())})
+                    request_queue.put(
+                        {
+                            'type': 'cancel',
+                            'job_id': job_id,
+                            'request_id': str(uuid.uuid4()),
+                        }
+                    )
             except Exception:
                 pass
             # Clean up the future from result_futures and cancel it
@@ -674,7 +776,7 @@ async def process(request: ProcessRequest):
                 except Exception:
                     pass
             raise HTTPException(status_code=504, detail='Processing timed out')
-        except Exception as e:
+        except Exception:
             # Clean up the future from result_futures on any exception
             with futures_lock:
                 fut_to_cancel = result_futures.pop(job_id, None)
@@ -752,16 +854,39 @@ def parse_args():
         default=False,
         help='Use thread-based server (default: False)',
     )
+    parser.add_argument(
+        '--llm-server-address',
+        type=str,
+        nargs='*',
+        default=[],
+        dest='llm_server_addresses',
+        help='vLLM pool addresses pre-registered at startup, e.g. host:8100 host:8101. '
+        'Avoids the need to POST /add_llm_server after every restart.',
+    )
     return parser.parse_args()
 
 
 if __name__ == '__main__':
     args = parse_args()
 
+    # Pre-populate vLLM pool addresses so they survive a ProRL restart.
+    # Without this, addresses are lost on restart because llm_server_addresses_buffer
+    # is a module-level list that starts empty on each new process.
+    for _addr in args.llm_server_addresses:
+        if _addr not in llm_server_addresses_buffer:
+            llm_server_addresses_buffer.append(_addr)
+    if llm_server_addresses_buffer:
+        logger.info(
+            'Pre-registered %d LLM server address(es): %s',
+            len(llm_server_addresses_buffer),
+            llm_server_addresses_buffer,
+        )
+
     thread_based_server = args.use_thread_based_server
     if not thread_based_server:
         # For process-based server, we need to set the start method to spawn
         import multiprocessing
+
         multiprocessing.set_start_method('fork')
     logger.info(f'Using thread-based server: {thread_based_server}')
     init_server(
