@@ -84,8 +84,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         '--filter-zero-variance',
         action='store_true',
-        default=bool(int(os.environ.get('FILTER_ZERO_VARIANCE', '1'))),
-        help='Drop zero-variance groups (§3.7).',
+        default=bool(int(os.environ.get('FILTER_ZERO_VARIANCE', '0'))),
+        help='Drop zero-variance groups (§3.7). Default OFF — enable for production.',
     )
     return p.parse_args()
 
