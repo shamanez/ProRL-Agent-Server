@@ -15,7 +15,6 @@ from schemas.training_sample import TrainingSample
 
 @pytest.fixture()
 def live_store_server(tmp_path):
-    """Start an in-process LiveStore server on a per-test UDS."""
     socket = str(tmp_path / 'live_store.sock')
     server = serve(
         socket_path=socket,
@@ -24,7 +23,6 @@ def live_store_server(tmp_path):
         no_progress_timeout_s=2.0,
         max_workers=4,
     )
-    # Bounded settle: gRPC needs the listener bound before clients connect.
     for _ in range(50):
         if os.path.exists(socket):
             break

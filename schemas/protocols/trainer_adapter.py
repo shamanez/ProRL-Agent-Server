@@ -1,17 +1,8 @@
 """§A.6 — TrainerAdapter protocol.
 
-Consumes ``TrainingGroup`` records from the LiveStore, computes
-algorithm-specific fields locally (advantages, KL, IS ratios, value
-targets), runs the optimizer step, publishes new policy versions to the
-PolicyRegistry.
-
-Today's adapter: VERL ``RayPPOTrainerDAPO``. Future adapters: ROLL,
-slime/Megatron, DeepSpeed/FSDP single-GPU PEFT, SFT/distillation
-pipelines.
-
-Per §4.4: adapters compute their own algorithm-specific fields. Per
-§3.8: no adapter owns a task dataset. Per the plan revision: validation
-is removed; trainer never validates.
+Per §4.4: adapters compute their own algorithm-specific fields.
+Per §3.8: no adapter owns a task dataset.
+Validation is removed; trainer never validates (Sec.11).
 """
 
 from __future__ import annotations
@@ -40,8 +31,4 @@ class TrainerAdapter(Protocol):
 
     def save_checkpoint(self, step: int, dir: str) -> str: ...
 
-    def publish_policy_version(
-        self,
-        step: int,
-        adapter_uri: str,
-    ) -> PublishResult: ...
+    def publish_policy_version(self, step: int, adapter_uri: str) -> PublishResult: ...

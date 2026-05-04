@@ -1,26 +1,14 @@
-"""Rollout-worker service entry point (slot 5.3).
+"""RolloutWorker service entry point (slot 5.3).
 
-Wires the four dependencies the worker needs:
+Startup sequence for this process:
+  1. Connect LiveStoreClient (gRPC to live store)
+  2. Start PolicyVersionCache + FilePollingPolicySubscription
+  3. Create ParquetDataLoader (owns the dataset — §3.8)
+  4. Start ReplayArchiveWriter (async tee — S3)
+  5. Create ProRLClient (HTTP to EnvironmentProvider)
+  6. Start RolloutWorkerLoop (the production loop)
 
-1. **LiveStoreClient** — talks to the gRPC LiveStore over UDS.
-   Push side; the trainer is the reader.
-2. **PolicyVersionCache + FilePollingPolicySubscription** — the
-   cleverest primitive. The poller watches the trainer's JSON
-   manifest at 1 Hz and feeds strictly-fresher snapshots into the
-   cache via atomic-ref-swap. Group dispatch reads the cache once
-   per group; every row stamps the same snapshot (§3.2 + §3.5).
-3. **ContinuousRolloutProducer** — daemon thread driving the agent
-   loop. Lives in this process per §3.8 (data ownership). Reads
-   ``policy_version`` from the cache, pushes survivors to the
-   LiveStore.
-4. **AsyncLLMServerManagerDAPO** — the verl-side DAPO async manager.
-   Stays at its current path (heavy verl deps); imported here on
-   demand. The eager-push closure (§3.7) goes through the
-   :class:`LiveStoreClient.push_from_dataproto` surface — same shape
-   as the legacy in-trainer wiring, only the process is different.
-
-Validation flow is **not** wired here per the operating-principle
-revision in the implementation plan.
+**Zero VERL / OpenHands imports (BC-13).**
 """
 
 from __future__ import annotations
@@ -30,27 +18,31 @@ import logging
 import os
 import signal
 import sys
+import time
 
 from live_store import LiveStoreClient
-from rollout_worker.manager import ContinuousRolloutProducer, StepCounter
+from rollout_worker.dataloader import ParquetDataLoader
+from rollout_worker.loop import RolloutWorkerLoop
 from rollout_worker.policy_subscription import FilePollingPolicySubscription
+from rollout_worker.prorl_client import ProRLClient
 from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
 
 DEFAULT_SOCKET = '/tmp/prorl_live_store.sock'
 DEFAULT_MANIFEST = '/tmp/prorl_policy_manifest.json'
 DEFAULT_ARCHIVE_ROOT = '/tmp/prorl_replay_archive'
-DEFAULT_DEAD_LETTER = '/tmp/prorl_replay_archive_deadletter.jsonl'
+DEFAULT_ARCHIVE_DL = '/tmp/prorl_replay_archive_deadletter.jsonl'
 
 
-def main() -> int:
+def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(prog='rollout_worker')
     p.add_argument(
         '--live-store-socket',
         default=os.environ.get('LIVE_STORE_SOCKET', DEFAULT_SOCKET),
     )
     p.add_argument(
-        '--policy-manifest-path',
-        default=os.environ.get('POLICY_MANIFEST_PATH', DEFAULT_MANIFEST),
+        '--prorl-url',
+        default=os.environ.get('PRORL_URL', 'http://localhost:8006'),
+        help='Base URL of the EnvironmentProvider (ProRL).',
     )
     p.add_argument(
         '--policy-id',
@@ -61,9 +53,20 @@ def main() -> int:
         default=os.environ.get('ENVIRONMENT_ID', 'prorl_default'),
     )
     p.add_argument(
-        '--policy-poll-interval-s',
-        type=float,
-        default=float(os.environ.get('POLICY_POLL_INTERVAL_S', 1.0)),
+        '--data-files',
+        nargs='+',
+        default=os.environ.get('DATA_FILES', '').split() or None,
+        help='Space-separated parquet file paths (BC-14 — worker owns dataset).',
+    )
+    p.add_argument(
+        '--group-size',
+        type=int,
+        default=int(os.environ.get('GROUP_SIZE', '16')),
+        help='GRPO/DAPO group size (n siblings per task).',
+    )
+    p.add_argument(
+        '--policy-manifest-path',
+        default=os.environ.get('POLICY_MANIFEST_PATH', DEFAULT_MANIFEST),
     )
     p.add_argument(
         '--archive-root',
@@ -71,21 +74,33 @@ def main() -> int:
     )
     p.add_argument(
         '--archive-dead-letter',
-        default=os.environ.get('REPLAY_ARCHIVE_DEAD_LETTER', DEFAULT_DEAD_LETTER),
+        default=os.environ.get('REPLAY_ARCHIVE_DEAD_LETTER', DEFAULT_ARCHIVE_DL),
     )
     p.add_argument(
         '--archive-disabled',
         action='store_true',
         default=bool(int(os.environ.get('REPLAY_ARCHIVE_DISABLED', '0'))),
-        help='Disable the archive tee. Hot path is unaffected.',
     )
-    args = p.parse_args()
+    p.add_argument(
+        '--filter-zero-variance',
+        action='store_true',
+        default=bool(int(os.environ.get('FILTER_ZERO_VARIANCE', '1'))),
+        help='Drop zero-variance groups (§3.7).',
+    )
+    return p.parse_args()
 
+
+def main() -> int:
+    args = _parse_args()
     logging.basicConfig(
         level=os.environ.get('ROLLOUT_WORKER_LOG_LEVEL', 'INFO'),
         format='%(asctime)s %(levelname)s rollout_worker: %(message)s',
     )
     logger = logging.getLogger(__name__)
+
+    if not args.data_files:
+        logger.error('--data-files required (BC-14: worker owns the dataset)')
+        return 1
 
     # 1. LiveStoreClient
     live_store = LiveStoreClient(
@@ -94,84 +109,75 @@ def main() -> int:
         environment_id=args.environment_id,
     )
 
-    # 2. PolicyVersionCache + subscription. Single-writer: only the
-    # poller thread updates. Many readers: every group dispatch.
+    # 2. PolicyVersionCache + subscription
     cache = PolicyVersionCache(PolicyVersionSnapshot.bootstrap(args.policy_id))
     subscription = FilePollingPolicySubscription(
         cache=cache,
         manifest_path=args.policy_manifest_path,
-        poll_interval_s=args.policy_poll_interval_s,
+        poll_interval_s=1.0,
         on_update=lambda snap: live_store.notify_policy_version(
             snap.version, snap.adapter_uri
         ),
     )
     subscription.start()
 
-    # 3. ReplayArchive tee (S3). Async-fire-and-forget; archive
-    # availability never stalls the producer. Per §7 the tee is
-    # producer-side, NOT live-store-side, so it runs even on
-    # filtered (zero-variance) groups.
-    archive_writer: ReplayArchiveWriter | None = None
+    # 3. ParquetDataLoader — worker owns the dataset (BC-14 / §3.8)
+    dataloader = ParquetDataLoader(data_files=args.data_files)
+
+    # 4. ReplayArchive tee (S3)
+    archive_writer = None
     if not args.archive_disabled:
-        archive_server = ArchiveServer(args.archive_root)
+        from replay_archive.server import ArchiveServer  # noqa: PLC0415
+        from replay_archive.writer import ReplayArchiveWriter  # noqa: PLC0415
+
         archive_writer = ReplayArchiveWriter(
-            server=archive_server,
+            server=ArchiveServer(args.archive_root),
             dead_letter_path=args.archive_dead_letter,
         )
         archive_writer.start()
-        logger.info(
-            'replay archive tee enabled root=%s dead_letter=%s',
-            args.archive_root,
-            args.archive_dead_letter,
-        )
-    else:
-        logger.info('replay archive tee disabled (REPLAY_ARCHIVE_DISABLED=1)')
+        logger.info('replay archive tee enabled root=%s', args.archive_root)
 
-    # 4. The producer + DAPO manager are wired by the verl-side
-    # bootstrap (heavy verl/openhands deps). They consume:
-    #   * ``live_store`` (push survivors)
-    #   * ``cache``     (read PolicyVersionSnapshot per group dispatch)
-    #   * ``archive_writer`` (tee EpisodeRecord at episode close, even
-    #     when the live-path filter drops the group)
-    step_counter = StepCounter(initial=0)
+    # 5. ProRLClient (HTTP, no OpenHands imports — BC-13)
+    prorl_client = ProRLClient(base_url=args.prorl_url)
+
+    # 6. RolloutWorkerLoop
+    loop = RolloutWorkerLoop(
+        prorl_client=prorl_client,
+        live_store_client=live_store,
+        policy_cache=cache,
+        dataloader=dataloader,
+        group_size=args.group_size,
+        created_at_step_fn=lambda: 0,  # updated via StepCounter RPC at S2+
+        archive_writer=archive_writer,
+        environment_id=args.environment_id,
+        filter_zero_variance=args.filter_zero_variance,
+    )
+    loop.start()
 
     def _shutdown(_signum, _frame):
         logger.info('shutting down rollout_worker (signal %s)', _signum)
+        loop.stop(timeout=30.0)
         subscription.stop(timeout=2.0)
         if archive_writer is not None:
             archive_writer.stop(timeout=5.0)
         live_store.close()
+        prorl_client.close()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    # Idle loop: surface the cleverest snapshot + archive stats in
-    # INFO logs every 30s so the post-S4 checklist items 11
-    # (snapshot read) and 13 (archive count parity) have a heartbeat
-    # trace even before the verl-side producer bootstrap kicks in.
-    import time  # noqa: PLC0415
-
     while True:
+        loop.check_error()
         snap = cache.snapshot()
-        archive_stats = archive_writer.stats() if archive_writer else {}
         logger.info(
-            'rollout_worker idle: policy_id=%s version=%d adapter_uri=%s '
-            'live_store_size=%d archive=%s',
+            'rollout_worker heartbeat: policy_id=%s version=%d store_groups=%d stats=%s',
             snap.policy_id,
             snap.version,
-            snap.adapter_uri,
             live_store.num_groups(),
-            archive_stats,
+            loop.stats(),
         )
         time.sleep(30.0)
-
-    # NOTE: ``ContinuousRolloutProducer`` and ``StepCounter`` are
-    # exported here for the verl-bootstrapped run path. They
-    # participate in the S2 / S3 verification only when the bootstrap
-    # script runs.
-    _ = ContinuousRolloutProducer
-    _ = step_counter
 
 
 if __name__ == '__main__':

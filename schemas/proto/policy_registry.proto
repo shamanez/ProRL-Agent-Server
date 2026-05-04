@@ -1,7 +1,5 @@
 // PolicyRegistry (§A.7) gRPC schema.
-//
-// Compiled at S4 via scripts/gen_protos.sh.
-// `subscribe_version_updates` is server-streaming (one event per publish).
+// `subscribe_version_updates` is server-streaming.
 
 syntax = "proto3";
 
@@ -20,14 +18,14 @@ message PolicyVersionSnapshot {
   string policy_id = 1;
   int32 version = 2;
   string adapter_uri = 3;
-  double received_at = 4;             // monotonic seconds at registry server
+  double received_at = 4;
 }
 
 message VersionInfo {
   string policy_id = 1;
   int32 version = 2;
   string adapter_uri = 3;
-  string published_at = 4;            // ISO-8601 UTC
+  string published_at = 4;
 }
 
 message PublishPolicyVersionRequest {
@@ -40,7 +38,7 @@ message PublishPolicyVersionRequest {
 message PublishPolicyVersionResponse {
   bool success = 1;
   int32 endpoints_ok = 2;
-  int32 endpoints_failed = 3;         // §3.3 abort gate: success => 0
+  int32 endpoints_failed = 3;
   double latency_s = 4;
   string error = 5;
 }

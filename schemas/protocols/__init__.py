@@ -1,13 +1,4 @@
-"""Appendix A — slot interface ``Protocol`` classes.
-
-These are the typed boundaries between the seven slots in
-``rollout_fabric.md`` §5. Implementing a slot adapter means satisfying
-the corresponding ``Protocol`` here; the contract is what makes the slots
-genuinely pluggable rather than just architecturally separated.
-
-Read the ``rollout_fabric.md`` §5 + Appendix A sections for the full
-narrative behind each method shape.
-"""
+"""Appendix A — slot interface Protocol classes."""
 
 from schemas.protocols.environment_provider import (
     ContentBlock,

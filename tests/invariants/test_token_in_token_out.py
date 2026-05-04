@@ -1,13 +1,4 @@
-"""§3.1 invariant — token-in / token-out across turns.
-
-The wire schema must carry token IDs, not decoded text. Re-tokenizing
-across turns shifts boundaries; actor and reference diverge; KL/entropy
-go NaN; PPO/GRPO collapses.
-
-This test asserts the type-level contract: every token-bearing field on
-``TrainingSample`` is a ``tuple[int, ...]`` (or ``None`` where allowed),
-and the proto schema declares the corresponding ``bytes`` carry.
-"""
+"""§3.1 invariant — token IDs, never strings, on every wire (BC-1)."""
 
 from __future__ import annotations
 
@@ -53,7 +44,6 @@ def _make_sample(**overrides):
 
 
 def test_training_sample_carries_token_ids_not_text() -> None:
-    """Every token-bearing field is a tuple of ints, not a str."""
     s = _make_sample()
     assert isinstance(s.prompt_token_ids, tuple)
     assert all(isinstance(x, int) for x in s.prompt_token_ids)
@@ -67,24 +57,11 @@ def test_training_sample_carries_token_ids_not_text() -> None:
 
 
 def test_training_sample_rejects_string_tokens() -> None:
-    """Constructing a sample with str tokens raises a TypeError-equivalent.
-
-    The dataclass annotation is ``tuple[int, ...]`` — passing a string
-    would silently succeed at construction (Python dataclasses don't
-    enforce types). We use the length-equality post-init assertions to
-    catch obvious shape errors; a deliberately-typed mismatch is caught
-    by the static type checker (``make lint`` runs mypy).
-    """
     with pytest.raises(ValueError):
         _make_sample(response_token_ids=(4, 5, 6), response_loss_mask=(1, 1))
 
 
 def test_proto_schema_uses_bytes_for_token_arrays() -> None:
-    """Live store proto carries token arrays as bytes, not as strings.
-
-    Lightweight regression: grep the .proto file for the relevant fields.
-    Compiles only at S1; at S0.5 we assert the schema text is correct.
-    """
     proto = (
         Path(__file__).resolve().parents[2] / 'schemas' / 'proto' / 'live_store.proto'
     )
@@ -95,7 +72,6 @@ def test_proto_schema_uses_bytes_for_token_arrays() -> None:
         'response_loss_mask',
         'behavior_log_probs',
     ):
-        # `bytes <field_name> = N;` — order-tolerant whitespace.
         assert re.search(rf'\bbytes\s+{re.escape(field_name)}\s*=\s*\d+\s*;', text), (
             f'live_store.proto must declare {field_name} as bytes, not string'
         )

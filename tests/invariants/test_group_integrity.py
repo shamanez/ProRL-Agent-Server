@@ -1,16 +1,4 @@
-"""§3.2 invariant — GRPO/DAPO group integrity.
-
-``compute_advantage`` requires the ``n`` siblings of a group to be
-present at sample time so that group-relative advantages can be
-computed without a running normalizer. The store never splits a
-group; sampling pops whole groups; filter decisions operate on whole
-groups.
-
-This test asserts the wire-shape contract: a ``TrainingGroup`` cannot
-be constructed with mismatched ``group_uid`` across its samples, and
-the helper ``assert_group_integrity`` catches the same violation on
-loose sample lists.
-"""
+"""§3.2 invariant — GRPO/DAPO group integrity (BC-2)."""
 
 from __future__ import annotations
 
@@ -56,7 +44,7 @@ def _make_sample(group_uid: str, sample_uid: str) -> TrainingSample:
 
 def test_training_group_requires_matching_group_uid() -> None:
     a = _make_sample('g1', 's1')
-    b = _make_sample('g2', 's2')  # mismatched
+    b = _make_sample('g2', 's2')
     with pytest.raises(ValueError, match='group_uid'):
         TrainingGroup(group_uid='g1', samples=(a, b))
 
@@ -65,15 +53,13 @@ def test_training_group_accepts_consistent_siblings() -> None:
     siblings = tuple(_make_sample('g1', f's{i}') for i in range(8))
     g = TrainingGroup(group_uid='g1', samples=siblings)
     assert len(g) == 8
-    for s in g.samples:
-        assert s.group_uid == 'g1'
+    assert all(s.group_uid == 'g1' for s in g.samples)
 
 
 def test_assert_group_integrity_catches_mixed_groups() -> None:
-    a = _make_sample('g1', 's1')
-    b = _make_sample('g1', 's2')
+    a, b = _make_sample('g1', 's1'), _make_sample('g1', 's2')
     c = _make_sample('g2', 's3')
-    assert_group_integrity([a, b])  # no raise
+    assert_group_integrity([a, b])
     with pytest.raises(ValueError, match='integrity violation'):
         assert_group_integrity([a, b, c])
 

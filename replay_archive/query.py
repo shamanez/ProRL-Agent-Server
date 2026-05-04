@@ -1,8 +1,4 @@
-"""Read-side filter against the SQLite index + Parquet payload.
-
-Used by offline jobs (reward-distribution histograms, distillation
-training, audits). Not on any hot path.
-"""
+"""Read-side filter against the SQLite index + Parquet payload (offline path)."""
 
 from __future__ import annotations
 
@@ -21,39 +17,29 @@ def query(
     filter_spec: FilterSpec,
     limit: int | None = None,
 ) -> Iterable[EpisodeRecord]:
-    """Run ``filter_spec`` against the archive at ``archive_root``.
-
-    Matches the §A.5 ``ReplayArchive.query`` contract: returns an
-    iterable of full :class:`EpisodeRecord` objects. The SQLite index
-    narrows the result set; the Parquet segments are loaded only for
-    matching rows.
-    """
     server = ArchiveServer(archive_root)
-    where, params = _build_where_clause(filter_spec)
+    where, params = _build_where(filter_spec)
     sql = f'SELECT episode_uid FROM episodes {where} ORDER BY started_at'  # noqa: S608
     if limit is not None:
         sql += f' LIMIT {int(limit)}'
     with sqlite3.connect(server.index_path()) as conn:
-        cur = conn.execute(sql, params)
-        uids = [row[0] for row in cur.fetchall()]
+        uids = [row[0] for row in conn.execute(sql, params).fetchall()]
     return list(server.fetch_records(uids))
 
 
-def count(
-    archive_root: str | Path,
-    *,
-    filter_spec: FilterSpec,
-) -> int:
-    """Cheap row count via the index, without hydrating Parquet."""
+def count(archive_root: str | Path, *, filter_spec: FilterSpec) -> int:
     server = ArchiveServer(archive_root)
-    where, params = _build_where_clause(filter_spec)
-    sql = f'SELECT COUNT(*) FROM episodes {where}'  # noqa: S608
+    where, params = _build_where(filter_spec)
     with sqlite3.connect(server.index_path()) as conn:
-        cur = conn.execute(sql, params)
-        return int(cur.fetchone()[0])
+        return int(
+            conn.execute(
+                f'SELECT COUNT(*) FROM episodes {where}',
+                params,  # noqa: S608
+            ).fetchone()[0]
+        )
 
 
-def _build_where_clause(spec: FilterSpec) -> tuple[str, list]:
+def _build_where(spec: FilterSpec) -> tuple[str, list]:
     clauses: list[str] = []
     params: list = []
     if spec.policy_id is not None:
@@ -84,13 +70,11 @@ def _build_where_clause(spec: FilterSpec) -> tuple[str, list]:
         clauses.append('total_reward <= ?')
         params.append(spec.reward_max)
     if spec.trust_levels:
-        placeholders = ','.join('?' for _ in spec.trust_levels)
-        clauses.append(f'trust_level IN ({placeholders})')
+        ph = ','.join('?' for _ in spec.trust_levels)
+        clauses.append(f'trust_level IN ({ph})')
         params.extend(t.value for t in spec.trust_levels)
     if spec.task_ids:
-        placeholders = ','.join('?' for _ in spec.task_ids)
-        clauses.append(f'task_id IN ({placeholders})')
+        ph = ','.join('?' for _ in spec.task_ids)
+        clauses.append(f'task_id IN ({ph})')
         params.extend(spec.task_ids)
-    if not clauses:
-        return '', []
-    return 'WHERE ' + ' AND '.join(clauses), params
+    return ('WHERE ' + ' AND '.join(clauses)) if clauses else ('', [])

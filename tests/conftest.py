@@ -1,15 +1,8 @@
-"""Top-level pytest config for the rollout-fabric tests tree.
+"""Root conftest — register custom pytest marks."""
 
-Exists so ``pytest tests/`` discovers ``tests/invariants/``,
-``tests/contracts/``, and (later) ``tests/slots/`` without per-subdir
-INI files.
-"""
 
-import sys
-from pathlib import Path
-
-# Make the repo root importable as a package root so ``schemas.*`` and
-# ``live_store.*`` resolve when the tests run from any cwd.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+def pytest_configure(config):
+    config.addinivalue_line('markers', 'invariant: boundary condition invariant test')
+    config.addinivalue_line('markers', 'contract: slot interface contract test')
+    config.addinivalue_line('markers', 'integration: touches real external services')
+    config.addinivalue_line('markers', 'slow: single test > 10s')

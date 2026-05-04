@@ -1,14 +1,10 @@
 """§3.3 abort-gate fanout — POST /reload_lora to every pool child.
 
-Lifted from ``ray_trainer.py:_publish_lora_adapter`` (lines 1431-1547).
-The contract is **load-bearing**: ``success`` implies
-``endpoints_failed == 0``. A partial publish is **failure**, not
-degraded mode — a warm replay buffer must NOT mask a broken pool.
+Lifted from ``ray_trainer.py:_publish_lora_adapter``. The contract is
+load-bearing: ``success`` implies ``endpoints_failed == 0``. Partial
+publish = failure, not degraded mode (BC-9).
 
-Pre-S4 the abort gate lived in the trainer process. S4 elevates it
-into the registry; the trainer publishes via the registry client and
-gets back a :class:`PublishResult` whose ``success`` field has been
-gated by the same all-endpoints-ACK check.
+S4 moves this from the trainer process into the PolicyRegistry service.
 """
 
 from __future__ import annotations
@@ -32,7 +28,7 @@ REQUIRED_ADAPTER_FILES = ('adapter_model.safetensors', 'adapter_config.json')
 
 
 class FanoutError(RuntimeError):
-    """Raised by :func:`fanout_to_pool` on any endpoint failure."""
+    pass
 
 
 def fanout_to_pool(
@@ -42,22 +38,9 @@ def fanout_to_pool(
     endpoints: list[str],
     timeout_s: int = 60,
 ) -> PublishResult:
-    """POST the adapter tarball to every pool child; abort on partial failure.
-
-    Returns a :class:`PublishResult` with ``success=True`` only when
-    every endpoint ACKed (HTTP 200 or 409 — the latter means the pool
-    already has this version, semantically idempotent). Any other
-    status counts as failure; the caller (typically the registry's
-    publish RPC) propagates this to the trainer which aborts.
-
-    ``adapter_uri`` is currently a ``file://`` URI; S5+ may also accept
-    ``nfs://`` / ``s3://`` and the resolution moves into a separate
-    helper.
-    """
+    """POST adapter tarball to every pool child; abort on partial failure (BC-9)."""
     if not endpoints:
-        raise FanoutError(
-            'fanout_to_pool: endpoints list is empty — nothing to publish'
-        )
+        raise FanoutError('fanout_to_pool: endpoints list is empty')
     started = time.monotonic()
     payload = _read_adapter_tarball(adapter_uri)
 
@@ -97,9 +80,8 @@ def fanout_to_pool(
     elapsed = time.monotonic() - started
 
     if failed:
-        # Log enough to debug without dumping the adapter bytes.
         logger.error(
-            'pool fanout FAILED at pv=%d: ok=%d/%d failed=%s',
+            'pool fanout FAILED pv=%d ok=%d/%d failed=%s',
             new_version,
             len(ok),
             len(endpoints),
@@ -112,7 +94,6 @@ def fanout_to_pool(
             latency_s=elapsed,
             error=json.dumps(failed)[:1024],
         )
-
     logger.info(
         'pool fanout OK pv=%d endpoints_ok=%d wall_s=%.3f',
         new_version,
@@ -129,15 +110,9 @@ def fanout_to_pool(
 
 
 def _read_adapter_tarball(adapter_uri: str) -> bytes:
-    """Resolve ``adapter_uri`` to an in-memory ``.tar.gz`` payload.
-
-    S4 supports ``file://`` only; S5+ extensible.
-    """
     parsed = urlparse(adapter_uri)
     if parsed.scheme not in ('', 'file'):
-        raise FanoutError(
-            f'unsupported adapter URI scheme: {adapter_uri!r} (S4 supports file://)'
-        )
+        raise FanoutError(f'unsupported adapter URI scheme: {adapter_uri!r}')
     adapter_dir = Path(parsed.path)
     missing = [f for f in REQUIRED_ADAPTER_FILES if not (adapter_dir / f).is_file()]
     if missing:

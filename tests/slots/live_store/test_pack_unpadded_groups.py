@@ -1,10 +1,4 @@
-"""S1 — trainer-adapter pack reconstructs the legacy SampledMiniBatch shape.
-
-The legacy ``_pack`` (in-process trajectory store) is lifted to
-``trainer_adapters/verl/pad.pack_unpadded_groups``. This test asserts
-the post-pack tensor / non-tensor layout matches today's contract so
-``DataProto.from_dict`` keeps working bit-identically.
-"""
+"""S1 — trainer-adapter pad reconstructs legacy SampledMiniBatch shape (BC-11)."""
 
 from __future__ import annotations
 
@@ -58,7 +52,7 @@ def test_pack_raises_on_oversize_prompt() -> None:
         sample_uid=s.sample_uid,
         group_uid=s.group_uid,
         episode_uid=s.episode_uid,
-        prompt_token_ids=tuple(range(100)),  # cap will be 4
+        prompt_token_ids=tuple(range(100)),
         response_token_ids=s.response_token_ids,
         response_loss_mask=s.response_loss_mask,
         behavior_log_probs=s.behavior_log_probs,

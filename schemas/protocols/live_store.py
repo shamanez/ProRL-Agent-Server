@@ -1,16 +1,8 @@
 """§A.4 — LiveStore protocol.
 
-Bounded, low-latency, hot buffer between RolloutWorker and TrainerAdapter.
-Operates in groups (``n`` siblings together; §3.2), pops on sample (§3.6),
-evicts by staleness, returns batches sized for the trainer step.
-
-Padding stance (§6.2): ``get_batch`` returns **unpadded** ``TrainingSample``
-records. Padding / sequence-packing is the trainer adapter's job.
-
-No-progress detector (§S1 scope): server-side blocking on ``get_batch``
-up to ``timeout_ms``; if ``total_pushes`` does not grow within
-``no_progress_timeout_s``, raise :class:`NoProgressError`. The trainer is
-no longer responsible for the busy-loop.
+Bounded, low-latency hot buffer between RolloutWorker and TrainerAdapter.
+Pop-on-sample (§3.6). No-progress detector server-side (§S1).
+Unpadded wire (§6.2).
 """
 
 from __future__ import annotations
@@ -18,19 +10,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from schemas.training_sample import (
-    BatchResult,
-    PushResult,
-    TrainingSample,
-)
+from schemas.training_sample import BatchResult, PushResult, TrainingSample
 
 
 class NoProgressError(RuntimeError):
-    """Raised by the LiveStore when no producer push has landed within
-    the configured ``no_progress_timeout_s`` window.
+    """Raised when no producer push landed within ``no_progress_timeout_s``.
 
-    Distinct from "store empty" — this signals the producer is wedged or
-    the pool is dead; trainer should abort, not poll.
+    Distinct from "store empty" — signals the producer is wedged.
+    Trainer should abort, not poll.
     """
 
 
@@ -42,13 +29,6 @@ class Ack:
 
 @dataclass(slots=True)
 class BackpressureHint:
-    """Advisory hint returned on ``push_group``.
-
-    ``hint_ms = 0`` means no backpressure. Positive values are the
-    suggested pause before the next push. Multi-producer-friendly
-    (S5+); single producer (S1-S4) can ignore.
-    """
-
     hint_ms: int
 
 
@@ -81,8 +61,4 @@ class LiveStore(Protocol):
 
     def get_metrics(self, current_step: int) -> StoreMetrics: ...
 
-    def notify_policy_version(
-        self,
-        version: int,
-        adapter_uri: str,
-    ) -> Ack: ...
+    def notify_policy_version(self, version: int, adapter_uri: str) -> Ack: ...

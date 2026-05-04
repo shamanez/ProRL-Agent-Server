@@ -1,8 +1,7 @@
 // LiveStore (§A.4) gRPC schema.
 //
-// Compiled at S1 via scripts/gen_protos.sh. Token-bearing fields are
-// `bytes` carrying packed int32 token ids (little-endian), not repeated
-// int32, to avoid the parser overhead on large arrays.
+// Token-bearing fields are `bytes` carrying packed int32 token ids
+// (little-endian), not repeated int32, to avoid parser overhead.
 //
 // Padding stance (§6.2): the wire is unpadded. Padding is the trainer
 // adapter's responsibility (trainer_adapters/verl/pad.py).
@@ -18,7 +17,6 @@ service LiveStore {
   rpc NotifyPolicyVersion(NotifyPolicyVersionRequest) returns (Ack);
 }
 
-// One row of training data. Token sequences are packed int32 LE bytes.
 message TrainingSample {
   string sample_uid = 1;
   string group_uid = 2;
@@ -43,10 +41,10 @@ message TrainingSample {
   string environment_id = 43;
   string environment_version = 44;
   string verifier_version = 45;
-  string trust_level = 46;            // string-valued enum
+  string trust_level = 46;
 
   bytes sample_indices = 50;          // packed int32 LE; empty => null
-  string instance_json = 51;          // serialized dict; preserves prompt_extras
+  string instance_json = 51;
   string error = 52;                  // empty => null
   bool is_padded = 53;
 }
@@ -77,7 +75,7 @@ message GetBatchResponse {
   repeated int32 sample_ages = 4;
   map<string, double> metrics_pre = 5;
   map<string, double> metrics_post = 6;
-  bool no_progress = 7;               // server-side no-progress timeout
+  bool no_progress = 7;
   string no_progress_reason = 8;
 }
 

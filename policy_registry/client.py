@@ -1,16 +1,4 @@
-"""gRPC client for PolicyRegistry — used by both trainer and worker.
-
-Trainer side: :meth:`publish_policy_version` is the one-liner
-replacement for ``ray_trainer.py:_publish_lora_adapter``'s old fanout
-logic. The §3.3 abort gate now lives in the registry — the trainer
-just raises :class:`PublishFailedError` on ``success=False``.
-
-Worker side: :meth:`stream_version_updates` yields
-:class:`PolicyVersionSnapshot` records that the worker feeds into its
-:class:`PolicyVersionCache.update` (atomic ref-swap, lock-free reads).
-The cache primitive is unchanged across the S2→S4 cut; only the
-populator flips from JSON-mtime polling to gRPC streaming.
-"""
+"""gRPC client for PolicyRegistry — trainer-side publish + worker-side stream."""
 
 from __future__ import annotations
 
@@ -27,16 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 class PublishFailedError(RuntimeError):
-    """Raised when ``publish_policy_version`` returns ``success=False``.
-
-    Per §3.3 the trainer aborts on this — partial pool publish is
-    failure, not degraded mode.
-    """
+    """§3.3 abort gate: trainer aborts on partial pool publish (BC-9)."""
 
 
 class PolicyRegistryClient:
-    """Drop-in replacement for the legacy in-trainer pool fanout."""
-
     def __init__(self, socket_path: str) -> None:
         self._channel = grpc.insecure_channel(f'unix:{socket_path}')
         self._stub = policy_registry_pb2_grpc.PolicyRegistryStub(self._channel)
@@ -44,7 +26,7 @@ class PolicyRegistryClient:
     def close(self) -> None:
         self._channel.close()
 
-    # ---- trainer-side -------------------------------------------------------
+    # ---- trainer-side ---------------------------------------------------
 
     def publish_policy_version(
         self,
@@ -54,12 +36,7 @@ class PolicyRegistryClient:
         adapter_uri: str,
         trainer_id: str = 'trainer-0',
     ) -> dict:
-        """Atomic fanout via the registry; raises on §3.3 abort.
-
-        Returns a dict with the publish metrics (latency, endpoints_ok)
-        for WandB logging on success. Raises
-        :class:`PublishFailedError` on partial pool failure.
-        """
+        """Fanout via registry; raise :class:`PublishFailedError` on §3.3 abort."""
         req = policy_registry_pb2.PublishPolicyVersionRequest(
             policy_id=policy_id,
             version=int(version),
@@ -69,11 +46,9 @@ class PolicyRegistryClient:
         resp = self._stub.PublishPolicyVersion(req)
         if not resp.success:
             raise PublishFailedError(
-                f'ABORT: policy registry publish failed for '
-                f'policy_id={policy_id!r} version={version}: '
-                f'endpoints_ok={resp.endpoints_ok} '
-                f'endpoints_failed={resp.endpoints_failed} '
-                f'error={resp.error}'
+                f'ABORT: registry publish failed policy_id={policy_id!r} '
+                f'version={version}: endpoints_ok={resp.endpoints_ok} '
+                f'endpoints_failed={resp.endpoints_failed} error={resp.error}'
             )
         return {
             'weight_sync/policy_version': version,
@@ -115,20 +90,10 @@ class PolicyRegistryClient:
             )
         )
 
-    # ---- worker-side --------------------------------------------------------
+    # ---- worker-side (S4) -----------------------------------------------
 
-    def stream_version_updates(
-        self,
-        policy_id: str,
-    ) -> Iterator[PolicyVersionSnapshot]:
-        """Server-streaming subscription. Yields immutable snapshots.
-
-        The caller (worker's subscription thread) feeds each yielded
-        snapshot into ``cache.update(snap)``, which atomically swaps
-        the cache's single attribute. Reader threads (group dispatch)
-        observe the new snapshot on their next ``cache.snapshot()``
-        call — zero lock contention.
-        """
+    def stream_version_updates(self, policy_id: str) -> Iterator[PolicyVersionSnapshot]:
+        """Server-streaming subscription. Feeds into ``PolicyVersionCache.update``."""
         req = policy_registry_pb2.SubscribeRequest(policy_id=policy_id)
         for proto_snap in self._stub.SubscribeVersionUpdates(req):
             yield PolicyVersionSnapshot(

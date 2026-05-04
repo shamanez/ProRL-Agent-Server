@@ -1,14 +1,7 @@
 """§A.2 — InferenceBackend protocol.
 
-Owns: model weights, LoRA cache, KV cache, serving infrastructure.
-Produces tokens and per-token logprobs from a policy.
-
-Today's adapter: vLLM child pool :8100-8103 with the pinning swap
-protocol (``scripts/serving/_vllm_child.py``). Pinning is the §3.4
-correctness invariant — a single ``generate`` call must see exactly one
-policy version. Any future backend (SGLang, TGI, hosted API) must
-provide either ``/v{N}/generate``-style path-versioned pinning or an
-equivalent guarantee.
+Today's adapter: vLLM child pool :8100-8103 (_vllm_child.py). Frozen
+through S4. Pinning swap protocol is the §3.4 correctness invariant.
 """
 
 from __future__ import annotations
@@ -18,13 +11,6 @@ from typing import Any, Protocol
 
 
 class PolicyRef(Protocol):
-    """Opaque per-call policy pin.
-
-    Concrete adapters may implement this as a versioned URL fragment
-    (``/v{N}/generate``), an explicit ``policy_id`` argument, a session
-    binding, or any equivalent that produces the §3.4 pinning guarantee.
-    """
-
     @property
     def policy_id(self) -> str: ...
 
@@ -34,14 +20,6 @@ class PolicyRef(Protocol):
 
 @dataclass(slots=True)
 class GenerationResult:
-    """Tokens + logprobs returned by ``generate``.
-
-    ``logprobs`` is the per-token log-probability of the **selected**
-    token under the served policy version, length-matched to ``token_ids``.
-    Adapters whose backends cannot produce logprobs return ``None``; the
-    consumer must restrict trust accordingly (§6.3).
-    """
-
     token_ids: list[int]
     logprobs: list[float] | None
     finish_reason: str

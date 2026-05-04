@@ -1,8 +1,4 @@
-"""S1 — concurrent samplers see disjoint groups under gRPC.
-
-§3.6 (pop-on-sample) under the gRPC boundary. Two clients drawing
-2 groups each from a buffer of 8 must never share a sample_uid.
-"""
+"""S1 — concurrent samplers see disjoint groups (BC-3 / §3.6)."""
 
 from __future__ import annotations
 
@@ -19,16 +15,14 @@ def test_two_clients_disjoint(live_store_server) -> None:
     from live_store.client import LiveStoreClient
 
     _, socket = live_store_server
-    common_kwargs = dict(
+    kwargs = dict(
         policy_id='qwen3-4b-skyrl',
         environment_id='swe_agent',
         environment_version='v1',
         verifier_version='v1',
         split='train',
     )
-
-    # Use one writer client and two reader clients.
-    writer = LiveStoreClient(socket, **common_kwargs)
+    writer = LiveStoreClient(socket, **kwargs)
     for i in range(8):
         writer.push_group([make_sample(sample_uid=f's{i}', group_uid=f'g{i}')])
 
@@ -36,7 +30,7 @@ def test_two_clients_disjoint(live_store_server) -> None:
     barrier = threading.Barrier(2)
 
     def draw(idx: int) -> None:
-        cli = LiveStoreClient(socket, **common_kwargs)
+        cli = LiveStoreClient(socket, **kwargs)
         try:
             barrier.wait()
             samples = cli.get_batch(n_groups=2, current_step=0, timeout_ms=2_000)
@@ -53,5 +47,5 @@ def test_two_clients_disjoint(live_store_server) -> None:
 
     assert seen[0] and seen[1]
     assert seen[0].isdisjoint(seen[1]), (
-        f'concurrent gRPC samplers shared groups: {seen[0] & seen[1]}'
+        f'concurrent samplers shared groups: {seen[0] & seen[1]}'
     )

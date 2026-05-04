@@ -1,11 +1,4 @@
-"""Contract sanity — Appendix A protocols are importable, named, and
-runtime-checkable for ``isinstance`` purposes.
-
-Concrete adapters land per stage (S1: LiveStore impl; S2: RolloutWorker
-impl; S3: ReplayArchive impl; S4: PolicyRegistry impl). At S0.5 the
-substrate is the type surface and the import path; this test pins
-both.
-"""
+"""Appendix A protocols are importable and declare required methods."""
 
 from __future__ import annotations
 
@@ -48,10 +41,7 @@ pytestmark = pytest.mark.contract
             LiveStore,
             ('push_group', 'get_batch', 'get_metrics', 'notify_policy_version'),
         ),
-        (
-            ReplayArchive,
-            ('append_episodes', 'query', 'derive_training_samples'),
-        ),
+        (ReplayArchive, ('append_episodes', 'query', 'derive_training_samples')),
         (
             TrainerAdapter,
             ('request_batch', 'step', 'save_checkpoint', 'publish_policy_version'),
@@ -83,7 +73,6 @@ def test_protocol_declares_required_methods(cls, methods) -> None:
 
 
 def test_protocol_re_exports() -> None:
-    """Public names from ``schemas.protocols`` import cleanly."""
     for name in (
         'ContentBlock',
         'ToolCall',
