@@ -1551,6 +1551,46 @@ class RayPPOTrainer:
         if getattr(self, 'async_rollout_manager', None) is not None:
             self.async_rollout_manager.policy_version = new_version
 
+        # S2 manifest write — RolloutWorker's FilePollingPolicySubscription
+        # reads this file at 1 Hz and feeds the new version into its
+        # PolicyVersionCache via atomic ref-swap (BC-7). Without this write
+        # the worker never learns about new LoRA adapters and all future
+        # rollouts stay on policy_version=0 (base model).
+        # S4 upgrade path: replace this block with a single gRPC call to
+        # PolicyRegistryClient.publish_policy_version().
+        try:
+            from policy_registry.file_registry import (  # noqa: PLC0415
+                PolicyManifest,
+                write_manifest,
+            )
+
+            _policy_id = str(
+                self.config.actor_rollout_ref.model.get('policy_id', 'qwen3-4b-skyrl')
+            )
+            _manifest_path = str(
+                self.config.replay.get(
+                    'policy_manifest_path', '/tmp/prorl_policy_manifest.json'
+                )
+            )
+            write_manifest(
+                PolicyManifest(
+                    policy_id=_policy_id,
+                    version=new_version,
+                    adapter_uri=f'file://{adapter_dir}',
+                    trainer_id='trainer-0',
+                    published_at=time.time(),
+                ),
+                path=_manifest_path,
+            )
+        except Exception as _manifest_exc:  # noqa: BLE001
+            import logging as _logging  # noqa: PLC0415
+
+            _logging.getLogger(__name__).warning(
+                'Failed to write policy manifest (worker will not see pv=%d): %s',
+                new_version,
+                _manifest_exc,
+            )
+
         publish_latency_s = max(r['wall_s'] for r in ok)
         vllm_load_latency_s = (
             max(float(r['body'].get('vllm_load_latency_ms', 0.0)) for r in ok) / 1000.0
