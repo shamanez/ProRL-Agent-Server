@@ -83,6 +83,7 @@ class RolloutManagerLoop:
         policy_cache: PolicyVersionCache,
         dataloader: ParquetDataLoader,
         group_size: int = 16,
+        num_parallel_groups: int = 1,
         created_at_step_fn: Any = None,
         archive_writer: ReplayArchiveWriter | None = None,
         environment_id: str = 'prorl',
@@ -97,6 +98,7 @@ class RolloutManagerLoop:
         self._cache = policy_cache
         self._dataloader = dataloader
         self._group_size = int(group_size)
+        self._num_parallel_groups = max(1, int(num_parallel_groups))
         self._step_fn = created_at_step_fn or (lambda: 0)
         self._archive = archive_writer
         self._env_id = environment_id
@@ -111,6 +113,8 @@ class RolloutManagerLoop:
         self._pause_event.set()
         self._exception: BaseException | None = None
         self._thread: threading.Thread | None = None
+        # Protects next(self._dataloader) across parallel group workers.
+        self._dl_lock = threading.Lock()
 
         # Counters
         self._groups_pushed: int = 0
@@ -158,11 +162,43 @@ class RolloutManagerLoop:
 
     def _run(self) -> None:
         try:
-            while not self._stop_event.is_set():
-                self._pause_event.wait()
-                if self._stop_event.is_set():
-                    break
-                self._run_one_group()
+            if self._num_parallel_groups <= 1:
+                while not self._stop_event.is_set():
+                    self._pause_event.wait()
+                    if self._stop_event.is_set():
+                        break
+                    self._run_one_group()
+            else:
+                # Fan out: num_parallel_groups concurrent group workers, each
+                # running their own while-loop. The dataloader is protected by
+                # _dl_lock; all other shared state (gRPC clients, counters) is
+                # safe under Python's GIL for simple int increments.
+                def _worker() -> None:
+                    while not self._stop_event.is_set():
+                        self._pause_event.wait()
+                        if self._stop_event.is_set():
+                            break
+                        self._run_one_group()
+
+                logger.info(
+                    'RolloutManagerLoop starting %d parallel group workers '
+                    '(group_size=%d → %d concurrent episodes)',
+                    self._num_parallel_groups,
+                    self._group_size,
+                    self._num_parallel_groups * self._group_size,
+                )
+                threads = [
+                    threading.Thread(
+                        target=_worker, name=f'RolloutGroup-{i}', daemon=True
+                    )
+                    for i in range(self._num_parallel_groups)
+                ]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+                if self._exception is not None:
+                    raise self._exception
         except BaseException as exc:  # noqa: BLE001
             logger.exception('RolloutManagerLoop crashed')
             self._exception = exc
@@ -174,7 +210,8 @@ class RolloutManagerLoop:
         # ProRL expects the INNER instance dict (with instance_id, FAIL_TO_PASS, etc.) plus
         # data_source at the top level for handler routing.
         # If the row has a nested 'instance' key, flatten it here.
-        row = next(self._dataloader)
+        with self._dl_lock:
+            row = next(self._dataloader)
         if isinstance(row.get('instance'), dict):
             # Standard SkyRL parquet format: row['instance'] holds the SWE-bench fields.
             instance = dict(row['instance'])
@@ -191,21 +228,35 @@ class RolloutManagerLoop:
         snap = self._cache.snapshot()
         created_at_step = self._step_fn()
 
-        # Step 3: run group_size parallel episodes — same policy version for all.
+        # Step 3: run group_size episodes in parallel — same policy version for all.
+        # BC-0: snap captured once above; all futures use the same snap.version.
         group_uid = str(uuid.uuid4())
         raw_episodes: list[ProRLEpisodeResult] = []
         iter_start = time.monotonic()
-        for _ in range(self._group_size):
+
+        ep_lock = threading.Lock()
+
+        def _run_one_episode() -> None:
             if self._stop_event.is_set():
                 return
             try:
                 ep = self._prorl.run_episode(instance, snap.version)
-                raw_episodes.append(ep)
-                self._episodes_total += 1
+                with ep_lock:
+                    raw_episodes.append(ep)
+                    self._episodes_total += 1
             except Exception:  # noqa: BLE001
                 logger.exception(
                     'ProRL episode failed task_id=%s pv=%d', task_id, snap.version
                 )
+
+        ep_threads = [
+            threading.Thread(target=_run_one_episode, daemon=True)
+            for _ in range(self._group_size)
+        ]
+        for t in ep_threads:
+            t.start()
+        for t in ep_threads:
+            t.join()
 
         if not raw_episodes:
             return
@@ -298,7 +349,10 @@ class RolloutManagerLoop:
         """Async-fire-and-forget tee to ReplayArchive (BC-12)."""
         from datetime import datetime, timezone  # noqa: PLC0415
 
-        from rollout_fabric.schemas.episode_record import EpisodeRecord, Event  # noqa: PLC0415
+        from rollout_fabric.schemas.episode_record import (  # noqa: PLC0415
+            EpisodeRecord,
+            Event,
+        )
 
         now = datetime.now(timezone.utc)
         for ep, sample in zip(raw_episodes, group_samples):

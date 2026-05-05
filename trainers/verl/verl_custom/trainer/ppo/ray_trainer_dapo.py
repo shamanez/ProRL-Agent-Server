@@ -72,8 +72,14 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             metrics.update(
                 self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
             )
-            sampled = self.trajectory_store.sample_mini_batch(
-                n_groups=n_groups, current_step=self.global_steps
+            from verl_custom.fabric_adapter.live_store_batch import (
+                sample_mini_batch,  # noqa: PLC0415
+            )
+
+            sampled = sample_mini_batch(
+                self.trajectory_store,
+                n_groups=n_groups,
+                current_step=self.global_steps,
             )
             metrics.update(self.trajectory_store.metrics(self.global_steps))
             metrics.update(
@@ -103,8 +109,11 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
         )
 
         self.global_steps = 0
-        # to resolve a bug in vllm
-        if self.config.actor_rollout_ref.rollout.mode == 'async':
+        # In LiveStore mode async_rollout_manager is None (no local vLLM).
+        if (
+            self.config.actor_rollout_ref.rollout.mode == 'async'
+            and self.async_rollout_manager is not None
+        ):
             self.async_rollout_manager.sleep()
         # load checkpoint before doing anything
         self._load_checkpoint()
@@ -115,7 +124,8 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
             # ``/reload_lora`` is rejected as non-monotonic and weight-sync
             # stalls silently. Mirrors ``ray_trainer.py`` fit-time block.
             self.policy_version = self.global_steps
-            self.async_rollout_manager.policy_version = self.global_steps
+            if self.async_rollout_manager is not None:
+                self.async_rollout_manager.policy_version = self.global_steps
 
         # S2 — validation removed. Operating-principle 5 in the
         # implementation plan: validation flow deferred to a later cut.

@@ -48,6 +48,7 @@ from torch.distributed.fsdp import (
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from verl.single_controller.base.decorator import (
     Dispatch,
+    make_nd_compute_dataproto_dispatch_fn,
     register,
 )
 from verl.utils.config import omega_conf_to_dataclass
@@ -55,11 +56,72 @@ from verl.utils.fsdp_utils import (
     fsdp_version,
 )
 from verl.workers.config import HFModelConfig
-from verl.workers.fsdp_workers import (
-    AsyncActorRolloutRefWorker as _UpstreamAsyncWorker,
-)
+
+# verl renamed fsdp_workers → engine_workers and dropped AsyncActorRolloutRefWorker
+# in newer releases. Import from the old location first; fall back to the new one.
+# Full migration to the new engine_workers API is tracked separately.
+try:
+    from verl.workers.fsdp_workers import (
+        AsyncActorRolloutRefWorker as _UpstreamAsyncWorker,
+    )
+except (ImportError, ModuleNotFoundError):
+    from verl.workers.engine_workers import (  # type: ignore[no-redef]
+        ActorRolloutRefWorker as _UpstreamAsyncWorker,
+    )
 
 logger = logging.getLogger(__name__)
+
+
+class _ConfigProxy:
+    """Attribute-access wrapper for converted OmegaConf configs.
+
+    Returned by _patched_omega_conf_to_dataclass instead of raw OmegaConf.
+    Unlike DictConfig, plain attribute assignment stores Python objects as-is
+    (no OmegaConf wrapping), so HFModelConfig.hf_config (a Qwen3Config object)
+    can be set via ``actor_config.model_config = hf_model_config``.
+    """
+
+    def __init__(self, data: dict) -> None:
+        for k, v in data.items():
+            object.__setattr__(self, k, _ConfigProxy(v) if isinstance(v, dict) else v)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        object.__setattr__(self, key, value)
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __getattr__(self, name: str) -> Any:
+        # Return None for any attribute not set in __init__.
+        # New VERL adds fields (zero_indexed_step, etc.) absent from our YAML;
+        # returning None lets downstream code apply its own defaults/guards.
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return None
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        if not isinstance(key, str):
+            return default
+        val = getattr(self, key)
+        return default if val is None else val
+
+    def __contains__(self, key: str) -> bool:
+        return getattr(self, key, None) is not None
+
+    def keys(self) -> list:
+        return [k for k in self.__dict__ if not k.startswith('_')]
+
+    def values(self) -> list:
+        return [self.__dict__[k] for k in self.keys()]
+
+    def items(self):
+        return [(k, self.__dict__[k]) for k in self.keys()]
+
+    def __iter__(self):
+        return iter(self.keys())
 
 
 class VLLMAsyncRolloutCompat:
@@ -247,6 +309,51 @@ class AsyncActorRolloutRefWorker(_UpstreamAsyncWorker):
     # Override init_model: pass raw OmegaConf config to DataParallelPPOActor
     # ------------------------------------------------------------------
 
+    def _inject_engine_fields(self) -> None:
+        """Synthesize engine=FSDPEngineConfig on actor/ref config sections.
+
+        New VERL's engine_workers.py accesses actor_config.engine after calling
+        omega_conf_to_dataclass(self.config.actor).  Our patched version returns
+        the raw OmegaConf (no _target_), so .engine is absent.  We inject a
+        proper FSDPEngineConfig built from the existing fsdp_config sub-section.
+        """
+        from dataclasses import fields as dc_fields
+
+        from omegaconf import OmegaConf
+        from verl.workers.config import FSDPEngineConfig
+
+        known = {f.name for f in dc_fields(FSDPEngineConfig)}
+
+        for section in ('actor', 'ref'):
+            section_cfg = getattr(self.config, section, None)
+            if section_cfg is None or 'engine' in section_cfg:
+                continue
+            strategy = getattr(section_cfg, 'strategy', 'fsdp')
+            kwargs: dict = {'strategy': strategy}
+            fsdp_raw = getattr(section_cfg, 'fsdp_config', None)
+            if fsdp_raw is not None:
+                raw = (
+                    OmegaConf.to_container(
+                        fsdp_raw, resolve=True, throw_on_missing=False
+                    )
+                    or {}
+                )
+                if isinstance(raw, dict):
+                    raw.pop('_target_', None)
+                    kwargs.update({k: v for k, v in raw.items() if k in known})
+            # OmegaConf.structured() rejects None for int-typed fields (e.g.
+            # max_token_len_per_gpu: int = None in EngineConfig). Use asdict +
+            # OmegaConf.create (untyped DictConfig) to avoid the validation.
+            import dataclasses as _dc  # noqa: PLC0415
+
+            engine_dict = _dc.asdict(FSDPEngineConfig(**kwargs))
+            OmegaConf.update(
+                section_cfg,
+                'engine',
+                OmegaConf.create(engine_dict),
+                merge=False,
+            )
+
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def init_model(self) -> None:
         """Override upstream init_model to handle verl_custom config compat.
@@ -265,21 +372,67 @@ class AsyncActorRolloutRefWorker(_UpstreamAsyncWorker):
            via ``.get()`` instead of crashing.
         """
         import verl.utils.config as _cfg
-        import verl.workers.fsdp_workers as _fw
+
+        try:
+            import verl.workers.fsdp_workers as _fw
+        except (ImportError, ModuleNotFoundError):
+            import verl.workers.engine_workers as _fw  # type: ignore[no-redef]
         from omegaconf import OmegaConf
+
+        # Disable struct mode first so we can add synthetic fields below.
+        OmegaConf.set_struct(self.config, False)
+
+        # Synthesize the 'engine' field expected by new VERL on actor/ref sections.
+        # FSDPActorConfig.__post_init__ normally sets engine=fsdp_config, but our
+        # patch returns raw OmegaConf (no _target_), so we inject it manually.
+        self._inject_engine_fields()
 
         original_fn = _cfg.omega_conf_to_dataclass
 
         def _patched_omega_conf_to_dataclass(config, dataclass_type=None):
-            """If the config lacks ``_target_`` and no ``dataclass_type`` is
-            given, return the raw config instead of crashing."""
+            """Compatibility shim for new VERL omega_conf_to_dataclass API.
+
+            New VERL requires _target_ in every config section.  Our YAML pre-
+            dates this convention.  Two cases:
+
+            1. Model configs (have 'path', no 'strategy'): instantiate as
+               HFModelConfig so __post_init__ loads hf_config from disk.
+               Return the dataclass instance directly — NOT wrapped in OmegaConf
+               — so that actor_config.model_config = HFModelConfig_instance works
+               without OmegaConf rejecting Qwen3Config as an unsupported type.
+
+            2. All other configs (actor, ref, rollout, …): return a _ConfigProxy
+               built from OmegaConf.to_container().  _ConfigProxy stores Python
+               objects as plain attributes (no OmegaConf wrapping), supports
+               recursive attribute access, and has .get(key, default).
+            """
             if dataclass_type is None and '_target_' not in config:
+                import dataclasses as _dc  # noqa: PLC0415
+
+                if 'path' in config and 'strategy' not in config:
+                    # Model config: create HFModelConfig to load hf_config.
+                    try:
+                        known = {f.name for f in _dc.fields(HFModelConfig)}
+                        raw = OmegaConf.to_container(
+                            config, resolve=True, throw_on_missing=False
+                        )
+                        if isinstance(raw, dict):
+                            return HFModelConfig(
+                                **{k: v for k, v in raw.items() if k in known}
+                            )
+                    except Exception:
+                        pass
+                # Actor / ref / rollout / other: return _ConfigProxy so that
+                # subsequent attribute assignment (e.g. actor_config.model_config =
+                # HFModelConfig_instance) stores the Python object without OmegaConf
+                # trying to wrap Qwen3Config as an AnyNode.
+                raw = OmegaConf.to_container(
+                    config, resolve=True, throw_on_missing=False
+                )
+                if isinstance(raw, dict):
+                    return _ConfigProxy(raw)
                 return config
             return original_fn(config, dataclass_type)
-
-        # Disable struct mode on the entire config tree so that accessing
-        # new verl v0.8 fields that are absent from our YAML doesn't crash.
-        OmegaConf.set_struct(self.config, False)
 
         _fw.omega_conf_to_dataclass = _patched_omega_conf_to_dataclass
         _cfg.omega_conf_to_dataclass = _patched_omega_conf_to_dataclass
@@ -313,6 +466,8 @@ class AsyncActorRolloutRefWorker(_UpstreamAsyncWorker):
     # scope (the rest of the file does not need them).
 
     def _build_compute_log_prob():
+        from contextlib import nullcontext
+
         from verl import DataProto
         from verl.single_controller.base.decorator import (
             make_nd_compute_dataproto_dispatch_fn,
@@ -328,55 +483,112 @@ class AsyncActorRolloutRefWorker(_UpstreamAsyncWorker):
         )
         @DistProfiler.annotate(color='blue', role='actor_compute_log_prob')
         def compute_log_prob(self, data: DataProto):
-            from contextlib import nullcontext
-
             assert self._is_actor
-            if self._is_offload_param:
-                load_fsdp_model_to_gpu(self.actor_module_fsdp)
+
+            # verl v0.8: _is_offload_param lives on self.actor.engine, not self.
+            engine = self.actor.engine
+            is_offload = getattr(engine, '_is_offload_param', False)
+            actor_module = engine.module
+
+            if is_offload:
+                load_fsdp_model_to_gpu(actor_module)
 
             is_lora = data.meta_info.pop('is_lora', False)
-            adapter_ctx = (
-                self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
-            )
-            config_source = self.config.ref if is_lora else self.config.rollout
-            data.meta_info['micro_batch_size'] = (
-                config_source.log_prob_micro_batch_size_per_gpu
-            )
-            data.meta_info['max_token_len'] = (
-                config_source.log_prob_max_token_len_per_gpu
-            )
-            data.meta_info['use_dynamic_bsz'] = config_source.log_prob_use_dynamic_bsz
-            data.meta_info['temperature'] = self.config.rollout.temperature
-            data.meta_info.setdefault('pad_token_id', self.tokenizer.pad_token_id)
+            # verl v0.8: adapter disable is on engine, not actor_module directly.
+            adapter_ctx = engine.disable_adapter() if is_lora else nullcontext()
 
-            # KEY CHANGE: force False, override upstream `not is_lora`.
-            calculate_entropy = False
-            with self.ulysses_sharding_manager:
-                with adapter_ctx:
-                    outputs = self.actor.compute_log_prob(
-                        data=data, calculate_entropy=calculate_entropy
-                    )
-                if not is_lora:
-                    tensors = {'old_log_probs': outputs['log_probs']}
-                else:
-                    tensors = {'ref_log_prob': outputs['log_probs']}
-                # KEY CHANGE: inject zero entropys so trainer access doesn't
-                # KeyError (entropy_coeff=0 zeroes its loss contribution).
-                tensors['entropys'] = torch.zeros_like(outputs['log_probs'])
-                if 'sum_pi_squared' in outputs:
-                    tensors['sum_pi_squared'] = outputs['sum_pi_squared']
-                output = DataProto.from_dict(
-                    tensors=tensors,
-                    meta_info={'temperature': self.config.rollout.temperature},
+            # verl v0.8 FSDPEngineWithLMHead only accepts nested (no-padding)
+            # tensors.  Our LiveStore batch is padded (from pack_unpadded_groups),
+            # so we must convert.  attention_mask marks valid (non-pad) positions.
+            from verl.utils.tensordict_utils import (  # noqa: PLC0415
+                assign_non_tensor,
+                nested_tensor_from_tensor_list,
+            )
+
+            def _to_nested(padded, mask):
+                seq_lens = mask.long().sum(dim=-1).tolist()
+                seqs = [padded[i, : int(n)] for i, n in enumerate(seq_lens)]
+                return nested_tensor_from_tensor_list(seqs)
+
+            infer_batch = data.batch
+            attn = infer_batch['attention_mask']  # (B, total_len)
+
+            # 'responses' is (B, resp_len); derive prompt_len from input_ids shape.
+            resp_len = infer_batch['responses'].shape[1]
+            total_len = attn.shape[1]
+            prompt_len = total_len - resp_len
+
+            # slice_response_from_unpad_output reads 'prompts' (padded) to split
+            # the log-prob output into prompt/response portions.  Keep padded.
+            infer_batch['prompts'] = infer_batch['input_ids'][:, :prompt_len]
+
+            # Convert full-sequence tensors to nested (required by the engine).
+            infer_batch['input_ids'] = _to_nested(infer_batch['input_ids'], attn)
+            infer_batch['position_ids'] = _to_nested(infer_batch['position_ids'], attn)
+            # loss_mask is (B, resp_len); extend to full seq with 0s for prompt.
+            full_loss_mask = torch.cat(
+                [
+                    torch.zeros(
+                        attn.shape[0],
+                        prompt_len,
+                        dtype=infer_batch['loss_mask'].dtype,
+                        device=infer_batch['loss_mask'].device,
+                    ),
+                    infer_batch['loss_mask'],
+                ],
+                dim=1,
+            )
+            infer_batch['loss_mask'] = _to_nested(full_loss_mask, attn)
+
+            # Temperature: T=1.0 is correct for log-prob recompute (teacher-forced).
+            # vLLM returns log-probs from raw logits (T=1.0 effective) so the IS
+            # ratio π_θ/π_β = exp(lp_new - lp_old) is self-consistent at T=1.0.
+            # use_fused_kernels=True requires a Python scalar, not a per-sample tensor.
+            assign_non_tensor(
+                infer_batch,
+                temperature=float(self.config.rollout.temperature),
+                # Disable loss computation — we only need log-probs, not PPO loss.
+                # This avoids ppo_loss reading global_batch_size from the batch.
+                compute_loss=False,
+            )
+
+            with adapter_ctx:
+                outputs = self.actor.infer_batch(infer_batch)
+
+            # The engine operates on nested tensors; the Ray controller gathers
+            # outputs across DP workers via torch.cat(dim=0) which fails on nested.
+            # Convert log_probs back to padded (B, resp_len) before returning.
+            log_probs = outputs['log_probs']
+            if isinstance(log_probs, torch.Tensor) and log_probs.is_nested:
+                resp_len = data.batch['responses'].shape[1]
+                log_probs = torch.nested.to_padded_tensor(
+                    log_probs,
+                    padding=0.0,
+                    output_size=(log_probs.size(0), resp_len),
                 )
 
+            if not is_lora:
+                tensors = {'old_log_probs': log_probs}
+            else:
+                tensors = {'ref_log_prob': log_probs}
+            # Inject zero entropys: trainer reads batch['entropys'] directly;
+            # entropy_coeff=0 in config so it contributes nothing to the loss.
+            tensors['entropys'] = torch.zeros_like(log_probs)
+            if 'sum_pi_squared' in outputs:
+                tensors['sum_pi_squared'] = outputs['sum_pi_squared']
+
+            output = DataProto.from_dict(
+                tensors=tensors,
+                meta_info={'temperature': self.config.rollout.temperature},
+            )
             output = output.to('cpu')
 
-            if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
-                self.actor.actor_module._handle.reshard(True)
+            # FSDP1 requires explicit reshard after eval.
+            if self.world_size > 1 and fsdp_version(actor_module) == 1:
+                actor_module._handle.reshard(True)
 
-            if self._is_offload_param:
-                offload_fsdp_model_to_cpu(self.actor_module_fsdp)
+            if is_offload:
+                offload_fsdp_model_to_cpu(actor_module)
                 log_gpu_memory_usage(
                     'After offload actor model during compute_log_prob',
                     logger=logger,
@@ -388,6 +600,175 @@ class AsyncActorRolloutRefWorker(_UpstreamAsyncWorker):
 
     compute_log_prob = _build_compute_log_prob()
     del _build_compute_log_prob
+
+    # ------------------------------------------------------------------
+    # update_actor: convert padded batch to nested before FSDP train step
+    # ------------------------------------------------------------------
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name='actor'))
+    def update_actor(self, data: 'DataProto') -> 'DataProto':  # noqa: F821
+        """Override to convert padded LiveStore batch to nested tensors.
+
+        verl v0.8 FSDPEngineWithLMHead only accepts DatasetPadMode.NO_PADDING
+        (nested/jagged tensors).  pack_unpadded_groups produces padded tensors,
+        so we convert input_ids / position_ids / loss_mask here before
+        delegating to the base class train_mini_batch path.
+        """
+        from verl.utils.tensordict_utils import (
+            nested_tensor_from_tensor_list,  # noqa: PLC0415
+        )
+
+        def _to_nested(padded, mask):
+            seq_lens = mask.long().sum(dim=-1).tolist()
+            seqs = [padded[i, : int(n)] for i, n in enumerate(seq_lens)]
+            return nested_tensor_from_tensor_list(seqs)
+
+        batch = data.batch
+        attn = batch['attention_mask']  # (B, total_len)
+
+        resp_len = batch['responses'].shape[1]
+        prompt_len = attn.shape[1] - resp_len
+
+        # slice_response_from_unpad_output needs 'prompts' (padded) to split output.
+        batch['prompts'] = batch['input_ids'][:, :prompt_len]
+
+        batch['input_ids'] = _to_nested(batch['input_ids'], attn)
+        batch['position_ids'] = _to_nested(batch['position_ids'], attn)
+
+        full_lm = torch.cat(
+            [
+                torch.zeros(
+                    attn.shape[0],
+                    prompt_len,
+                    dtype=batch['loss_mask'].dtype,
+                    device=batch['loss_mask'].device,
+                ),
+                batch['loss_mask'],
+            ],
+            dim=1,
+        )
+        batch['loss_mask'] = _to_nested(full_lm, attn)
+
+        # Inject training-loop fields that new VERL expects in the TensorDict
+        # before calling train_mini_batch → ppo_loss.
+        # global_batch_size: total samples across all DP ranks; used by ppo_loss
+        # for SUM-vs-MEAN aggregation in loss normalisation.
+        from verl.utils.tensordict_utils import assign_non_tensor  # noqa: PLC0415
+
+        local_bsz = int(batch['responses'].size(0))
+        # world_size = FSDP DP size; mini_batch_size must be the GLOBAL total
+        # so that engine.train_mini_batch asserts mini_batch_size % world_size == 0.
+        fsdp_dp_size = self.actor.engine.get_data_parallel_size()
+        global_bsz = local_bsz * fsdp_dp_size
+        assign_non_tensor(
+            batch,
+            compute_loss=True,
+            # Temperature for actor forward pass — same reasoning as compute_log_prob:
+            # use T=1.0 so log-probs are consistent with vLLM's raw-logit log-probs.
+            # use_fused_kernels=True requires a scalar.
+            temperature=float(self.config.rollout.temperature),
+            global_batch_size=global_bsz,
+            mini_batch_size=global_bsz,
+            epochs=int(self.config.actor.ppo_epochs or 1),
+            seed=0,
+            dataloader_kwargs={'shuffle': False},
+        )
+
+        output = self.actor.train_mini_batch(data=batch)
+        if output is None:
+            return None
+
+        output_cpu = output.cpu()
+        # Extract metrics and wrap as DataProto so the DAPO trainer can read
+        # actor_output.meta_info['metrics'] (matching new VERL's ray_trainer API).
+        from verl import DataProto  # noqa: PLC0415
+        from verl.utils import tensordict_utils as _tu  # noqa: PLC0415
+
+        metrics = _tu.get(output_cpu, 'metrics') or {}
+        return DataProto.from_single_dict(data={}, meta_info={'metrics': metrics})
+
+    # ------------------------------------------------------------------
+    # save_checkpoint: FSDP shards + LoRA adapter for PolicyRegistry
+    # ------------------------------------------------------------------
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def save_checkpoint(
+        self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None
+    ):
+        """Override to save the LoRA adapter alongside the FSDP shards.
+
+        _publish_lora_adapter in ray_trainer.py expects:
+          {local_path}/actor/lora_adapter/adapter_model.safetensors
+          {local_path}/actor/lora_adapter/adapter_config.json
+
+        The base FSDP checkpoint manager saves model shards but not the LoRA
+        adapter.  We call get_per_tensor_param() (an all-reduce over FSDP ranks)
+        to gather the LoRA-only weights, then rank-0 serialises them.
+        """
+        import json  # noqa: PLC0415
+        import os  # noqa: PLC0415
+
+        # 1. Save FSDP shards (model + optimizer + extra_state)
+        super().save_checkpoint(local_path, hdfs_path, global_step, max_ckpt_to_keep)
+
+        # 2. Extract LoRA adapter — all ranks participate in the all-gather
+        #    but only rank-0 writes to disk.
+        logger.info('save_checkpoint: extracting LoRA adapter via get_per_tensor_param')
+        try:
+            per_tensor_param, peft_config_dict = (
+                self.actor.engine.get_per_tensor_param()
+            )
+        except Exception:
+            logger.warning(
+                'save_checkpoint: get_per_tensor_param failed — LoRA adapter NOT saved',
+                exc_info=True,
+            )
+            return
+
+        logger.info(
+            'save_checkpoint: peft_config_dict=%s',
+            type(peft_config_dict).__name__,
+        )
+        if peft_config_dict is None:
+            logger.info(
+                'save_checkpoint: peft_config_dict is None — skipping LoRA save'
+            )
+            return  # full-weight training, no LoRA adapter to publish
+
+        if torch.distributed.get_rank() == 0:
+            from safetensors.torch import save_file  # noqa: PLC0415
+
+            # local_path is already {global_step_N}/actor — don't add 'actor' again.
+            adapter_dir = os.path.join(local_path, 'lora_adapter')
+            os.makedirs(adapter_dir, exist_ok=True)
+            # per_tensor_param may be a generator — materialise to dict first.
+            lora_tensors = dict(per_tensor_param)
+            # Deduplicate tensors sharing memory (e.g. tied embeddings
+            # lm_head.weight ≡ model.embed_tokens.weight) — safetensors
+            # raises an error on shared-memory entries.
+            seen_ptrs: dict = {}
+            deduped: dict = {}
+            for k, t in lora_tensors.items():
+                ptr = t.data_ptr()
+                if ptr not in seen_ptrs:
+                    seen_ptrs[ptr] = k
+                    deduped[k] = t.contiguous()
+            save_file(deduped, os.path.join(adapter_dir, 'adapter_model.safetensors'))
+
+            # peft_config_dict may contain sets (e.g. target_modules) which
+            # are not JSON-serialisable — convert them to sorted lists.
+            def _json_safe(obj):
+                if isinstance(obj, set):
+                    return sorted(obj)
+                raise TypeError(
+                    f'Object of type {type(obj).__name__} is not JSON serializable'
+                )
+
+            with open(os.path.join(adapter_dir, 'adapter_config.json'), 'w') as fp:
+                json.dump(peft_config_dict, fp, indent=2, default=_json_safe)
+            logger.info('Saved LoRA adapter to %s', adapter_dir)
+
+        torch.distributed.barrier()
 
     # ------------------------------------------------------------------
     # Dispatch methods for ExternalRayDistributedExecutor

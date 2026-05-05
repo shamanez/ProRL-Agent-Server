@@ -34,7 +34,6 @@ import ray
 import torch
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import Dataset, Sampler
-from torchdata.stateful_dataloader import StatefulDataLoader
 from tqdm import tqdm
 from verl import DataProto
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
@@ -700,88 +699,22 @@ class RayPPOTrainer:
         print('[validate_config] All configuration checks passed successfully!')
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
-        """Creates train/val dataloaders — skipped entirely in LiveStore mode."""
-        # LiveStore mode: all training data comes from get_batch(); no parquet
-        # DataLoader is needed. RayPPOTrainerDAPO never iterates self.train_dataloader.
-        import os
+        """BC-14 + BC-15: trainer is a pure LiveStore consumer.
 
-        _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '') or (
-            str(self.config.replay.get('live_store_socket', ''))
-            if hasattr(self.config, 'replay')
-            else ''
-        )
-        if _live_store_socket:
-            self.train_dataset = self.val_dataset = None
-            self.train_dataloader = self.val_dataloader = None
-            return
+        All training data arrives via LiveStoreClient.get_batch(); no parquet
+        DataLoader is created here. RolloutManager owns the dataset (BC-14).
+        """
+        self.train_dataset = self.val_dataset = None
+        self.train_dataloader = self.val_dataloader = None
 
-        # Classic mode: parquet DataLoader for rollout generation.
-        from verl_custom.trainer.main_ppo import create_rl_dataset, create_rl_sampler
-
-        if train_dataset is None:
-            train_dataset = create_rl_dataset(
-                self.config.data.train_files,
-                self.config.data,
-                self.tokenizer,
-                self.processor,
+        # total_training_steps from explicit config (mandatory in LiveStore mode).
+        total_training_steps = self.config.trainer.total_training_steps
+        if total_training_steps is None:
+            raise ValueError(
+                'trainer.total_training_steps must be set explicitly in LiveStore mode '
+                '(no DataLoader means it cannot be derived from dataset length × epochs).'
             )
-        if val_dataset is None:
-            val_dataset = create_rl_dataset(
-                self.config.data.val_files,
-                self.config.data,
-                self.tokenizer,
-                self.processor,
-            )
-        self.train_dataset, self.val_dataset = train_dataset, val_dataset
-
-        if train_sampler is None:
-            train_sampler = create_rl_sampler(self.config.data, self.train_dataset)
-        if collate_fn is None:
-            from verl_custom.utils.dataset.rl_dataset import (
-                collate_fn as default_collate_fn,
-            )
-
-            collate_fn = default_collate_fn
-
-        self.train_dataloader = StatefulDataLoader(
-            dataset=self.train_dataset,
-            batch_size=self.config.data.get(
-                'gen_batch_size', self.config.data.train_batch_size
-            ),
-            num_workers=self.config.data.get('dataloader_num_workers', 8),
-            drop_last=True,
-            collate_fn=collate_fn,
-            sampler=train_sampler,
-        )
-
-        val_batch_size = self.config.data.val_batch_size
-        if val_batch_size is None:
-            val_batch_size = len(self.val_dataset)
-
-        self.val_dataloader = StatefulDataLoader(
-            dataset=self.val_dataset,
-            batch_size=val_batch_size,
-            num_workers=self.config.data.get('dataloader_num_workers', 8),
-            shuffle=self.config.data.get('validation_shuffle', True),
-            drop_last=False,
-            collate_fn=collate_fn,
-        )
-
-        assert len(self.train_dataloader) >= 1, 'Train dataloader is empty!'
-        assert len(self.val_dataloader) >= 1, 'Validation dataloader is empty!'
-
-        print(
-            f'Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: {len(self.val_dataloader)}'
-        )
-
-        total_training_steps = (
-            len(self.train_dataloader) * self.config.trainer.total_epochs
-        )
-
-        if self.config.trainer.total_training_steps is not None:
-            total_training_steps = self.config.trainer.total_training_steps
-
-        self.total_training_steps = total_training_steps
+        self.total_training_steps = int(total_training_steps)
         print(f'Total training steps: {self.total_training_steps}')
 
         try:
@@ -789,14 +722,14 @@ class RayPPOTrainer:
             with open_dict(self.config):
                 if OmegaConf.select(self.config, 'actor_rollout_ref.actor.optim'):
                     self.config.actor_rollout_ref.actor.optim.total_training_steps = (
-                        total_training_steps
+                        self.total_training_steps
                     )
                 if OmegaConf.select(self.config, 'critic.optim'):
-                    self.config.critic.optim.total_training_steps = total_training_steps
+                    self.config.critic.optim.total_training_steps = (
+                        self.total_training_steps
+                    )
         except Exception as e:
-            print(
-                f'Warning: Could not set total_training_steps in config. Structure missing? Error: {e}'
-            )
+            print(f'Warning: Could not set total_training_steps in config. Error: {e}')
 
     def _dump_generations(
         self, inputs, outputs, scores, reward_extra_infos_dict, dump_path
@@ -1248,8 +1181,23 @@ class RayPPOTrainer:
 
         # create async rollout manager and request scheduler
         self.async_rollout_mode = False
+        self.async_rollout_manager = None
         if self.config.actor_rollout_ref.rollout.mode == 'async':
-            if (
+            _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '') or str(
+                self.config.replay.get('live_store_socket', '')
+                if hasattr(self.config, 'replay')
+                else ''
+            )
+            if _live_store_socket:
+                # LiveStore mode (BC-15): all rollout generation is handled
+                # externally by RolloutManager. The FSDP actor still computes
+                # log_probs via compute_log_prob, but the vLLM engine inside
+                # VLLMAsyncRolloutCompat is NEVER initialized
+                # (inference_engine stays None). No AsyncLLMServerManager
+                # is created, so no GPU memory is consumed by a sleeping vLLM.
+                self.async_rollout_mode = True
+                # async_rollout_manager deliberately left None.
+            elif (
                 self.config.actor_rollout_ref.rollout.get('async_manager', '')
                 == 'openhands'
             ):
@@ -1261,6 +1209,13 @@ class RayPPOTrainer:
                     from verl_custom.nvidia.rollout.async_server import (
                         AsyncLLMServerManager,
                     )
+                self.async_rollout_mode = True
+                self.async_rollout_manager = AsyncLLMServerManager(
+                    config=self.config,
+                    worker_group=self.actor_rollout_wg,
+                )
+                if self.config.algorithm.get('filter_groups', {}).get('enable', False):
+                    self.async_rollout_manager.data_loader = self.train_dataloader
             else:
                 try:
                     from verl.workers.rollout.async_server import AsyncLLMServerManager
@@ -1270,15 +1225,11 @@ class RayPPOTrainer:
                         'Set actor_rollout_ref.rollout.async_manager="openhands" to use '
                         "verl_custom's AsyncLLMServerManager instead."
                     )
-
-            self.async_rollout_mode = True
-            self.async_rollout_manager = AsyncLLMServerManager(
-                config=self.config,
-                worker_group=self.actor_rollout_wg,
-            )
-            # need to set data_loader for dapo
-            if self.config.algorithm.get('filter_groups', {}).get('enable', False):
-                self.async_rollout_manager.data_loader = self.train_dataloader
+                self.async_rollout_mode = True
+                self.async_rollout_manager = AsyncLLMServerManager(
+                    config=self.config,
+                    worker_group=self.actor_rollout_wg,
+                )
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -1347,9 +1298,11 @@ class RayPPOTrainer:
         from verl.utils.fs import local_mkdir_safe  # noqa: PLC0415
 
         local_mkdir_safe(local_global_step_folder)
-        dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
-        dataloader_state_dict = self.train_dataloader.state_dict()
-        torch.save(dataloader_state_dict, dataloader_local_path)
+        # In LiveStore mode train_dataloader is None — skip dataloader checkpoint.
+        if self.train_dataloader is not None:
+            dataloader_local_path = os.path.join(local_global_step_folder, 'data.pt')
+            dataloader_state_dict = self.train_dataloader.state_dict()
+            torch.save(dataloader_state_dict, dataloader_local_path)
 
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(
@@ -1560,7 +1513,8 @@ class RayPPOTrainer:
     def _load_checkpoint(self):
         # Sleep and wake up the async rollout manager: https://github.com/volcengine/verl/issues/2613
         # This syncs weights to vllm server. Also release GPU memory.
-        if self.async_rollout_mode:
+        # In LiveStore mode async_rollout_manager is None (no local vLLM).
+        if self.async_rollout_mode and self.async_rollout_manager is not None:
             self.async_rollout_manager.sleep()
 
         if self.config.trainer.resume_mode == 'disable':
@@ -1621,7 +1575,7 @@ class RayPPOTrainer:
         # load dataloader,
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, 'data.pt')
-        if os.path.exists(dataloader_local_path):
+        if os.path.exists(dataloader_local_path) and self.train_dataloader is not None:
             dataloader_state_dict = torch.load(
                 dataloader_local_path, weights_only=False
             )

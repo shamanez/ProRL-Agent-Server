@@ -257,6 +257,9 @@ actor_rollout_ref:
     # optimizer configs
     optim:
 
+      # Gradient clipping norm (verl v0.8 renamed grad_clip → clip_grad).
+      clip_grad: 1.0
+
       # Optimizer class name (e.g. "AdamW", "AdamW8bit")
       optimizer: AdamW
 
@@ -421,6 +424,21 @@ actor_rollout_ref:
 
     # TP size for rollout. Only effective for vLLM.
     tensor_model_parallel_size: 2
+
+    # DP size for rollout (default 1; verl v0.8 engine_workers reads this).
+    data_parallel_size: 1
+
+    # PP size for rollout (default 1; verl v0.8 engine_workers reads this).
+    pipeline_model_parallel_size: 1
+
+    # Expert parallel size (default 1; used by vllm_rollout.py).
+    expert_parallel_size: 1
+
+    # Rollout checkpoint engine config (verl v0.8).
+    checkpoint_engine:
+      backend: naive
+      update_weights_bucket_megabytes: 2048
+      engine_kwargs: {}
 
     # max number of tokens in a batch
     max_num_batched_tokens: 8192
@@ -826,7 +844,9 @@ algorithm:
 trainer:
 
   # Whether to balance batch sizes across distributed workers
-  balance_batch: True
+  # Disabled: LiveStore batch size may not divide evenly by DP world_size
+  # (groups can have < group_size samples when some episodes fail).
+  balance_batch: False
 
   # Number of epochs in training
   total_epochs: 30

@@ -1,113 +1,49 @@
 #!/bin/bash
-# Phase 2 Hydra launcher: fully-async decoupled topology (trainer FSDP
-# local, vLLM pool on EC2, ProRL on host) with rank-16 LoRA training,
-# bounded replay buffer, continuous rollout producer, and clipped
-# temporal importance-sampling correction.
+# Hydra launcher for the FSDP TrainerAdapter — LiveStore consumer only.
 #
-# Sibling of run_proagent_qwn3_4B_instruct_weightsync.sh. Differences:
+# BC-15 contract: this script passes NO vLLM endpoints, NO ProRL address,
+# and NO parquet paths (BC-14). The trainer's only external connections are:
+#   - LiveStore      (gRPC UDS)  — training data via get_batch()
+#   - PolicyRegistry (gRPC UDS)  — LoRA publish via publish_policy_version()
 #
-#   - EXPERIMENT_NAME=fullasync-replay-prorl (distinct WandB run slot).
-#   - No +algorithm.filter_groups.enable hardcoded here — the outer
-#     s3_fullasync_docker.sh owns that knob so it can default to False
-#     (plain GRPO) and be flipped to True only for the DAPO gate.
-#     See plans-n-solutions/stages/full_async.md §5a.
-#   - No +replay.* keys hardcoded — outer docker script owns them.
-#   - tis_imp_ratio_cap stays at 2 (mechanism shared with Phase 1); the
-#     Cut 3 gate is +replay.use_temporal_is, which is set by the docker
-#     script.
-#
-# `set -euo pipefail` so the trainer's exit code propagates to the
-# docker launcher (s3_fullasync_docker.sh).
+# All rollout generation belongs to RolloutManager + EnvironmentProvider.
+# Start those services first via ops/services/start_all.sh.
 set -euo pipefail
 
 PROJECT_NAME='ProAgent'
 EXPERIMENT_NAME='fullasync-replay-prorl'
-DATA_PATH="${DATA_PATH:-/data/SkyRL-v0-293}"
 SFT_MODEL_PATH="${SFT_MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
-TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
 CKPT_PATH="${CKPT_PATH:-/workspace/outputs}"
 
-
 BATCH_SIZE=${BATCH_SIZE:-4}
-# Cut 6 — producer batch (DAPO ``requested_batch_size``) is decoupled
-# from trainer batch. Default is 4× ``BATCH_SIZE`` so post-warmup the
-# replay buffer always carries enough fresh groups for the trainer to
-# draw without blocking. Override at run time via
-# ``GEN_BATCH_SIZE=...`` in the outer launcher.
-GEN_BATCH_SIZE=${GEN_BATCH_SIZE:-$((BATCH_SIZE * 4))}
-MAX_NUM_ITERS=30
-# DAPO-aligned: 8 samples per prompt balances GRPO group-stat signal
-# (meaningful with filter_groups on) against rollout cost.
+# NUM_TRAJ: siblings per group. Must match the group_size used by RolloutManager.
 NUM_TRAJ=8
 SAVE_FREQ=${SAVE_FREQ:-1}
-# OpenHands worker concurrency. Pool is 4× L4 24 GB on vllm-instance
-# (verified via nvidia-smi 2026-04-30). Earlier comment claimed 32
-# saturated 4× H100; that was wrong hardware spec.
-#
-# Cut 9 (step-20 wedge stabilization): bumped to 64 alongside pinning
-# (multi-tenant LoRA serving) + openhands_max_retries=0 + history
-# truncation. The prior 64→47-min regression was measured under
-# filter_groups=True with the wedge present; with the triple in place
-# we expect the worker count to be the throughput knob, not a
-# wedge amplifier. Revisit if first-step wall-clock blows up again.
-OPENHANDS_NUM_WORKERS="${OPENHANDS_NUM_WORKERS:-32}"
 
-# DAPO drops KL loss: RLVR rewards are verifiable, no reward-model drift to
-# anchor against. Coef/type kept as unused sentinels for readability.
 USE_KL_LOSS=False
 KL_LOSS_COEF=0.001
 KL_LOSS_TYPE=low_var_kl
 ENTROPY_COEFF=0
-# DAPO "clip-higher": asymmetric clip preserves low-probability token
-# exploration (papers/DAPO §3.2). Low bound stays at 0.2.
+# DAPO asymmetric clip (papers/DAPO §3.2).
 CLIP_RATIO_LOW=0.2
 CLIP_RATIO_HIGH=0.28
 
-# GPU_MEM_UTIL is unused for trainer-side vLLM (external pool owns vLLM memory)
-# but kept to avoid Hydra removal noise.
+# GPU_MEM_UTIL: local vLLM init param — the vLLM engine is put to sleep
+# immediately (async_rollout_manager.sleep()), so this only affects startup
+# memory reservation. Overridden by start.sh to 0.45 for A100 headroom.
 GPU_MEM_UTIL=0.8
-# rollout_dp_size = world_size / TP_SIZE = 8 / 2 = 4, matching the 4 remote
-# endpoints. SP_SIZE=4 for 8-GPU FSDP (DP=2). Bumped from 2 → 4 after the
-# Cut-1 max_response_length=16384 raise OOM'd backward at SP=2 (40.36 GiB
-# requested on 39.49 GiB A100). Each sequence is now split 4-way along the
-# token dim (Ulysses), roughly halving per-GPU activation memory. SP=4
-# divides Qwen3-4B's 32 query heads / 8 KV heads / world_size=8 cleanly.
-# If 4 still OOMs, escalate to 8 (DP=1, slowest but guaranteed fit).
 TP_SIZE=2
 NNODES=1
+# SP=4: Ulysses sequence parallelism for 8-GPU FSDP (DP=2).
 SP_SIZE=4
 TEMPERATURE=1.4
 TOP_P=0.95
 
-# Sequence length contract (two-knob — see also async_server.py near
-# self.total_len init, and the TrajectoryStore constructor in
-# ray_trainer.py):
-#   data.max_prompt_length=31232:       dataset filter + addend in total_len.
-#                                       Never reaches vLLM directly.
-#   data.max_response_length=2048:      per-turn vLLM max_output_tokens AND
-#                                       addend in total_len. Tightened from
-#                                       16384 → 2048: long-tail turns were
-#                                       blowing past the publish-boundary
-#                                       drain budget; multi-turn budget is
-#                                       still bounded by total_len.
-#   total_len = 33280:                  plumbed to vLLM as max_model_len; the
-#                                       real per-call ceiling. vLLM enforces
-#                                       seed + body <= max_model_len.
-#   max_starting_message_length=12000:  empirical SWE-Gym (system + task)
-#                                       seed cap; rollout-side prompt-slot
-#                                       width. Independent knob.
-# Replay-store caps mirror this contract: prompt cap =
-# max_starting_message_length, response cap = total_len. Wiring at
-# ray_trainer.py near TrajectoryStore(...).
 python3 -m verl_custom.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=["$DATA_PATH/train.parquet"] \
-    data.val_files=["$DATA_PATH/validation.parquet"] \
     data.train_batch_size=$BATCH_SIZE \
-    +data.gen_batch_size=$GEN_BATCH_SIZE \
     data.max_prompt_length=31232 \
     data.max_response_length=2048 \
-    data.truncation='error' \
     actor_rollout_ref.model.path=$SFT_MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -129,37 +65,19 @@ python3 -m verl_custom.trainer.main_ppo \
     actor_rollout_ref.actor.clip_ratio_high=$CLIP_RATIO_HIGH \
     actor_rollout_ref.actor.tis_imp_ratio_cap=5 \
     +actor_rollout_ref.actor.use_error_mask=True \
+    +actor_rollout_ref.actor.masking=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$TP_SIZE \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.mode=async \
-    +actor_rollout_ref.rollout.logprobs_mode=processed_logprobs \
     actor_rollout_ref.rollout.gpu_memory_utilization=$GPU_MEM_UTIL \
     actor_rollout_ref.rollout.n=$NUM_TRAJ \
     actor_rollout_ref.rollout.temperature=$TEMPERATURE \
     actor_rollout_ref.rollout.top_p=$TOP_P \
-    +actor_rollout_ref.rollout.external_llm_endpoints=[http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8100,http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8101,http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8102,http://${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}:8103] \
     +actor_rollout_ref.rollout.publish_on_save=True \
-    +actor_rollout_ref.rollout.async_manager=openhands \
-    +actor_rollout_ref.rollout.max_iterations=$MAX_NUM_ITERS \
-    +actor_rollout_ref.rollout.enable_memory_saver=True \
     +actor_rollout_ref.rollout.max_starting_message_length=12000 \
-    +actor_rollout_ref.rollout.remove_think_tokens=True \
-    +actor_rollout_ref.rollout.openhands_base_url=http://localhost:8006 \
-    +actor_rollout_ref.rollout.openhands_num_workers=$OPENHANDS_NUM_WORKERS \
-    +actor_rollout_ref.rollout.task_type=swegym \
-    +actor_rollout_ref.rollout.chat_template_name=qwen3_chat_template_generation \
-    +actor_rollout_ref.rollout.openhands_timeout=1500 \
-    +actor_rollout_ref.rollout.openhands_max_retries=0 \
-    +actor_rollout_ref.actor.masking=True \
     actor_rollout_ref.rollout.multi_turn.enable=True \
-    actor_rollout_ref.rollout.multi_turn.format=hermes \
     +actor_rollout_ref.rollout.multi_turn.agent=True \
-    +actor_rollout_ref.rollout.token_level_generation=True \
-    +actor_rollout_ref.rollout.custom_tokenizer=$TOKENIZER_PATH \
-    +actor_rollout_ref.rollout.rollout_save_dir=$CKPT_PATH/rollout_data \
-    actor_rollout_ref.rollout.calculate_log_probs=True \
-    +actor_rollout_ref.rollout.debug=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     reward_manager.type="swebench" \
@@ -176,14 +94,8 @@ python3 -m verl_custom.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=$NNODES \
     trainer.save_freq=$SAVE_FREQ \
-    trainer.val_before_train=True \
-    +data.dataloader_num_workers=1 \
+    trainer.val_before_train=False \
+    trainer.test_freq=-1 \
+    trainer.total_epochs=100 \
     +actor_rollout_ref.exchange_size=500000000 \
-    actor_rollout_ref.rollout.val_kwargs.n=2 \
-    actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
-    actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
-    trainer.test_freq=1 \
-    +trainer.enable_pass_k_evaluation=True \
-    +trainer.pass_k_problem_id_strategy=input_hash \
-    trainer.total_epochs=100 "$@"
+    "$@"

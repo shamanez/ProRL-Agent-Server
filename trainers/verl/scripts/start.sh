@@ -22,23 +22,17 @@ set -eo pipefail
 source /home/ubuntu/.prorl_creds.env
 
 REPO=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
-IMG="${TRAINER_IMG:-prorl/verl-trainer:latest}"
-CNAME=verl-trainer
+# Build once: cd ProRL-Agent-Server && docker build -f trainers/verl/Dockerfile -t prorl/verl-trainer:vllm018 .
+IMG="${TRAINER_IMG:-prorl/verl-trainer:vllm018}"
+CNAME=prorl-trainer
 REMOTE_DNS="${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}"
 
 # Training knobs
 BATCH_SIZE="${BATCH_SIZE:-4}"
-# GEN_BATCH_SIZE: number of rows per dataloader batch. Must be <= number of
-# rows in data.train_files parquet. Default 4× BATCH_SIZE for full dataset;
-# set smaller (e.g. 3) when only a few SIF images are built.
-GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-$((BATCH_SIZE * 4))}"
 STALENESS_CUTOFF_K="${STALENESS_CUTOFF_K:-4}"
 REPLAY_ENABLE="${REPLAY_ENABLE:-True}"
 BUFFER_SIZE="${BUFFER_SIZE:-64}"
 USE_TEMPORAL_IS="${USE_TEMPORAL_IS:-False}"
-CONTINUOUS_PRODUCER="${CONTINUOUS_PRODUCER:-False}"
-FILTER_GROUPS="${FILTER_GROUPS:-True}"
-PRODUCER_BATCH_SIZE="${PRODUCER_BATCH_SIZE:-4}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-1000}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-500}"
 SAVE_FREQ="${SAVE_FREQ:-1}"
@@ -78,21 +72,15 @@ docker run --rm --name "$CNAME" \
   -e TEST_FREQ="$TEST_FREQ" \
   -e VAL_BEFORE_TRAIN="$VAL_BEFORE_TRAIN" \
   -e BATCH_SIZE="$BATCH_SIZE" \
-  -e GEN_BATCH_SIZE="$GEN_BATCH_SIZE" \
   -e STALENESS_CUTOFF_K="$STALENESS_CUTOFF_K" \
   -e REPLAY_ENABLE="$REPLAY_ENABLE" \
   -e BUFFER_SIZE="$BUFFER_SIZE" \
   -e USE_TEMPORAL_IS="$USE_TEMPORAL_IS" \
-  -e CONTINUOUS_PRODUCER="$CONTINUOUS_PRODUCER" \
-  -e FILTER_GROUPS="$FILTER_GROUPS" \
-  -e PRODUCER_BATCH_SIZE="$PRODUCER_BATCH_SIZE" \
   -e SWAP_PROTOCOL="$SWAP_PROTOCOL" \
   -e REPO_HOST_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)" \
-  -e DATA_PATH="/data/SkyRL-v0-293" \
   -e CKPT_PATH="/workspace/outputs" \
   -e LIVE_STORE_SOCKET="/tmp/prorl_live_store.sock" \
   -e POLICY_REGISTRY_SOCKET="/tmp/prorl_policy_registry.sock" \
-  -e OPENHANDS_NUM_WORKERS="0" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \

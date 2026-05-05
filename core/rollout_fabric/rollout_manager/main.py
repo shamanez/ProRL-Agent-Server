@@ -23,9 +23,14 @@ import time
 from rollout_fabric.live_store import LiveStoreClient
 from rollout_fabric.rollout_manager.dataloader import ParquetDataLoader
 from rollout_fabric.rollout_manager.loop import RolloutManagerLoop
-from rollout_fabric.rollout_manager.policy_subscription import FilePollingPolicySubscription
+from rollout_fabric.rollout_manager.policy_subscription import (
+    FilePollingPolicySubscription,
+)
 from rollout_fabric.rollout_manager.prorl_client import ProRLClient
-from rollout_fabric.schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
+from rollout_fabric.schemas.policy_version import (
+    PolicyVersionCache,
+    PolicyVersionSnapshot,
+)
 
 DEFAULT_SOCKET = '/tmp/prorl_live_store.sock'
 DEFAULT_MANIFEST = '/tmp/prorl_policy_manifest.json'
@@ -87,6 +92,12 @@ def _parse_args() -> argparse.Namespace:
         default=bool(int(os.environ.get('FILTER_ZERO_VARIANCE', '0'))),
         help='Drop zero-variance groups (§3.7). Default OFF — enable for production.',
     )
+    p.add_argument(
+        '--num-parallel-groups',
+        type=int,
+        default=int(os.environ.get('NUM_PARALLEL_GROUPS', '1')),
+        help='Number of groups to dispatch concurrently (fills ProRL worker pool).',
+    )
     return p.parse_args()
 
 
@@ -128,7 +139,9 @@ def main() -> int:
     archive_writer = None
     if not args.archive_disabled:
         from rollout_fabric.replay_archive.server import ArchiveServer  # noqa: PLC0415
-        from rollout_fabric.replay_archive.writer import ReplayArchiveWriter  # noqa: PLC0415
+        from rollout_fabric.replay_archive.writer import (
+            ReplayArchiveWriter,  # noqa: PLC0415
+        )
 
         archive_writer = ReplayArchiveWriter(
             server=ArchiveServer(args.archive_root),
@@ -147,6 +160,7 @@ def main() -> int:
         policy_cache=cache,
         dataloader=dataloader,
         group_size=args.group_size,
+        num_parallel_groups=args.num_parallel_groups,
         created_at_step_fn=lambda: 0,  # updated via StepCounter RPC at S2+
         archive_writer=archive_writer,
         environment_id=args.environment_id,
