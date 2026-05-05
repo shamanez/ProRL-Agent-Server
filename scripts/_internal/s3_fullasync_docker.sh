@@ -235,11 +235,11 @@ docker run --rm --name "$CNAME" \
       replay.producer_batch_size="$PRODUCER_BATCH_SIZE" \
       replay.use_temporal_is="$USE_TEMPORAL_IS" \
       replay.continuous_producer="$CONTINUOUS_PRODUCER" \
-      +replay.live_store_socket="${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}" \
-      +replay.policy_registry_socket="${POLICY_REGISTRY_SOCKET:-/tmp/prorl_policy_registry.sock}" \
-      +replay.stop_timeout_s=300 \
-      +replay.no_progress_timeout_s=5400 \
-      +replay.swap_protocol="$SWAP_PROTOCOL" \
-      +algorithm.filter_groups.enable="$FILTER_GROUPS" \
+      ++replay.live_store_socket="${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}" \
+      ++replay.policy_registry_socket="${POLICY_REGISTRY_SOCKET:-/tmp/prorl_policy_registry.sock}" \
+      ++replay.stop_timeout_s=300 \
+      ++replay.no_progress_timeout_s=5400 \
+      ++replay.swap_protocol="$SWAP_PROTOCOL" \
+      ++algorithm.filter_groups.enable="$FILTER_GROUPS" \
       "$@"
   ' _ "$@" 2>&1 | tee "$LOG_PATH"
