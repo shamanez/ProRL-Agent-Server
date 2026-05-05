@@ -1,33 +1,24 @@
 #!/bin/bash
-# Phase 2 trainer launcher: fully-async decoupled topology (ProRL on host,
-# vLLM pool on EC2 `vllm-instance`, FSDP trainer inside this container)
-# with bounded replay buffer, continuous rollout producer, and clipped
-# temporal importance-sampling correction.
+# TrainerAdapter launcher (slot 5.6) — contract-first rollout fabric.
 #
-# Sibling of s2_weightsync_docker.sh. All Phase 1 invariants preserved:
-# closed-loop rank-16 LoRA weight-sync via POST /reload_lora after each
-# _save_checkpoint; remote pool is the single inference backend; abort on
-# endpoints_failed > 0.
+# Starts the VERL FSDP trainer inside Docker. The trainer connects ONLY
+# to the LiveStore (get_batch) and the PolicyRegistry (publish_policy_version).
+# It has no dataloader, no producer thread, and no ProRL address.
 #
-# What is new (Phase 2):
-#   - Replay store (TrajectoryStore) buffers rollouts between trainer steps.
-#   - Producer thread generates rollouts continuously; trainer samples on
-#     its own cadence (clock separation). Both controlled by the
-#     +replay.continuous_producer=True Hydra override.
-#   - Temporal importance-sampling (IS) correction gated by
-#     +replay.use_temporal_is=True feeds behavior-policy logprobs from
-#     the buffer into the existing tis_imp_ratio code in core_algos.py.
+# Data flow:
+#   RolloutWorker → LiveStore → Trainer → PolicyRegistry → vLLM pool
 #
-# Topology reminder (Cut 5+ / handsoff.md §Topology):
-#   filter_groups=True is the target. DAPO's generate_sequences_dapo is the
-#   only path wired to eager-push each survivor into the replay store the
-#   moment it clears filter_easy_hard_instance — plain GRPO has no such
-#   seam. Set FILTER_GROUPS=False only for throwaway plain-GRPO debugging.
+# The trainer samples groups from the LiveStore, computes GRPO/DAPO
+# advantages, runs FSDP update, then publishes the LoRA checkpoint via
+# PolicyRegistry (which fans out /reload_lora and writes the worker manifest).
+#
+# Set FILTER_GROUPS=False to allow zero-variance groups (useful during
+# bootstrapping before the model produces non-uniform rewards).
 #
 # Environment knobs (all optional; defaults below):
 #   REPLAY_ENABLE             True
 #   BUFFER_SIZE               256
-#   STALENESS_CUTOFF_K        4         (handsoff §12.3)
+#   STALENESS_CUTOFF_K        4         
 #   PRODUCER_BATCH_SIZE       4
 #   USE_TEMPORAL_IS           True
 #   CONTINUOUS_PRODUCER       True
@@ -59,7 +50,7 @@ USE_TEMPORAL_IS="${USE_TEMPORAL_IS:-True}"
 CONTINUOUS_PRODUCER="${CONTINUOUS_PRODUCER:-True}"
 # DEFAULT True. Cut 5 onward the eager-push path is DAPO-specific, so the
 # production topology always runs filter_groups=True. Override to False
-# only for throwaway plain-GRPO debugging (full_async.md §5a).
+# only for throwaway plain-GRPO debugging .
 FILTER_GROUPS="${FILTER_GROUPS:-True}"
 
 # Trainer scale knobs — overridable per run.
@@ -109,7 +100,7 @@ echo "[fullasync/docker] remote pool: $REMOTE_DNS:8100-8103"
 echo "[fullasync/docker] replay: enable=$REPLAY_ENABLE buffer=$BUFFER_SIZE K=$STALENESS_CUTOFF_K producer_bs=$PRODUCER_BATCH_SIZE tis=$USE_TEMPORAL_IS continuous=$CONTINUOUS_PRODUCER"
 echo "[fullasync/docker] batches: train=$BATCH_SIZE (groups/step) gen=$GEN_BATCH_SIZE (survivors/producer call)"
 echo "[fullasync/docker] cadence: total_steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ test_freq=$TEST_FREQ val_before_train=$VAL_BEFORE_TRAIN"
-echo "[fullasync/docker] filter_groups=$FILTER_GROUPS (False = plain GRPO; flip to True only after E1 clean — full_async.md §5a)"
+echo "[fullasync/docker] filter_groups=$FILTER_GROUPS (False = plain GRPO; flip to True only after E1 clean )"
 echo "[fullasync/docker] swap_protocol=$SWAP_PROTOCOL (pinning = path-versioned multi-tenant; quiesce = drain-and-swap)"
 
 # Clean up any stale container from a prior attempt.
@@ -201,7 +192,7 @@ docker run --rm --name "$CNAME" \
 
     # Resume path — distinct output dir from Phase 1 so the two stacks can
     # coexist on disk and resume independently. Buffer starts empty on
-    # resume per full_async.md §2.
+    # resume after S2.
     STAGE2_OUT=/workspace/outputs/ProAgent/fullasync
 
     echo "[fullasync/docker] scale: epochs=$TOTAL_EPOCHS steps=$TOTAL_TRAINING_STEPS save_freq=$SAVE_FREQ"

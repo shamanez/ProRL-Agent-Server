@@ -183,10 +183,9 @@ reference diverges; KL/entropy go NaN; PPO/GRPO/DAPO collapses. These files are 
 **Frozen files — never edit, make siblings:**
 - `openhands/llm/nvidia/qwen3.py`
 - `openhands/llm/nvidia/qwen2_5_vl.py`
-- `scripts/_internal/s2_weightsync_docker.sh`
 - `trainer_integration/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_weightsync.sh`
-- `scripts/serving/_vllm_child.py` (frozen through S4)
-- `openhands/nvidia/async_server.py` (frozen through S4)
+- `scripts/serving/_vllm_child.py`
+- `openhands/nvidia/async_server.py`
 
 ---
 

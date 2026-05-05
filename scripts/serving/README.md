@@ -1,6 +1,6 @@
 # `scripts/serving/`
 
-Remote vLLM pool for decoupled rollouts. Children run on a separate EC2 host (`vllm-instance`, 4 × 23 GiB GPUs); the trainer talks to them over public HTTP. Topology, credentials, and launch sequence: [`plans-n-solutions/handsoff.md`](../../plans-n-solutions/handsoff.md).
+Remote vLLM pool for decoupled rollouts. Children run on a separate EC2 host (`vllm-instance`, 4 × 23 GiB GPUs); the trainer talks to them over public HTTP. Topology, credentials, and launch sequence: [`plans-n-solutions/rollout_fabric.md`](../../plans-n-solutions/rollout_fabric.md).
 
 Token-level contract (same as `openhands/llm/nvidia/qwen3.py` expects): `POST /generate` with `{prompt_ids: [int], …}` returns `{response_ids: [int], logprobs: [float]}`. No text detokenization anywhere on the hot path — this preserves the token-level invariant documented in `openhands/llm/nvidia/README.md`. Stock `vllm.entrypoints.api_server` speaks a different contract (`{prompt: str} -> {text: [str]}`), so we ship `_vllm_child.py` as a thin wrapper around `AsyncLLMEngine` that serves the exact contract the client speaks.
 
@@ -51,4 +51,4 @@ Each remote `_vllm_child.py` is invoked by `_remote_vllm_runner.sh` with:
 --max-num-seqs 128
 ```
 
-No `--enforce-eager` — CUDA graphs are on, adds ~30–60 s one-time capture to `start` but gives ~30–50% throughput lift on Qwen3-4B. The 300 s health budget in `scripts/_internal/s2_weightsync_docker.sh` covers the capture.
+No `--enforce-eager` — CUDA graphs are on, adds ~30–60 s one-time capture to `start` but gives ~30–50% throughput lift on Qwen3-4B. The 300 s health budget in `scripts/_internal/s3_fullasync_docker.sh` covers the capture.

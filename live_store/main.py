@@ -1,6 +1,6 @@
 """Service entry point for ``live_store/server.py``.
 
-Run via ``scripts/_internal/s0_5_live_store.sh`` (sources
+Run via ``scripts/services/start_live_store.sh`` or
 ``/home/ubuntu/.prorl_creds.env`` like every other launcher in this
 repo).
 """
