@@ -87,7 +87,7 @@ docker run --rm --name "$CNAME" \
   -e FILTER_GROUPS="$FILTER_GROUPS" \
   -e PRODUCER_BATCH_SIZE="$PRODUCER_BATCH_SIZE" \
   -e SWAP_PROTOCOL="$SWAP_PROTOCOL" \
-  -e REPO_HOST_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" \
+  -e REPO_HOST_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)" \
   -e DATA_PATH="/data/SkyRL-v0-293" \
   -e CKPT_PATH="/workspace/outputs" \
   -e LIVE_STORE_SOCKET="/tmp/prorl_live_store.sock" \

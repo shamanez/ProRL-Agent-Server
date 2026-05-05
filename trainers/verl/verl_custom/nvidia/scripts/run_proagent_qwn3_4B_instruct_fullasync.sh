@@ -50,7 +50,7 @@ SAVE_FREQ=${SAVE_FREQ:-1}
 # filter_groups=True with the wedge present; with the triple in place
 # we expect the worker count to be the throughput knob, not a
 # wedge amplifier. Revisit if first-step wall-clock blows up again.
-OPENHANDS_NUM_WORKERS=64
+OPENHANDS_NUM_WORKERS="${OPENHANDS_NUM_WORKERS:-32}"
 
 # DAPO drops KL loss: RLVR rewards are verifiable, no reward-model drift to
 # anchor against. Coef/type kept as unused sentinels for readability.
