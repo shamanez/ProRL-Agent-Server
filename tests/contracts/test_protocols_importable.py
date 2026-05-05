@@ -13,7 +13,7 @@ from schemas.protocols import (
     LiveStore,
     PolicyRegistry,
     ReplayArchive,
-    RolloutWorker,
+    RolloutManager,
     TrainerAdapter,
 )
 
@@ -29,7 +29,7 @@ pytestmark = pytest.mark.contract
         ),
         (InferenceBackend, ('generate', 'reload_policy', 'health')),
         (
-            RolloutWorker,
+            RolloutManager,
             (
                 'pause_production',
                 'resume_production',
@@ -59,7 +59,7 @@ pytestmark = pytest.mark.contract
     ids=[
         'env-provider',
         'inference-backend',
-        'rollout-worker',
+        'rollout-manager',
         'live-store',
         'replay-archive',
         'trainer-adapter',

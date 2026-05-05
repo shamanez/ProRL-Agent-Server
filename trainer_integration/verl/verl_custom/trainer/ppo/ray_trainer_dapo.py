@@ -59,7 +59,7 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
 
         Pre-S2 had a "classic" path (in-trainer ``generate_sequences_dapo``)
         and a "continuous" path (in-trainer producer thread). Both are
-        gone after S2: the rollout_worker process owns the dataloader,
+        gone after S2: the rollout_manager process owns the dataloader,
         the DAPO async manager, and the producer loop. The trainer is
         purely a consumer of :class:`LiveStoreClient`. The server-side
         no-progress detector replaces the busy-loop wait — wedged
@@ -199,7 +199,7 @@ class RayPPOTrainerDAPO(RayPPOTrainer):
                                 kl_metrics
                             )  # TODO: This will be cleared if we use multiple genenration batches
 
-                    # S2: filter_groups is now handled by the RolloutWorker before
+                    # S2: filter_groups is now handled by the RolloutManager before
                     # pushing to LiveStore. The trainer is a pure consumer; the
                     # assertion that filter_groups.enable must be True is a pre-S2
                     # invariant that no longer applies here.

@@ -1,6 +1,6 @@
 """gRPC client for the LiveStore (slot 5.4).
 
-Used by the rollout worker (push side) and the trainer (get_batch side).
+Used by the rollout manager (push side) and the trainer (get_batch side).
 Drop-in replacement for the legacy in-process ``TrajectoryStore``.
 
 Wire is unpadded (§6.2). Trainer calls ``sample_mini_batch`` which pads
@@ -64,7 +64,7 @@ class LiveStoreClient:
             raise ValueError('push_group requires at least one sample')
         req = live_store_pb2.PushGroupRequest(
             group_uid=samples[0].group_uid,
-            producer_id='rollout_worker',
+            producer_id='rollout_manager',
             records=[to_proto(s) for s in samples],
         )
         resp = self._stub.PushGroup(req)

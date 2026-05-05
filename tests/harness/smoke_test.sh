@@ -108,11 +108,11 @@ else
     fail "GATE-1d: PolicyRegistry socket missing (${POLICY_REGISTRY_SOCKET})"
 fi
 
-# 1e: RolloutWorker (inferred from LiveStore producer activity — no direct health endpoint yet)
-if pgrep -f "rollout_worker.main" > /dev/null 2>&1; then
-    pass "GATE-1e: RolloutWorker process is running"
+# 1e: RolloutManager (inferred from LiveStore producer activity — no direct health endpoint yet)
+if pgrep -f "rollout_manager.main" > /dev/null 2>&1; then
+    pass "GATE-1e: RolloutManager process is running"
 else
-    fail "GATE-1e: RolloutWorker process not found"
+    fail "GATE-1e: RolloutManager process not found"
 fi
 
 # ============================================================

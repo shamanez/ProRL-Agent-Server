@@ -13,7 +13,7 @@ S1 hard-cutover landed:
 
 ``continuous_producer.py`` stays at this path through S1 (it still
 runs in the trainer process and pushes into the LiveStoreClient).
-S2 lifts it into ``rollout_worker/``.
+S2 lifts it into ``rollout_manager/``.
 
 These re-exports exist so any stray import of the legacy names
 surfaces at the new home rather than ``ImportError``-ing the trainer

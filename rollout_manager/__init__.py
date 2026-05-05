@@ -1,4 +1,4 @@
-"""Slot 5.3 — RolloutWorker.
+"""Slot 5.3 — RolloutManager.
 
 Owns the dataloader (§3.8), drives rollout against ProRL via HTTP (BC-13),
 applies zero-variance filter (§3.7), tees to archive (BC-12), pushes to
@@ -8,7 +8,7 @@ Group-policy consistency: one ``PolicyVersionSnapshot`` per group dispatch;
 all N sibling episodes stamp the same ``behavior_policy_version``.
 """
 
-from rollout_worker.policy_subscription import (
+from rollout_manager.policy_subscription import (
     FilePollingPolicySubscription,
     GrpcStreamingPolicySubscription,
     PolicyVersionStream,

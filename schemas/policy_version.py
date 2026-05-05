@@ -2,7 +2,7 @@
 
 Contract
 --------
-A producer (rollout worker) generates groups of ``n`` sibling trajectories.
+A producer (rollout manager) generates groups of ``n`` sibling trajectories.
 Every row of one group **must** be stamped with the *same*
 ``behavior_policy_version`` (group integrity, §3.2). Across groups, the
 producer must observe the freshest published version available at group

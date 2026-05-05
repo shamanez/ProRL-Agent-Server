@@ -1,4 +1,4 @@
-"""RolloutWorker service entry point (slot 5.3).
+"""RolloutManager service entry point (slot 5.3).
 
 Startup sequence for this process:
   1. Connect LiveStoreClient (gRPC to live store)
@@ -6,7 +6,7 @@ Startup sequence for this process:
   3. Create ParquetDataLoader (owns the dataset — §3.8)
   4. Start ReplayArchiveWriter (async tee — S3)
   5. Create ProRLClient (HTTP to EnvironmentProvider)
-  6. Start RolloutWorkerLoop (the production loop)
+  6. Start RolloutManagerLoop (the production loop)
 
 **Zero VERL / OpenHands imports (BC-13).**
 """
@@ -21,10 +21,10 @@ import sys
 import time
 
 from live_store import LiveStoreClient
-from rollout_worker.dataloader import ParquetDataLoader
-from rollout_worker.loop import RolloutWorkerLoop
-from rollout_worker.policy_subscription import FilePollingPolicySubscription
-from rollout_worker.prorl_client import ProRLClient
+from rollout_manager.dataloader import ParquetDataLoader
+from rollout_manager.loop import RolloutManagerLoop
+from rollout_manager.policy_subscription import FilePollingPolicySubscription
+from rollout_manager.prorl_client import ProRLClient
 from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
 
 DEFAULT_SOCKET = '/tmp/prorl_live_store.sock'
@@ -34,7 +34,7 @@ DEFAULT_ARCHIVE_DL = '/tmp/prorl_replay_archive_deadletter.jsonl'
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(prog='rollout_worker')
+    p = argparse.ArgumentParser(prog='rollout_manager')
     p.add_argument(
         '--live-store-socket',
         default=os.environ.get('LIVE_STORE_SOCKET', DEFAULT_SOCKET),
@@ -94,7 +94,7 @@ def main() -> int:
     args = _parse_args()
     logging.basicConfig(
         level=os.environ.get('ROLLOUT_WORKER_LOG_LEVEL', 'INFO'),
-        format='%(asctime)s %(levelname)s rollout_worker: %(message)s',
+        format='%(asctime)s %(levelname)s rollout_manager: %(message)s',
     )
     logger = logging.getLogger(__name__)
 
@@ -140,8 +140,8 @@ def main() -> int:
     # 5. ProRLClient (HTTP, no OpenHands imports — BC-13)
     prorl_client = ProRLClient(base_url=args.prorl_url)
 
-    # 6. RolloutWorkerLoop
-    loop = RolloutWorkerLoop(
+    # 6. RolloutManagerLoop
+    loop = RolloutManagerLoop(
         prorl_client=prorl_client,
         live_store_client=live_store,
         policy_cache=cache,
@@ -155,7 +155,7 @@ def main() -> int:
     loop.start()
 
     def _shutdown(_signum, _frame):
-        logger.info('shutting down rollout_worker (signal %s)', _signum)
+        logger.info('shutting down rollout_manager (signal %s)', _signum)
         loop.stop(timeout=30.0)
         subscription.stop(timeout=2.0)
         if archive_writer is not None:
@@ -171,7 +171,7 @@ def main() -> int:
         loop.check_error()
         snap = cache.snapshot()
         logger.info(
-            'rollout_worker heartbeat: policy_id=%s version=%d store_groups=%d stats=%s',
+            'rollout_manager heartbeat: policy_id=%s version=%d store_groups=%d stats=%s',
             snap.policy_id,
             snap.version,
             live_store.num_groups(),

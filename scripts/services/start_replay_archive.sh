@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Start the ReplayArchive service (slot 5.5 — S3, optional).
-# If disabled, the rollout worker runs without the tee.
-# Start BEFORE start_rollout_worker.sh if enabled.
+# If disabled, the rollout manager runs without the tee.
+# Start BEFORE start_rollout_manager.sh if enabled.
 #
 # Env vars:
 #   REPLAY_ARCHIVE_ROOT       (default /home/ubuntu/replay_archive)
@@ -18,7 +18,7 @@ mkdir -p "${ARCHIVE_ROOT}"
 
 echo "[replay_archive] archive root=${ARCHIVE_ROOT}"
 
-# The archive is co-located with the rollout worker (in-process via
+# The archive is co-located with the rollout manager (in-process via
 # ReplayArchiveWriter). This script exposes a tiny health HTTP endpoint
 # so the orchestrator can probe it independently.
 exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -c "

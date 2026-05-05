@@ -139,7 +139,7 @@ class ExternalRayDistributedExecutor(Executor):
 class AsyncvLLMServer(AsyncServerBase):
     """
     AsyncvLLMServer is a wrapper for AsyncLLM, it uses ExternalRayDistributedExecutor to launch engines
-    in hybrid rollout workers, i.e AsyncActorRolloutRefWorker.
+    in hybrid rollout managers, i.e AsyncActorRolloutRefWorker.
 
     AsyncvLLMServer works as follows:
     1. Start FastAPI server first.

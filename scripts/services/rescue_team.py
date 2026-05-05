@@ -79,14 +79,14 @@ SERVICES: list[dict[str, Any]] = [
         ),
     },
     {
-        'name': 'rollout_worker',
-        'log_path': '/tmp/rollout_worker.log',
-        'pid_file': '/tmp/rollout_worker.pid',
+        'name': 'rollout_manager',
+        'log_path': '/tmp/rollout_manager.log',
+        'pid_file': '/tmp/rollout_manager.pid',
         'health_fn': '_check_worker_producing',
         'restart_cmd': (
             f"DATA_FILES='{os.environ.get('DATA_FILES', '/home/ubuntu/data/SkyRL-v0-293/train.parquet')}' "
-            f'bash {REPO_ROOT}/scripts/services/start_rollout_worker.sh '
-            f'> /tmp/rollout_worker.log 2>&1 &'
+            f'bash {REPO_ROOT}/scripts/services/start_rollout_manager.sh '
+            f'> /tmp/rollout_manager.log 2>&1 &'
         ),
     },
 ]
@@ -291,7 +291,7 @@ class LogAgent:
             'no_progress',
             'producer_wedged',
             'Producer stopped pushing to live store — vLLM or ProRL may be down',
-            'Check ProRL and vLLM health; restart rollout worker',
+            'Check ProRL and vLLM health; restart rollout manager',
         ),
     ]
 

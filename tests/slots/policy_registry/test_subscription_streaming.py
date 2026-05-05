@@ -18,7 +18,7 @@ import pytest
 
 from policy_registry.client import PolicyRegistryClient
 from policy_registry.server import serve
-from rollout_worker.policy_subscription import GrpcStreamingPolicySubscription
+from rollout_manager.policy_subscription import GrpcStreamingPolicySubscription
 from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
 
 pytestmark = pytest.mark.contract

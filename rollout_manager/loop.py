@@ -1,10 +1,10 @@
-"""RolloutWorker production loop.
+"""RolloutManager production loop.
 
 **Zero VERL / OpenHands imports (BC-13).** This module drives the entire
 rollout pipeline using only:
-- ``rollout_worker.prorl_client`` (HTTP to ProRL)
-- ``rollout_worker.episode_builder`` (TrainingSample construction)
-- ``rollout_worker.dataloader`` (ParquetDataLoader)
+- ``rollout_manager.prorl_client`` (HTTP to ProRL)
+- ``rollout_manager.episode_builder`` (TrainingSample construction)
+- ``rollout_manager.dataloader`` (ParquetDataLoader)
 - ``live_store.client.LiveStoreClient`` (gRPC push)
 - ``schemas.policy_version.PolicyVersionCache`` (atomic snapshot)
 
@@ -28,23 +28,23 @@ import time
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from rollout_worker.episode_builder import (
+from rollout_manager.episode_builder import (
     build_group,
     build_training_sample,
     is_zero_variance_group,
 )
-from rollout_worker.prorl_client import ProRLClient, ProRLEpisodeResult
+from rollout_manager.prorl_client import ProRLClient, ProRLEpisodeResult
 from schemas.episode_record import TrustLevel
 
 if TYPE_CHECKING:
     from replay_archive.writer import ReplayArchiveWriter
-    from rollout_worker.dataloader import ParquetDataLoader
+    from rollout_manager.dataloader import ParquetDataLoader
     from schemas.policy_version import PolicyVersionCache
 
 logger = logging.getLogger(__name__)
 
 
-class RolloutWorkerLoop:
+class RolloutManagerLoop:
     """Main production loop.
 
     Parameters
@@ -121,11 +121,11 @@ class RolloutWorkerLoop:
 
     def start(self) -> None:
         if self._thread is not None:
-            raise RuntimeError('RolloutWorkerLoop already started')
+            raise RuntimeError('RolloutManagerLoop already started')
         self._stop_event.clear()
         self._pause_event.set()
         self._thread = threading.Thread(
-            target=self._run, name='RolloutWorkerLoop', daemon=True
+            target=self._run, name='RolloutManagerLoop', daemon=True
         )
         self._thread.start()
 
@@ -135,7 +135,7 @@ class RolloutWorkerLoop:
         if t is not None and t.is_alive():
             t.join(timeout=timeout)
             if t.is_alive():
-                logger.warning('RolloutWorkerLoop did not exit within timeout')
+                logger.warning('RolloutManagerLoop did not exit within timeout')
                 return False
         self._thread = None
         if self._exception is not None:
@@ -164,7 +164,7 @@ class RolloutWorkerLoop:
                     break
                 self._run_one_group()
         except BaseException as exc:  # noqa: BLE001
-            logger.exception('RolloutWorkerLoop crashed')
+            logger.exception('RolloutManagerLoop crashed')
             self._exception = exc
 
     def _run_one_group(self) -> None:

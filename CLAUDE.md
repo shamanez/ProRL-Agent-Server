@@ -22,9 +22,9 @@ rollout/store/trainer wiring.
 |---|---|---|---|---|
 | EnvironmentProvider | `scripts/_internal/s0_prorl.sh` | `GET :8006/status` → `{"status":"running"}` | Runs OpenHands agent loop inside Singularity sandbox; returns token IDs + logprobs. | Must not own training data. Must not call LiveStore. |
 | InferenceBackend | `scripts/serving/launch_remote_vllm_pool.sh start` | `GET :8100-8103/health` → 200 each | Token-level generation; LoRA hot-reload via path-versioned pinning. | Must not know policy version semantics. Must not call LiveStore. |
-| LiveStore | inline — see startup sequence | `[[ -S /tmp/prorl_live_store.sock ]]` | Bounded hot FIFO between RolloutWorker and trainer. Pop-on-sample; server-side blocking get_batch; staleness eviction. | Never returns without popping (no with-replacement). Never exposes internal deque directly. |
+| LiveStore | inline — see startup sequence | `[[ -S /tmp/prorl_live_store.sock ]]` | Bounded hot FIFO between RolloutManager and trainer. Pop-on-sample; server-side blocking get_batch; staleness eviction. | Never returns without popping (no with-replacement). Never exposes internal deque directly. |
 | PolicyRegistry | inline — see startup sequence | `[[ -S /tmp/prorl_policy_registry.sock ]]` | Single source of truth for LoRA version and adapter URI. Fans out `/reload_lora` to pool children. Hard abort if `endpoints_failed > 0`. | Never degrades silently on publish failure. |
-| RolloutWorker | `python -m rollout_worker.main` | Worker logs first push to LiveStore | Reads parquet, dispatches episodes to EnvironmentProvider, stamps policy version, pushes groups to LiveStore. | Zero VERL/OpenHands imports. Owns parquet dataloader (BC-14). |
+| RolloutManager | `python -m rollout_manager.main` | Worker logs first push to LiveStore | Reads parquet, dispatches episodes to EnvironmentProvider, stamps policy version, pushes groups to LiveStore. | Zero VERL/OpenHands imports. Owns parquet dataloader (BC-14). |
 | TrainerAdapter | `scripts/_internal/s3_fullasync_docker.sh` | Begins `get_batch` calls without timeout | Consumes groups from LiveStore; pads locally; runs FSDP forward/backward; publishes policy versions to PolicyRegistry. | No parquet. No dataloader. No ProRL address. No vLLM address. Connects only to LiveStore + PolicyRegistry. |
 
 ---
@@ -115,10 +115,10 @@ echo $! > /tmp/policy_registry.pid
 # Health gate: [[ -S /tmp/prorl_policy_registry.sock ]]
 ```
 
-### Step 4 — RolloutWorker
+### Step 4 — RolloutManager
 
 ```bash
-nohup $POETRY_PYTHON -m rollout_worker.main \
+nohup $POETRY_PYTHON -m rollout_manager.main \
   --live-store-socket /tmp/prorl_live_store.sock \
   --prorl-url http://localhost:8006 \
   --policy-id "${POLICY_ID}" \
@@ -129,22 +129,22 @@ nohup $POETRY_PYTHON -m rollout_worker.main \
   --archive-root /home/ubuntu/replay_archive \
   --filter-zero-variance \
   --archive-disabled \
-  > /tmp/rollout_worker.log 2>&1 &
-echo $! > /tmp/rollout_worker.pid
+  > /tmp/rollout_manager.log 2>&1 &
+echo $! > /tmp/rollout_manager.pid
 # Health gate: wait for >=1 group in LiveStore before starting trainer
 ```
 
 ### Step 5 — TrainerAdapter
 
 ```bash
-# Start ONLY after the rollout worker has pushed >=1 group to LiveStore (BC-16).
+# Start ONLY after the rollout manager has pushed >=1 group to LiveStore (BC-16).
 bash scripts/_internal/s3_fullasync_docker.sh
 ```
 
 **Orchestrated startup:** `bash scripts/services/start_all.sh` runs steps 1–5 in order,
 enforces the BC-16 warm-up gate, and handles clean shutdown in reverse order on Ctrl-C.
 
-**Stop order:** trainer → rollout worker → LiveStore + PolicyRegistry → EnvironmentProvider + InferenceBackend.
+**Stop order:** trainer → rollout manager → LiveStore + PolicyRegistry → EnvironmentProvider + InferenceBackend.
 
 ---
 
@@ -162,10 +162,10 @@ Never `str`. KL/entropy goes NaN within 2 training steps if this is violated.
 `PolicyRegistryClient.publish_policy_version()` raises `PublishFailedError` on any
 pool child non-200/non-409. A warm replay buffer must not mask a broken pool.
 
-**BC-13 — RolloutWorker imports zero VERL/OpenHands code.**
+**BC-13 — RolloutManager imports zero VERL/OpenHands code.**
 The worker calls ProRL via plain HTTP. Framework coupling destroys pluggability.
 
-**BC-14 — RolloutWorker owns the parquet dataloader.**
+**BC-14 — RolloutManager owns the parquet dataloader.**
 The trainer has no `data.train_files`, no `StatefulDataLoader`, no producer thread.
 
 **BC-15 — Trainer connects only to LiveStore and PolicyRegistry.**
@@ -191,7 +191,7 @@ reference diverges; KL/entropy go NaN; PPO/GRPO/DAPO collapses. These files are 
 
 ## What NOT to do
 
-- Do not add any VERL or OpenHands import to `rollout_worker/` (BC-13).
+- Do not add any VERL or OpenHands import to `rollout_manager/` (BC-13).
 - Do not give the trainer a parquet path or a `StatefulDataLoader` (BC-14, BC-15).
 - Do not give the trainer a ProRL address or a vLLM address (BC-15).
 - Do not call `push_group` twice for the same group — double-push corrupts
@@ -216,7 +216,7 @@ reference diverges; KL/entropy go NaN; PPO/GRPO/DAPO collapses. These files are 
 
 - `live_store/store_core.py` ↔ `live_store/server.py` ↔ `live_store/client.py` ↔ `live_store/codec.py`
 - `policy_registry/server.py` ↔ `policy_registry/client.py` ↔ `policy_registry/fanout.py`
-- `rollout_worker/loop.py` ↔ `rollout_worker/episode_builder.py` ↔ `rollout_worker/policy_subscription.py`
+- `rollout_manager/loop.py` ↔ `rollout_manager/episode_builder.py` ↔ `rollout_manager/policy_subscription.py`
 - `schemas/protocols/` ↔ `schemas/proto/*.proto` ↔ `schemas/_gen/`
 - `trainer_adapters/verl/pad.py` ↔ trainer's `sample_mini_batch` seam in `ray_trainer_dapo.py`
 - `openhands/nvidia/registry.py` ↔ `openhands/nvidia/async_server.py` ↔ any concrete `AgentHandler`

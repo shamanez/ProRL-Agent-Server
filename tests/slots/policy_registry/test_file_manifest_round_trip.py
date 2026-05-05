@@ -22,7 +22,7 @@ from policy_registry.file_registry import (
     read_manifest,
     write_manifest,
 )
-from rollout_worker.policy_subscription import FilePollingPolicySubscription
+from rollout_manager.policy_subscription import FilePollingPolicySubscription
 from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
 
 pytestmark = pytest.mark.contract

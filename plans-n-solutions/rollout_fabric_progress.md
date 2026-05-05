@@ -17,11 +17,11 @@ in code and tested in `tests/invariants/` and `tests/slots/`.
 
 ```
   SkyRL-v0-293/train.ready.parquet
-         │  (ParquetDataLoader — RolloutWorker owns it, §3.8 / BC-14)
+         │  (ParquetDataLoader — RolloutManager owns it, §3.8 / BC-14)
          │  filter_parquet_to_built_sifs.py keeps only rows with a .sif
          ▼
   ┌─────────────────────────────────────────────────────────────┐
-  │  RolloutWorker  (scripts/services/start_rollout_worker.sh)  │
+  │  RolloutManager  (scripts/services/start_rollout_manager.sh)  │
   │  Zero VERL / OpenHands imports (BC-13)                       │
   │                                                             │
   │  for each task in dataloader:                               │
@@ -102,7 +102,7 @@ corresponding test.
 | `schemas/policy_version.py` | `PolicyVersionSnapshot` + `PolicyVersionCache` — the cleverest primitive for §3.5. Immutable frozen snapshot + atomic STORE_ATTR swap. One LOAD_ATTR per group dispatch; no locks on the read path. |
 | `schemas/training_sample.py` | §6.2 `TrainingSample` / `TrainingGroup` — unpadded wire schema. |
 | `schemas/episode_record.py` | §6.1 `EpisodeRecord` — canonical archive record with `TrustLevel`. |
-| `schemas/protocols/` | Seven `Protocol` classes: `EnvironmentProvider`, `InferenceBackend`, `RolloutWorker`, `LiveStore`, `ReplayArchive`, `TrainerAdapter`, `PolicyRegistry`. |
+| `schemas/protocols/` | Seven `Protocol` classes: `EnvironmentProvider`, `InferenceBackend`, `RolloutManager`, `LiveStore`, `ReplayArchive`, `TrainerAdapter`, `PolicyRegistry`. |
 | `schemas/proto/*.proto` | gRPC schema for LiveStore (slot 5.4) and PolicyRegistry (slot 5.7). Token arrays as packed `bytes` (int32-LE) — never `string`. |
 | `schemas/_gen/` | Pre-compiled protobuf Python bindings (grpcio 1.71.0). |
 | `tests/invariants/` | 5 fast-loop tests pinning the 12 boundary conditions (BC-1 through BC-12). |
@@ -144,7 +144,7 @@ coupling — LiveStore extraction and trainer adapter pad migration ship togethe
 
 ---
 
-### Stage S2 — RolloutWorker as Independent Process (BC-13 + BC-14)
+### Stage S2 — RolloutManager as Independent Process (BC-13 + BC-14)
 
 **Critical design decision: zero VERL/OpenHands imports in the worker.**
 
@@ -153,12 +153,12 @@ The prior implementation had `generate_fn=async_rollout_manager.generate_sequenc
 
 | File | Role |
 |---|---|
-| `rollout_worker/prorl_client.py` | Thin `httpx` client for `POST /process`. No OpenHands imports. |
-| `rollout_worker/dataloader.py` | `ParquetDataLoader` — worker owns the dataset (BC-14 / §3.8). Simple pyarrow reader with `state_dict()` for resume. |
-| `rollout_worker/episode_builder.py` | Converts `ProRLEpisodeResult` → `TrainingSample`. Stamps `snap.version` on every row. `is_zero_variance_group()` filter (§3.7). |
-| `rollout_worker/loop.py` | Main loop: read task → snapshot policy → dispatch N siblings → archive tee → filter → push to LiveStore. All N siblings get the same snapshot (BC-0). |
-| `rollout_worker/policy_subscription.py` | `FilePollingPolicySubscription` (S2 / 1Hz) + `GrpcStreamingPolicySubscription` (S4). Feeds `PolicyVersionCache` via atomic ref-swap. |
-| `rollout_worker/main.py` | Entry point. Wires all dependencies. No VERL, no OpenHands. |
+| `rollout_manager/prorl_client.py` | Thin `httpx` client for `POST /process`. No OpenHands imports. |
+| `rollout_manager/dataloader.py` | `ParquetDataLoader` — worker owns the dataset (BC-14 / §3.8). Simple pyarrow reader with `state_dict()` for resume. |
+| `rollout_manager/episode_builder.py` | Converts `ProRLEpisodeResult` → `TrainingSample`. Stamps `snap.version` on every row. `is_zero_variance_group()` filter (§3.7). |
+| `rollout_manager/loop.py` | Main loop: read task → snapshot policy → dispatch N siblings → archive tee → filter → push to LiveStore. All N siblings get the same snapshot (BC-0). |
+| `rollout_manager/policy_subscription.py` | `FilePollingPolicySubscription` (S2 / 1Hz) + `GrpcStreamingPolicySubscription` (S4). Feeds `PolicyVersionCache` via atomic ref-swap. |
+| `rollout_manager/main.py` | Entry point. Wires all dependencies. No VERL, no OpenHands. |
 
 **How the worker calls ProRL (EnvironmentProvider):**
 ```
@@ -322,7 +322,7 @@ echo $! > /tmp/live_store.pid
 **Health gate:** `[[ -S /tmp/prorl_live_store.sock ]]`
 
 **BC-16 note:** LiveStore starts empty. `get_batch` blocks server-side with a 1800s
-no-progress timeout. Start the trainer AFTER the RolloutWorker has pushed ≥1 group.
+no-progress timeout. Start the trainer AFTER the RolloutManager has pushed ≥1 group.
 
 ### Step 3b — PolicyRegistry (gRPC UDS, parallel with 3a)
 
@@ -347,14 +347,14 @@ echo $! > /tmp/policy_registry.pid
 
 **Health gate:** `[[ -S /tmp/prorl_policy_registry.sock ]]`
 
-### Step 4 — RolloutWorker (BC-14: owns the dataset)
+### Step 4 — RolloutManager (BC-14: owns the dataset)
 
 ```bash
 # SIF images must be built first (see Section 3 below)
 # Verify at least one SIF exists:
 ls singularity_images/*.sif | wc -l   # must be > 0
 
-nohup $POETRY_PYTHON -m rollout_worker.main \
+nohup $POETRY_PYTHON -m rollout_manager.main \
   --live-store-socket /tmp/prorl_live_store.sock \
   --prorl-url http://localhost:8006 \
   --policy-id "${POLICY_ID}" \
@@ -365,8 +365,8 @@ nohup $POETRY_PYTHON -m rollout_worker.main \
   --archive-root /home/ubuntu/replay_archive \
   --filter-zero-variance \
   --archive-disabled \
-  > /tmp/rollout_worker.log 2>&1 &
-echo $! > /tmp/rollout_worker.pid
+  > /tmp/rollout_manager.log 2>&1 &
+echo $! > /tmp/rollout_manager.pid
 ```
 
 **Health gate (BC-16 warm-up):** Wait for LiveStore to have ≥1 group:
@@ -551,7 +551,7 @@ At S4, replace this with `PolicyRegistryClient.publish_policy_version(...)`.
 | BC-10 | vLLM pinning protocol unchanged | Mid-trajectory adapter swap → IS weights are lies |
 | BC-11 | LiveStore returns unpadded; trainer pads locally | `torch.stack` shape mismatch → crash |
 | BC-12 | Archive tee is pre-filter; LiveStore is post-filter | Filtered groups lost forever from archive |
-| BC-13 | RolloutWorker imports zero VERL/OpenHands | Framework coupling breaks pluggability |
+| BC-13 | RolloutManager imports zero VERL/OpenHands | Framework coupling breaks pluggability |
 | BC-14 | Worker owns parquet dataloader | Trainer becomes hidden orchestrator (§3.8 violation) |
 | BC-15 | Trainer connects only to LiveStore + PolicyRegistry | Trainer sneaks back into orchestrator role |
 | BC-16 | `get_batch` warm-up: start trainer AFTER worker pushes ≥1 group | Trainer times out during buffer warm-up |
@@ -586,7 +586,7 @@ REMOTE_DNS=${REMOTE_DNS} PYTHONPATH=. \
 
 # Manual rescue of a specific service
 REMOTE_DNS=${REMOTE_DNS} PYTHONPATH=. \
-  poetry run python scripts/services/rescue_team.py --rescue rollout_worker
+  poetry run python scripts/services/rescue_team.py --rescue rollout_manager
 ```
 
 The rescue team runs the probe → diagnose → fix loop (max 3 retries) per failing
@@ -604,7 +604,7 @@ for human inspection.
 | ProRL (:8006) | ✓ Running | `s0_prorl.sh` fixed — vLLM addresses baked in |
 | LiveStore (UDS) | ✓ Running | gRPC healthy, socket at `/tmp/prorl_live_store.sock` |
 | PolicyRegistry (UDS) | ✓ Running | gRPC healthy, socket at `/tmp/prorl_policy_registry.sock` |
-| RolloutWorker | ⚠ ProRL 500 → fixed | Worker runs, but SIF images needed for episodes |
+| RolloutManager | ⚠ ProRL 500 → fixed | Worker runs, but SIF images needed for episodes |
 | SIF images | 🔄 Building | 1 image building; 232GB blobs cached; ~15h for all 293 |
 | Trainer → LiveStore | ✗ Not yet | Next step: modify `ray_trainer_dapo.py` (Section 4) |
 | Full training run | ✗ Blocked on SIF + trainer migration | After SIF build + trainer change |

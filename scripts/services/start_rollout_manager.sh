@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the RolloutWorker service (slot 5.3 — S2).
+# Start the RolloutManager service (slot 5.3 — S2).
 # Step 4 — depends on InferenceBackend (step 1), EnvironmentProvider (step 2),
 # LiveStore (step 3a), and PolicyRegistry (step 3b).
 #
@@ -22,17 +22,17 @@
 set -euo pipefail
 
 if [[ -z "${DATA_FILES:-}" ]]; then
-    echo "[rollout_worker] ERROR: DATA_FILES env var is required (BC-14 — worker owns dataset)"
+    echo "[rollout_manager] ERROR: DATA_FILES env var is required (BC-14 — worker owns dataset)"
     exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-echo "[rollout_worker] starting"
-echo "[rollout_worker] DATA_FILES=${DATA_FILES}"
-echo "[rollout_worker] PRORL_URL=${PRORL_URL:-http://localhost:8006}"
-echo "[rollout_worker] GROUP_SIZE=${GROUP_SIZE:-16} (n siblings per GRPO group)"
+echo "[rollout_manager] starting"
+echo "[rollout_manager] DATA_FILES=${DATA_FILES}"
+echo "[rollout_manager] PRORL_URL=${PRORL_URL:-http://localhost:8006}"
+echo "[rollout_manager] GROUP_SIZE=${GROUP_SIZE:-16} (n siblings per GRPO group)"
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
@@ -42,7 +42,7 @@ for f in ${DATA_FILES}; do
     DATA_FILES_ARGS+=("$f")
 done
 
-exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -m rollout_worker.main \
+exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -m rollout_manager.main \
     --live-store-socket "${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}" \
     --prorl-url "${PRORL_URL:-http://localhost:8006}" \
     --policy-id "${POLICY_ID:-qwen3-4b-skyrl}" \

@@ -956,5 +956,5 @@ replay:
   policy_registry_socket: /tmp/prorl_policy_registry.sock
 
   # S2 — manifest path written by PolicyRegistry after each publish.
-  # RolloutWorker's FilePollingPolicySubscription reads this at 1 Hz.
+  # RolloutManager's FilePollingPolicySubscription reads this at 1 Hz.
   policy_manifest_path: /tmp/prorl_policy_manifest.json

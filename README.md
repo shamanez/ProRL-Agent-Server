@@ -11,11 +11,11 @@ independently replaceable.
 
 ```
   SkyRL-v0-293/train.ready.parquet
-         |  (ParquetDataLoader — RolloutWorker owns it, §3.8 / BC-14)
+         |  (ParquetDataLoader — RolloutManager owns it, §3.8 / BC-14)
          |  filter_parquet_to_built_sifs.py keeps only rows with a .sif
          v
   +-------------------------------------------------------------+
-  |  RolloutWorker  (scripts/services/start_rollout_worker.sh)  |
+  |  RolloutManager  (scripts/services/start_rollout_manager.sh)  |
   |  Zero VERL / OpenHands imports (BC-13)                      |
   |                                                             |
   |  for each task in dataloader:                               |
@@ -121,7 +121,7 @@ POLICY_ID="qwen3-4b-skyrl" \
 ```
 
 `start_all.sh` starts services in dependency order, health-probes each, waits for the
-RolloutWorker to push at least one group (BC-16 warm-up gate), then starts the trainer.
+RolloutManager to push at least one group (BC-16 warm-up gate), then starts the trainer.
 
 ### 4. Or start manually in order
 
@@ -135,8 +135,8 @@ nohup bash scripts/_internal/s0_prorl.sh > /tmp/s0-prorl.log 2>&1 &
 # Step 3a + 3b: LiveStore and PolicyRegistry (parallel)
 # See CLAUDE.md startup sequence for inline commands.
 
-# Step 4: RolloutWorker
-python -m rollout_worker.main --live-store-socket /tmp/prorl_live_store.sock ...
+# Step 4: RolloutManager
+python -m rollout_manager.main --live-store-socket /tmp/prorl_live_store.sock ...
 
 # Step 5: Trainer (after worker warm-up)
 bash scripts/_internal/s3_fullasync_docker.sh
@@ -154,7 +154,7 @@ Stop in reverse order: trainer → worker → LiveStore + PolicyRegistry → Pro
 | `scripts/serving/launch_remote_vllm_pool.sh` | `:8100-8103` (EC2) | `GET :810N/health` | SSH alias `vllm-instance` must exist |
 | inline — see CLAUDE.md | `/tmp/prorl_live_store.sock` | socket exists | `live_store.server.serve()` |
 | inline — see CLAUDE.md | `/tmp/prorl_policy_registry.sock` | socket exists | `policy_registry.server.serve()` |
-| `python -m rollout_worker.main` | no port (client only) | first push logged | owns `train.ready.parquet` |
+| `python -m rollout_manager.main` | no port (client only) | first push logged | owns `train.ready.parquet` |
 | `scripts/_internal/s3_fullasync_docker.sh` | Docker internal | begins `get_batch` | VERL FSDP, 8x A100 |
 | `scripts/services/rescue_team.py` | n/a | `--check` flag | probe + diagnose + auto-fix loop |
 
@@ -181,7 +181,7 @@ Stop in reverse order: trainer → worker → LiveStore + PolicyRegistry → Pro
 | BC-0: one PolicyVersionSnapshot per group | Consistent advantage computation across siblings | Invalid advantages; NaN loss within steps |
 | BC-1: token IDs as `int` on every wire | Multi-turn RL stability | KL/entropy NaN within 2 training steps |
 | BC-9: `endpoints_failed > 0` = hard abort | Prevents mixed-version pool | IS weights become lies; silent gradient corruption |
-| BC-13: zero VERL/OpenHands in RolloutWorker | Trainer pluggability | Swapping trainer requires rewriting worker |
+| BC-13: zero VERL/OpenHands in RolloutManager | Trainer pluggability | Swapping trainer requires rewriting worker |
 | BC-15: trainer connects only to LiveStore + PolicyRegistry | Trainer pluggability | Adding a new trainer requires changing orchestration |
 
 ---
@@ -222,7 +222,7 @@ Tests cover: all 16 boundary conditions (BC-0 through BC-15), all seven service
 | `openhands/llm/nvidia/` | Token-in / token-out vLLM clients (frozen) |
 | `live_store/` | Extracted gRPC LiveStore service |
 | `policy_registry/` | PolicyRegistry gRPC service + fanout |
-| `rollout_worker/` | Standalone RolloutWorker (zero VERL/OpenHands) |
+| `rollout_manager/` | Standalone RolloutManager (zero VERL/OpenHands) |
 | `replay_archive/` | Append-only Parquet + SQLite archive (tee, pre-filter) |
 | `trainer_adapters/verl/` | VERL bridge: pad.py unpads LiveStore batches |
 | `schemas/` | Typed Protocols, wire schemas, proto bindings, invariant tests |

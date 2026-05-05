@@ -10,7 +10,7 @@
 #    Step 3a LiveStore (gRPC UDS)            ─┐ parallel
 #    Step 3b PolicyRegistry (gRPC UDS)       ─┘
 #    Step 3c ReplayArchive (HTTP :8080, opt)
-#    Step 4  RolloutWorker
+#    Step 4  RolloutManager
 #    Step 5  TrainerAdapter (Docker container)
 #
 #  Stop in reverse. Trainer before worker; worker before store+registry.
@@ -136,25 +136,25 @@ else
 fi
 
 # =========================================================================
-# Step 4 — RolloutWorker
+# Step 4 — RolloutManager
 # Depends on steps 1, 2, 3a, 3b.
 # BC-14: DATA_FILES must be set — worker owns the dataset, NOT the trainer.
 # BC-16: worker fills the live store before trainer starts.
 #        Start worker first and wait for it to push at least 1 group.
 # =========================================================================
 echo ""
-echo "=== Step 4: RolloutWorker ==="
+echo "=== Step 4: RolloutManager ==="
 
 if [[ -z "${DATA_FILES:-}" ]]; then
     echo "ERROR: DATA_FILES must be set (BC-14 — worker owns the dataset, not the trainer)"
     exit 1
 fi
 
-start_bg "rollout_worker" bash "${SCRIPT_DIR}/start_rollout_worker.sh"
+start_bg "rollout_manager" bash "${SCRIPT_DIR}/start_rollout_manager.sh"
 
 # The worker registers with the LiveStore; wait for it to push ≥ 1 group.
 # This is the BC-16 warm-up gate: trainer must not start until buffer has data.
-echo "  waiting for rollout worker to push ≥ 1 group (BC-16 warm-up) ..."
+echo "  waiting for rollout manager to push ≥ 1 group (BC-16 warm-up) ..."
 WARMUP_TIMEOUT="${WORKER_WARMUP_TIMEOUT_S:-300}"
 python - <<PYEOF
 import sys, time

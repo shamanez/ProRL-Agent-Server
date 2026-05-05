@@ -55,7 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_split ON episodes(split);
 
 
 class ArchiveServer:
-    """In-process archive backend, co-located with the rollout worker."""
+    """In-process archive backend, co-located with the rollout manager."""
 
     def __init__(self, root: str | Path) -> None:
         self._root = Path(root)

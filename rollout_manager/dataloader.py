@@ -1,4 +1,4 @@
-"""Simple parquet dataloader owned by the RolloutWorker (BC-14).
+"""Simple parquet dataloader owned by the RolloutManager (BC-14).
 
 No VERL, no OpenHands. Reads parquet files directly with pyarrow,
 cycles infinitely, and supports ``state_dict`` / ``load_state_dict``

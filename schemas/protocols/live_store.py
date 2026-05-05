@@ -1,6 +1,6 @@
 """§A.4 — LiveStore protocol.
 
-Bounded, low-latency hot buffer between RolloutWorker and TrainerAdapter.
+Bounded, low-latency hot buffer between RolloutManager and TrainerAdapter.
 Pop-on-sample (§3.6). No-progress detector server-side (§S1).
 Unpadded wire (§6.2).
 """

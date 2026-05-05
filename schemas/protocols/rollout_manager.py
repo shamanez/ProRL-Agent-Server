@@ -1,4 +1,4 @@
-"""§A.3 — RolloutWorker protocol.
+"""§A.3 — RolloutManager protocol.
 
 Owns the training task dataset (§3.8). The trainer never holds a parquet
 path after S2. Zero VERL/OpenHands imports in the worker process (BC-13).
@@ -33,7 +33,7 @@ class PolicyVersionStream(Protocol):
     def close(self) -> None: ...
 
 
-class RolloutWorker(Protocol):
+class RolloutManager(Protocol):
     worker_id: str
 
     def pause_production(self) -> Ack: ...

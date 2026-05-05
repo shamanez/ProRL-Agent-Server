@@ -2,7 +2,7 @@
 
 A contract-first design for evolving the current ProRL + OpenHands + vLLM +
 VERL full-async stack into a decentralized agentic-RL fabric where
-environments, inference backends, rollout workers, live stores, replay
+environments, inference backends, rollout managers, live stores, replay
 archives, trainers, and policy coordination are independently replaceable
 adapter slots.
 
@@ -72,7 +72,7 @@ Step 3a — Live store              (no upstream service dependencies)
   Script:   scripts/services/start_live_store.sh     [S1 target; today: in-process]
   Health:   GET <host>:<port>/health → 200
   Contract: LiveStore (Sec.5.4)
-  Role:     Bounded hot FIFO between rollout workers and trainer.
+  Role:     Bounded hot FIFO between rollout managers and trainer.
             Pop-on-sample. Staleness eviction by created_at_step.
 
 Step 3b — Policy registry         (no upstream service dependencies)
@@ -84,9 +84,9 @@ Step 3b — Policy registry         (no upstream service dependencies)
             endpoints_failed > 0 abort gate (invariant 3.3).
 
 Step 4 — Rollout worker(s)        (depends on steps 1, 2, 3a)
-  Script:   scripts/services/start_rollout_worker.sh [S2 target; today: daemon thread]
+  Script:   scripts/services/start_rollout_manager.sh [S2 target; today: daemon thread]
   Health:   Worker registers with live store; live store reports producer_id active.
-  Contract: RolloutWorker (Sec.5.3)
+  Contract: RolloutManager (Sec.5.3)
   Role:     Executes agent loop against environment provider and inference
             backend. Owns task datasets. Pushes to live store and replay archive.
 
@@ -102,7 +102,7 @@ Steps 3a and 3b can start in parallel. Steps 1 and 2 can start in parallel.
 Step 4 requires steps 1, 2, and 3a. Step 5 requires steps 3a, 3b, and 4.
 
 Stop in reverse order. The trainer must stop before the live store or the
-policy registry; the rollout worker before the environment provider or the
+policy registry; the rollout manager before the environment provider or the
 inference backend.
 
 ### 0.2 Why this ordering
@@ -110,11 +110,11 @@ inference backend.
 The ordering follows dependency, not latency. The environment provider and
 inference backend have no upstream service dependencies — they start first.
 The live store and policy registry are coordination infrastructure with no
-upstream service dependencies. The rollout worker needs all three: a place to
+upstream service dependencies. The rollout manager needs all three: a place to
 dispatch episodes (environment provider), generate tokens (inference backend),
 and push results (live store). The trainer is last: it depends on the live
 store (get_batch) and the policy registry (publish_policy_version), and it
-pre-flight-probes the rollout worker before beginning optimizer steps.
+pre-flight-probes the rollout manager before beginning optimizer steps.
 
 ### 0.3 Contracts, not implementations
 
@@ -199,7 +199,7 @@ that comes next.
 
 The vision is to turn this stack into a **rollout fabric** — a small set of
 stable contracts between independently replaceable services. Many environment
-providers generate verifiable, tool-rich episodes. Many rollout workers
+providers generate verifiable, tool-rich episodes. Many rollout managers
 execute those episodes against versioned policies. One or more trainers
 consume a clean training-sample stream. Policy versions are published back to
 inference backends without binding the system to any one trainer, environment
@@ -387,7 +387,7 @@ each survivor group into the store the moment it clears
 `push_from_dataproto` via `meta_info['eager_pushed_all']`. Calling
 `store.push_from_dataproto(out_batch)` unconditionally double-pushes and
 corrupts `behavior_policy_version` / `created_at_step` tracking under
-pop-on-sample. The eager-push seam moves into the rollout-worker slot and
+pop-on-sample. The eager-push seam moves into the rollout-manager slot and
 is preserved across the migration; the planner is not authorized to revert
 to terminal-push under `filter_groups=True`.
 
@@ -396,7 +396,7 @@ to terminal-push under `filter_groups=True`.
 This is the invariant that prevents the trainer from sneaking back into
 being the orchestrator after the migration. State this precisely:
 
-> **Training task datasets** belong to the rollout worker. The trainer
+> **Training task datasets** belong to the rollout manager. The trainer
 > **does not sample raw tasks directly.** The trainer samples
 > `TrainingGroup` records from the live store only. The trainer has no
 > parquet files, no dataloader, and no knowledge of task IDs beyond the
@@ -405,7 +405,7 @@ being the orchestrator after the migration. State this precisely:
 Consequences and tests of this invariant:
 
 - The trainer image after migration **does not import a dataloader.** The
-  current `data.train_files` Hydra field becomes rollout-worker config.
+  current `data.train_files` Hydra field becomes rollout-manager config.
 - The trainer **does not know task IDs.** A `TrainingGroup` carries `task_id`
   and `environment_id`/`environment_version` as provenance, but the trainer
   never resolves a `task_id` back to a raw task description.
@@ -507,7 +507,7 @@ The summary table:
 |---|---|---|---|---|
 | 5.1 | EnvironmentProvider | ProRL FastAPI :8006 with OpenHands inside | ROCK, GEM, ORS/OpenReward, Gymnasium, browser/code-exec sandboxes | `list_tasks / create_episode / get_prompt / act / close` over typed tool calls |
 | 5.2 | InferenceBackend | Remote vLLM child pool :8100-8103 | SGLang, TGI, TRT-LLM, hosted APIs (where logprobs available) | `Generate(policy_ref, tokenized_prompt, sampling) → token_ids + logprobs + metadata` |
-| 5.3 | RolloutWorker | `ContinuousRolloutProducer` + `AsyncLLMServerManagerDAPO` | Multi-machine producer fleet, mixed-environment producers, partner producers | Reads tasks from EnvProvider; dispatches via InferenceBackend; emits `EpisodeRecord` and `TrainingGroup`; subscribes to PolicyRegistry |
+| 5.3 | RolloutManager | `ContinuousRolloutProducer` + `AsyncLLMServerManagerDAPO` | Multi-machine producer fleet, mixed-environment producers, partner producers | Reads tasks from EnvProvider; dispatches via InferenceBackend; emits `EpisodeRecord` and `TrainingGroup`; subscribes to PolicyRegistry |
 | 5.4 | LiveStore | In-process `TrajectoryStore` (deque + lock) | Colocated gRPC/Ray/shared-memory hot store | `push_group / get_batch / get_metrics / notify_policy_version` with bounded FIFO + staleness + pop-on-sample |
 | 5.5 | ReplayArchive | Does not exist today | Parquet/Iceberg on S3, Postgres index, object store + metadata catalog | Append-only `EpisodeRecord` log; queryable `TrainingSample` derivation by env, split, policy, reward, time |
 | 5.6 | TrainerAdapter | VERL `RayPPOTrainerDAPO` | ROLL, slime/Megatron, DeepSpeed/FSDP, single-GPU PEFT, SFT/distillation pipelines | Consumes `TrainingGroup`; computes alg-specific fields locally; publishes policy versions |
@@ -558,7 +558,7 @@ this adapter. The token-in/token-out invariant is owned by this adapter
 **State ownership.** The provider owns task state, ground truth, reward
 function, sandbox processes, and the verifier. The provider does **not**
 own the agent's policy (that lives at the InferenceBackend) or the
-trajectory (which lives at the RolloutWorker / LiveStore / ReplayArchive).
+trajectory (which lives at the RolloutManager / LiveStore / ReplayArchive).
 
 ### 5.2 InferenceBackend
 
@@ -599,7 +599,7 @@ It does **not** own policy version semantics (that is the
 PolicyRegistry's job). It is told *which* policy to load and *which* to
 serve per request.
 
-### 5.3 RolloutWorker
+### 5.3 RolloutManager
 
 **Role.** Executes the agent loop against EnvironmentProvider and
 InferenceBackend, produces episodes, derives training groups, applies
@@ -650,7 +650,7 @@ validation **task datasets**.
 
 ### 5.4 LiveStore
 
-**Role.** A bounded, low-latency, hot buffer between RolloutWorker and
+**Role.** A bounded, low-latency, hot buffer between RolloutManager and
 TrainerAdapter. Operates in groups (n siblings together), pops on sample,
 evicts by staleness, returns batches sized for the trainer step.
 
@@ -754,7 +754,7 @@ Connecting trainer-triggered validation to an async decoupled worker is
 deferred until after S4 is stable.
 
 **Current adapter.** VERL `RayPPOTrainerDAPO`. Currently owns the
-dataloader; in the migration that ownership moves to RolloutWorker (S2),
+dataloader; in the migration that ownership moves to RolloutManager (S2),
 leaving this adapter focused on optimizer math and policy publication.
 
 **Future adapters.**
@@ -764,7 +764,7 @@ leaving this adapter focused on optimizer math and policy publication.
   via the same `get_batch` protocol that VERL uses.
 - **slime / Megatron + SGLang**: separates training, rollout, data buffer.
   Its data-buffer abstraction maps onto LiveStore; its rollout module
-  maps onto RolloutWorker. Plugging slime as a TrainerAdapter requires
+  maps onto RolloutManager. Plugging slime as a TrainerAdapter requires
   bridging its Ray-object-ref data path to the LiveStore's `get_batch`.
 - **DeepSpeed/FSDP single-trainer adapters**, single-GPU PEFT trainers,
   pure SFT trainers, distillation pipelines.
@@ -1068,7 +1068,7 @@ Where each slot naturally runs in a deployed system:
 |---|---|---|---|---|
 | InferenceBackend | Yes (model weights, LoRA cache, KV cache) | Yes (generation dominates wall-clock) | Dedicated inference GPU pool | Different resource profile from training. |
 | EnvironmentProvider | Yes (sandboxes, sessions, task queues) | Medium (init/runtime can bottleneck) | High-CPU box with scratch disk; scale horizontally | Often needs CPU, containers, filesystem, network. |
-| RolloutWorker | Mostly (dataloader cursor, inflight episodes) | Low–medium | Near env provider, or sharded across env clusters | Worker should be a coordinator, not a heavy state owner. |
+| RolloutManager | Mostly (dataloader cursor, inflight episodes) | Low–medium | Near env provider, or sharded across env clusters | Worker should be a coordinator, not a heavy state owner. |
 | LiveStore | Yes (hot FIFO buffer) | Yes (`get_batch` is trainer hot path) | Colocate with trainer | Avoid moving large tensor batches over the network in the hot path. |
 | ReplayArchive | Yes (long-term data) | No | S3/NFS/Iceberg/Postgres-style storage | Queryability and durability dominate. |
 | PolicyRegistry / Coordination | Small (version/manifest registry) | Low | Anywhere reliable and reachable | Cold path except publish events. |
@@ -1076,7 +1076,7 @@ Where each slot naturally runs in a deployed system:
 
 Three implications:
 
-1. **RolloutWorker is the easiest slot to fan out.** It is the right
+1. **RolloutManager is the easiest slot to fan out.** It is the right
    first place to introduce decentralization (S5).
 2. **LiveStore and TrainerAdapter should usually be close** (same box, or
    high-bandwidth interconnect). The hot path is `get_batch`.
@@ -1166,7 +1166,7 @@ service rather than the in-process object.
 - TrainerAdapter calls `get_batch` over an out-of-process boundary
   (transport TBD by planner — same machine, so localhost gRPC, Ray, or
   shared memory are all plausible).
-- RolloutWorker (still in trainer process) calls `push_group` over the
+- RolloutManager (still in trainer process) calls `push_group` over the
   same boundary.
 - Re-padding still happens server-side.
 - `get_batch`'s server-side blocking and no-progress detector replace
@@ -1174,7 +1174,7 @@ service rather than the in-process object.
 - The wire schema is the Sec.6.2 TrainingSample / TrainingGroup. **Sealing
   the live-path schema is the load-bearing artifact of S1.**
 
-**What does not change.** RolloutWorker, EnvironmentProvider,
+**What does not change.** RolloutManager, EnvironmentProvider,
 InferenceBackend, TrainerAdapter (modulo the swap of `self.trajectory_store`
 for a client). Data ownership is still in the trainer process; that's S2.
 
@@ -1183,7 +1183,7 @@ for a client). Data ownership is still in the trainer process; that's S2.
 - 3.2 group integrity: the wire groups; pop-on-sample preserves it.
 - 3.5 per-row `behavior_policy_version`: stamped at push.
 - 3.6 pop-on-sample.
-- 3.7 eager-push seam: still owned by RolloutWorker; the seam is now a
+- 3.7 eager-push seam: still owned by RolloutManager; the seam is now a
   network call rather than a function pointer.
 
 **Validation — contract tests (no training at this stage).**
@@ -1215,15 +1215,15 @@ Run these tests against the extracted LiveStore service in isolation:
 **Reversibility.** Trivial — keep S0 launcher available; the LiveStore
 service is feature-flagged.
 
-### S2. RolloutWorker as its own process — data ownership migration
+### S2. RolloutManager as its own process — data ownership migration
 
-**Goal.** Prove the RolloutWorker slot is real **and** that data ownership
+**Goal.** Prove the RolloutManager slot is real **and** that data ownership
 moves from the trainer to the worker (invariant 3.8). After S2, the
 trainer process does not import `openhands`, does not load any parquet,
 and does not know task IDs.
 
 **Scope.**
-- RolloutWorker becomes a standalone process. It owns:
+- RolloutManager becomes a standalone process. It owns:
   - the SkyRL-v0-293 train parquet files (val split is not exercised — validation is deferred per Sec.11),
   - the `StatefulDataLoader` and its checkpoint,
   - the `AsyncLLMServerManagerDAPO` (or successor) dispatch logic,
@@ -1254,7 +1254,7 @@ worker, but stamping happens at push, exactly as today).
 
 **Validation — contract tests (no training at this stage).**
 
-Run these tests against the extracted RolloutWorker process in isolation:
+Run these tests against the extracted RolloutManager process in isolation:
 - Worker starts, health-probes, and registers with the LiveStore (S1
   service); live store metrics show the producer_id active.
 - Worker pushes ≥ 1 group to LiveStore within 120 s of starting. Assert
@@ -1296,7 +1296,7 @@ produces is teed to the archive in canonical `EpisodeRecord` form (Sec.6.1).
 The archive is queryable.
 
 **Scope.**
-- RolloutWorker writes `EpisodeRecord` to the archive per completed
+- RolloutManager writes `EpisodeRecord` to the archive per completed
   episode (irrespective of producer-side filter — the archive sees
   everything; the live store sees only filter survivors).
 - The archive supports `append_episodes` and `query`. The minimum query
@@ -1315,7 +1315,7 @@ etc.).
 **Validation — contract tests (no training at this stage).**
 
 Run these tests against the extracted ReplayArchive in isolation, then
-together with the RolloutWorker from S2:
+together with the RolloutManager from S2:
 - Archive starts and health-probes.
 - `append_episodes` → `query` round-trip: insert a synthetic
   `EpisodeRecord`; query by `(policy_id, environment_id)`; assert the
@@ -1344,7 +1344,7 @@ together with the RolloutWorker from S2:
 
 **Goal.** Prove the PolicyRegistry slot is real. The trainer publishes
 versions to the registry; the registry fans out to InferenceBackend
-(`/reload_lora`), LiveStore (notification), and RolloutWorker
+(`/reload_lora`), LiveStore (notification), and RolloutManager
 (subscription) atomically. The trainer no longer talks directly to the
 pool.
 
@@ -1355,7 +1355,7 @@ pool.
   picks; the registry stores the URI).
 - The registry preserves the abort gate (invariant 3.3): if any pool
   child fails, the publish call returns failure and the trainer aborts.
-- RolloutWorker subscribes to version updates instead of polling.
+- RolloutManager subscribes to version updates instead of polling.
 
 **What does not change.** Hot path between worker → live store → trainer.
 The pool itself (vLLM child) is unchanged — it still serves
@@ -1421,7 +1421,7 @@ to the new adapter) as the primary validation gate.
 ### S5. Multi-producer with heterogeneous EnvironmentProvider adapters
 
 **Goal.** Prove the EnvironmentProvider slot is real and the
-RolloutWorker slot is fan-out-able. Run two RolloutWorkers in parallel,
+RolloutManager slot is fan-out-able. Run two RolloutWorkers in parallel,
 each pointed at a different EnvironmentProvider adapter (e.g. ProRL +
 GEM, or ProRL + ORS, or ProRL + a partner). Both push to the same
 LiveStore.
@@ -1430,7 +1430,7 @@ LiveStore.
 - A second EnvironmentProvider adapter is implemented (planner picks the
   first concrete second adapter — most likely GEM or a stripped-down ORS
   test environment).
-- A second RolloutWorker instance is launched against the second
+- A second RolloutManager instance is launched against the second
   provider.
 - Data sharding: workers either disjoint-shard the dataset by
   `task_id`, or each worker pulls from a distinct dataset entirely.
@@ -1551,7 +1551,7 @@ single-trainer publish.
                  └─ live-path wire schema sealed
                     │
                     ▼
-             S2  RolloutWorker extracted as a service
+             S2  RolloutManager extracted as a service
                  └─ data ownership leaves the trainer
                     │
                     ▼
@@ -1622,7 +1622,7 @@ preserves, recast in slot terms:
 10. **Producer-side filter location.** `filter_easy_hard_instance` is
     cheap (one boolean check per group) and saves ~30% of push bandwidth
     (typical zero-variance rate on SkyRL-v0). It stays in the
-    RolloutWorker.
+    RolloutManager.
 
 ---
 
@@ -1635,7 +1635,7 @@ planner.
 **Explicitly deferred — trainer-triggered validation:**
 
 Connecting trainer-triggered evaluation passes (the trainer asking the
-rollout worker to run a val split and return scored groups) to an async
+rollout manager to run a val split and return scored groups) to an async
 decoupled setup is a hard scheduling problem: the trainer must pause or
 interleave production rollouts, the worker must switch task splits, and
 results must be routed back to the trainer in a form the FSDP actor can
@@ -1644,7 +1644,7 @@ this wrong is a common source of silent failures and unexpected latency
 spikes.
 
 **Validation is therefore out of scope for S0–S4.** Specifically:
-- `run_validation` is not on the RolloutWorker RPC surface.
+- `run_validation` is not on the RolloutManager RPC surface.
 - `request_validation` and `score_validation` are not on the TrainerAdapter
   interface.
 - `pause_production` and `resume_production` are not implemented.
@@ -1724,7 +1724,7 @@ specific implementation path.
    always read 0).
 
 5. **Validation flow placement.** Per invariant 3.8, the trainer asks
-   the RolloutWorker for validation groups. Open question: does the
+   the RolloutManager for validation groups. Open question: does the
    worker need to **pause production** during validation (shared
    OpenHands session) or run validation on a **dedicated session**
    (separate ProRL port, no coordination)? Recommendation: dedicated
@@ -1732,7 +1732,7 @@ specific implementation path.
    set is small. Planner verifies and decides.
 
 6. **Dataloader state under producer ownership (S2).** When the
-   RolloutWorker owns the dataloader, it owns the
+   RolloutManager owns the dataloader, it owns the
    `state_dict()`/`load_state_dict()` pair. On worker restart it loads
    the last checkpoint to avoid prompt repetition. Open question:
    where is the worker's checkpoint stored? Trainer-attached disk?
@@ -1836,10 +1836,10 @@ class GenerationResult(Protocol):
     metadata: dict  # includes the served policy_version
 ```
 
-### A.3 RolloutWorker
+### A.3 RolloutManager
 
 ```python
-class RolloutWorker(Protocol):
+class RolloutManager(Protocol):
     worker_id: str
 
     # Internal main loop — not RPC.
@@ -1992,8 +1992,8 @@ where, what stays.
 | `openhands/llm/nvidia/qwen3.py`, `qwen2_5_vl.py` | 5.1 (internal) | Internal to ProRL. Token-in/token-out invariant lives here. |
 | `scripts/serving/_vllm_child.py` | 5.2 InferenceBackend | Stays. Becomes the vLLM-pinning adapter. |
 | `scripts/serving/launch_remote_vllm_pool.sh` | 5.2 (orchestration) | Stays. Pool orchestration is internal to the vLLM adapter. |
-| `trainer_integration/verl/verl_custom/replay/continuous_producer.py` | 5.3 RolloutWorker | Migrates to the worker process at S2. Daemon thread becomes a service main loop. |
-| `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | 5.3 RolloutWorker | Migrates. The DAPO eager-push seam (Sec.3.7) lives here. |
+| `trainer_integration/verl/verl_custom/replay/continuous_producer.py` | 5.3 RolloutManager | Migrates to the worker process at S2. Daemon thread becomes a service main loop. |
+| `trainer_integration/verl/verl_custom/nvidia/rollout/async_server_dapo.py` | 5.3 RolloutManager | Migrates. The DAPO eager-push seam (Sec.3.7) lives here. |
 | `trainer_integration/verl/verl_custom/replay/trajectory_store.py` | 5.4 LiveStore | The data structure stays; the process boundary changes at S1. |
 | (none today) | 5.5 ReplayArchive | New at S3. |
 | `trainer_integration/verl/verl_custom/trainer/ppo/ray_trainer.py`, `ray_trainer_dapo.py` | 5.6 TrainerAdapter | Stays as the VERL adapter. Loses dataloader and direct rollout-mgr at S2; loses direct pool publish at S4. Validation logic removed (deferred per Sec.11). |
@@ -2019,7 +2019,7 @@ adapter would have to do.
 | **TGI / TRT-LLM / hosted APIs** | 5.2 InferenceBackend | Adapters as needed. Hosted APIs without per-token logprobs are usable for eval-only flows (matches `trust_level=external-eval-only` routing). |
 | **VERL `RayPPOTrainerDAPO`** (current) | 5.6 TrainerAdapter | Already implemented. Loses dataloader at S2 per invariant 3.8. |
 | **ROLL** (Alibaba) | 5.6 TrainerAdapter | Async controller + DeepSpeed/Megatron/FSDP2. Already first-class on `behavior_policy_version` and supports six off-policy IS variants. Adapter consumes `TrainingGroup` via `get_batch`, computes ROLL's flavor of advantages and IS correction, publishes via PolicyRegistry. ROLL's `SampleBuffer` is replaced by the fabric's LiveStore. |
-| **slime** (THUDM) | 5.4 + 5.6 (paired) | slime separates training, rollout, and data buffer. Its data-buffer concept is closest to LiveStore; its training module (Megatron-based) is the trainer adapter; its rollout module is conceptually the RolloutWorker. Plug-in: replace slime's data buffer with a LiveStoreClient; replace its rollout module with a RolloutWorkerClient. The Megatron training module becomes the adapter. |
+| **slime** (THUDM) | 5.4 + 5.6 (paired) | slime separates training, rollout, and data buffer. Its data-buffer concept is closest to LiveStore; its training module (Megatron-based) is the trainer adapter; its rollout module is conceptually the RolloutManager. Plug-in: replace slime's data buffer with a LiveStoreClient; replace its rollout module with a RolloutWorkerClient. The Megatron training module becomes the adapter. |
 | **Aggregation services** (FedAvg etc.) | 5.7 (extension) | S8 only. Operate on adapter URIs from the PolicyRegistry. Out of scope for this document. |
 
 ---
@@ -2070,7 +2070,7 @@ Why use a team here:
   dedicated teammate's working memory is the tightest fit to the
   architecture: invariants 3.1 (token-in/out) and 3.4 (pinning) live with
   EnvProvider/InferenceBackend teammates; 3.2 / 3.6 / 3.7 live with
-  RolloutWorker / LiveStore teammates; 3.3 / 3.5 live with TrainerAdapter
+  RolloutManager / LiveStore teammates; 3.3 / 3.5 live with TrainerAdapter
   / PolicyRegistry teammates; 3.8 (data ownership) is the lead's
   cross-cutting responsibility.
 - **Parallel investigation.** Sec.12's open questions (transport, storage,
@@ -2087,7 +2087,7 @@ Bootstrap sequence:
    to resolve Sec.12 open questions per stage before implementation begins.
 2. **Per-stage execution team** scoped to the slots that stage touches
    (e.g. S1 = LiveStore + TrainerAdapter teammates; S6 = TrainerAdapter +
-   PolicyRegistry + RolloutWorker teammates).
+   PolicyRegistry + RolloutManager teammates).
 3. **Cleanup discipline.** Per the agent-teams contract, only the lead
    runs cleanup; teammates shut down on request before the lead cleans up.
 
@@ -2314,7 +2314,7 @@ Suggested target shape (planner picks the names):
 ```
 openhands_env_provider/   # slot 5.1 — ProRL adapter today
 inference_backend/        # slot 5.2 — vLLM child + future SGLang/TGI/...
-rollout_worker/           # slot 5.3 — was continuous_producer + async_server_dapo
+rollout_manager/           # slot 5.3 — was continuous_producer + async_server_dapo
 live_store/               # slot 5.4 — was trajectory_store + client/server split
 replay_archive/           # slot 5.5 — new at S3
 trainer_adapters/

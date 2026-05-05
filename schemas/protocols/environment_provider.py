@@ -1,7 +1,7 @@
 """§A.1 — EnvironmentProvider protocol.
 
 Today's adapter: ProRL FastAPI :8006 (openhands/nvidia/async_server.py).
-The RolloutWorker calls this via plain HTTP — no OpenHands imports.
+The RolloutManager calls this via plain HTTP — no OpenHands imports.
 
 HTTP contract (ProRL's existing API):
   POST /process

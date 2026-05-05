@@ -31,10 +31,10 @@ from schemas.protocols.replay_archive import (
     FilterSpec,
     ReplayArchive,
 )
-from schemas.protocols.rollout_worker import (
+from schemas.protocols.rollout_manager import (
     FilterStrategy,
     PolicyVersionStream,
-    RolloutWorker,
+    RolloutManager,
     TaskSource,
 )
 from schemas.protocols.trainer_adapter import StepMetrics, TrainerAdapter
@@ -59,7 +59,7 @@ __all__ = [
     'PublishResult',
     'ReloadResult',
     'ReplayArchive',
-    'RolloutWorker',
+    'RolloutManager',
     'StepMetrics',
     'StepResult',
     'StoreMetrics',

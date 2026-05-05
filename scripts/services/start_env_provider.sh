@@ -4,7 +4,7 @@
 #
 # This is a thin wrapper around the existing s0_prorl.sh launcher.
 # ProRL is FROZEN (openhands/nvidia/async_server.py unchanged through S4).
-# The rollout worker calls it via HTTP POST /process — no OpenHands imports
+# The rollout manager calls it via HTTP POST /process — no OpenHands imports
 # in the worker (BC-13).
 #
 # Health: GET :${PRORL_PORT}/health → 200

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Start the LiveStore gRPC service (slot 5.4 — S1).
-# Run BEFORE start_rollout_worker.sh and BEFORE the trainer.
+# Run BEFORE start_rollout_manager.sh and BEFORE the trainer.
 #
 # Step 3a in the startup sequence (can run parallel with start_policy_registry.sh).
 # Health: GET the socket existence + python health check.
