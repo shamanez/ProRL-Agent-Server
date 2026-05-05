@@ -1,4 +1,4 @@
-# Training Progress — 2026-05-05T08:38:50Z
+# Training Progress — 2026-05-05T09:34:25Z
 
 ## Status: HEALTHY  <!-- HEALTHY | DEGRADED | RESCUED | STALLED -->
 
@@ -11,8 +11,8 @@
 | Last push | N/A |
 | Stall risk | No |
 | Trainer | (no loss values seen yet) |
-| LiveStore groups | 0 |
-| LiveStore total pushes | 0 |
+| LiveStore groups | 6 |
+| LiveStore total pushes | 6 |
 
 ## Boundary Condition Checks
 
@@ -27,13 +27,13 @@
 
 | Service | Status | Last checked |
 |---|---|---|
-| LiveStore (UDS) | ✓ Healthy | 08:38:50 |
-| PolicyRegistry (UDS) | ✓ Healthy | 08:38:50 |
-| EnvironmentProvider (:8006) | ✓ Healthy | 08:38:50 |
-| vLLM :8100 | ✓ Healthy (35ms) | 08:38:50 |
-| vLLM :8101 | ✓ Healthy (4ms) | 08:38:50 |
-| vLLM :8102 | ✓ Healthy (2ms) | 08:38:50 |
-| vLLM :8103 | ✓ Healthy (2ms) | 08:38:50 |
+| LiveStore (UDS) | ✓ Healthy | 09:34:25 |
+| PolicyRegistry (UDS) | ✓ Healthy | 09:34:25 |
+| EnvironmentProvider (:8006) | ✓ Healthy | 09:34:25 |
+| vLLM :8100 | ✓ Healthy (62ms) | 09:34:25 |
+| vLLM :8101 | ✓ Healthy (3ms) | 09:34:25 |
+| vLLM :8102 | ✓ Healthy (2ms) | 09:34:25 |
+| vLLM :8103 | ✓ Healthy (3ms) | 09:34:25 |
 
 ## Weight Sync Log (last 5)
 - (no weight sync events yet)

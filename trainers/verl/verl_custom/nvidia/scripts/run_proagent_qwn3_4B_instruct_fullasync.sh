@@ -22,10 +22,10 @@ set -euo pipefail
 
 PROJECT_NAME='ProAgent'
 EXPERIMENT_NAME='fullasync-replay-prorl'
-DATA_PATH="/path/to/data/parquet"
-SFT_MODEL_PATH='Qwen/Qwen3-4B-Instruct-2507'
-TOKENIZER_PATH='Qwen/Qwen3-4B-Instruct-2507'
-CKPT_PATH='/path/to/outputs'
+DATA_PATH="${DATA_PATH:-/data/SkyRL-v0-293}"
+SFT_MODEL_PATH="${SFT_MODEL_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-Qwen/Qwen3-4B-Instruct-2507}"
+CKPT_PATH="${CKPT_PATH:-/workspace/outputs}"
 
 
 BATCH_SIZE=${BATCH_SIZE:-4}

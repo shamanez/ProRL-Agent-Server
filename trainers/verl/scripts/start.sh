@@ -88,6 +88,10 @@ docker run --rm --name "$CNAME" \
   -e PRODUCER_BATCH_SIZE="$PRODUCER_BATCH_SIZE" \
   -e SWAP_PROTOCOL="$SWAP_PROTOCOL" \
   -e REPO_HOST_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" \
+  -e DATA_PATH="/data/SkyRL-v0-293" \
+  -e CKPT_PATH="/workspace/outputs" \
+  -e LIVE_STORE_SOCKET="/tmp/prorl_live_store.sock" \
+  -e POLICY_REGISTRY_SOCKET="/tmp/prorl_policy_registry.sock" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \
@@ -136,8 +140,8 @@ docker run --rm --name "$CNAME" \
       # dataset schema inference. The trainer does NOT use this for rollout generation.
       # Rollout data comes exclusively from LiveStoreClient.get_batch().
       # TODO: replace with a LiveStoreOnlyDataset dummy config to remove the parquet mount.
-      data.train_files=[/data/SkyRL-v0-293/train.parquet] \
-      data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
+      ++data.train_files=[/data/SkyRL-v0-293/train.parquet] \
+      ++data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
       trainer.default_local_dir=/workspace/outputs/ProAgent/fullasync \
       ++actor_rollout_ref.rollout.custom.rollout_save_dir=/workspace/outputs/rollout_data_fullasync \
       replay.staleness_cutoff_k="$STALENESS_CUTOFF_K" \

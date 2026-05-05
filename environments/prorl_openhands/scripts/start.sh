@@ -30,6 +30,6 @@ VENDOR_ROOT="/home/ubuntu/unextractable-agentic-rl/vendor/ProRL-Agent-Server"
 PYTHONPATH="${REPO_ROOT}/environments/prorl_openhands:${REPO_ROOT}/core:${VENDOR_ROOT}:${PYTHONPATH:-}" \
 "${PYTHON}" "${REPO_ROOT}/environments/prorl_openhands/scripts/start_server.py" \
   --host 0.0.0.0 --port 8006 \
-  --max-init-workers 64 --max-run-workers 64 --timeout 1200 \
+  --max-init-workers 32 --max-run-workers 32 --timeout 1200 \
   "${VLLM_ADDR_ARGS[@]}" \
   2>&1 | tee /tmp/s0-prorl.log
