@@ -17,13 +17,13 @@ import time
 
 import pytest
 
-from policy_registry.file_registry import (
+from rollout_fabric.policy_registry.file_registry import (
     PolicyManifest,
     read_manifest,
     write_manifest,
 )
-from rollout_manager.policy_subscription import FilePollingPolicySubscription
-from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
+from rollout_fabric.rollout_manager.policy_subscription import FilePollingPolicySubscription
+from rollout_fabric.schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
 
 pytestmark = pytest.mark.contract
 

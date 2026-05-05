@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from schemas.episode_record import EpisodeRecord, Event, RewardEvent, TrustLevel
+from rollout_fabric.schemas.episode_record import EpisodeRecord, Event, RewardEvent, TrustLevel
 
 
 def make_episode(

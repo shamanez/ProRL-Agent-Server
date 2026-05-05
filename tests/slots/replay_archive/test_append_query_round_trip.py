@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from replay_archive import ArchiveServer, query
-from replay_archive.derive import (
+from rollout_fabric.replay_archive import ArchiveServer, query
+from rollout_fabric.replay_archive.derive import (
     TokenizerMismatchError,
     derive_training_samples,
 )
-from schemas.episode_record import TrustLevel
-from schemas.protocols.replay_archive import FilterSpec
+from rollout_fabric.schemas.episode_record import TrustLevel
+from rollout_fabric.schemas.protocols.replay_archive import FilterSpec
 
 from .conftest import make_episode
 

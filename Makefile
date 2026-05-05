@@ -177,11 +177,11 @@ install-pre-commit-hooks:
 
 lint-backend:
 	@echo "$(YELLOW)Running linters...$(RESET)"
-	@poetry run pre-commit run --files openhands/**/* evaluation/**/* tests/**/* --show-diff-on-failure --config $(PRE_COMMIT_CONFIG_PATH)
+	@poetry run pre-commit run --files environments/prorl_openhands/openhands/**/* evaluation/**/* tests/**/* --show-diff-on-failure --config $(PRE_COMMIT_CONFIG_PATH)
 
 lint-scripts:
 	@echo "$(YELLOW)Running linters for scripts...$(RESET)"
-	@poetry run pre-commit run --files scripts/**/* --show-diff-on-failure --config $(PRE_COMMIT_CONFIG_PATH)
+	@poetry run pre-commit run --files ops/**/* --show-diff-on-failure --config $(PRE_COMMIT_CONFIG_PATH)
 
 lint:
 	@$(MAKE) -s lint-backend
@@ -278,7 +278,7 @@ docker-dev:
 # Clean up all caches
 clean:
 	@echo "$(YELLOW)Cleaning up caches...$(RESET)"
-	@rm -rf openhands/.cache
+	@rm -rf environments/prorl_openhands/openhands/.cache
 	@echo "$(GREEN)Caches cleaned up successfully.$(RESET)"
 
 # Help

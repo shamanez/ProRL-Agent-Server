@@ -16,10 +16,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from policy_registry.client import PolicyRegistryClient
-from policy_registry.server import serve
-from rollout_manager.policy_subscription import GrpcStreamingPolicySubscription
-from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
+from rollout_fabric.policy_registry.client import PolicyRegistryClient
+from rollout_fabric.policy_registry.server import serve
+from rollout_fabric.rollout_manager.policy_subscription import GrpcStreamingPolicySubscription
+from rollout_fabric.schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
 
 pytestmark = pytest.mark.contract
 

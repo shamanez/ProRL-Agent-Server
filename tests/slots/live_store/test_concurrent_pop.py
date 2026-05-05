@@ -12,7 +12,7 @@ pytestmark = pytest.mark.invariant
 
 
 def test_two_clients_disjoint(live_store_server) -> None:
-    from live_store.client import LiveStoreClient
+    from rollout_fabric.live_store.client import LiveStoreClient
 
     _, socket = live_store_server
     kwargs = dict(

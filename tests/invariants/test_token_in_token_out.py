@@ -6,9 +6,8 @@ import re
 from pathlib import Path
 
 import pytest
-
-from schemas.episode_record import TrustLevel
-from schemas.training_sample import TrainingSample
+from rollout_fabric.schemas.episode_record import TrustLevel
+from rollout_fabric.schemas.training_sample import TrainingSample
 
 pytestmark = pytest.mark.invariant
 
@@ -63,7 +62,12 @@ def test_training_sample_rejects_string_tokens() -> None:
 
 def test_proto_schema_uses_bytes_for_token_arrays() -> None:
     proto = (
-        Path(__file__).resolve().parents[2] / 'schemas' / 'proto' / 'live_store.proto'
+        Path(__file__).resolve().parents[2]
+        / 'core'
+        / 'rollout_fabric'
+        / 'schemas'
+        / 'proto'
+        / 'live_store.proto'
     )
     text = proto.read_text()
     for field_name in (

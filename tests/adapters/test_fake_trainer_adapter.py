@@ -15,11 +15,10 @@ import os
 import time
 
 import pytest
-
-from live_store.client import LiveStoreClient
-from live_store.server import serve
-from schemas.episode_record import TrustLevel
-from schemas.training_sample import TrainingSample
+from rollout_fabric.live_store.client import LiveStoreClient
+from rollout_fabric.live_store.server import serve
+from rollout_fabric.schemas.episode_record import TrustLevel
+from rollout_fabric.schemas.training_sample import TrainingSample
 
 # ---------------------------------------------------------------------------
 # Fixtures (in-process LiveStore — same approach as tests/slots/live_store/)
@@ -137,14 +136,21 @@ def test_trainer_adapter_boundary_no_torch_required() -> None:
     from pathlib import Path
 
     pad_file = (
-        Path(__file__).parent.parent.parent / 'trainer_adapters' / 'verl' / 'pad.py'
+        Path(__file__).parent.parent.parent
+        / 'trainers'
+        / 'verl'
+        / 'verl_custom'
+        / 'fabric_adapter'
+        / 'pad.py'
     )
-    assert pad_file.exists(), 'trainer_adapters/verl/pad.py must exist'
+    assert pad_file.exists(), (
+        'trainers/verl/verl_custom/fabric_adapter/pad.py must exist'
+    )
 
     tree = ast.parse(pad_file.read_text())
     func_names = {
         node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
     }
     assert 'pack_unpadded_groups' in func_names, (
-        'trainer_adapters/verl/pad.py must define pack_unpadded_groups()'
+        'trainers/verl/verl_custom/fabric_adapter/pad.py must define pack_unpadded_groups()'
     )

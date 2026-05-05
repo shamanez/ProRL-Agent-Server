@@ -68,9 +68,11 @@ def test_worker_loop_module_importable() -> None:
     """BC-13: rollout_manager.loop imports zero VERL / OpenHands modules."""
     import sys
 
-    import rollout_manager.loop  # noqa: F401
+    import rollout_fabric.rollout_manager.loop  # noqa: F401
 
-    assert 'verl' not in sys.modules, 'rollout_manager.loop must not import verl'
+    assert 'verl' not in sys.modules, (
+        'rollout_fabric.rollout_manager.loop must not import verl'
+    )
     assert 'openhands' not in sys.modules, (
-        'rollout_manager.loop must not import openhands'
+        'rollout_fabric.rollout_manager.loop must not import openhands'
     )

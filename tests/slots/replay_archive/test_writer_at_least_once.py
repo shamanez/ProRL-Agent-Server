@@ -17,9 +17,8 @@ import json
 import time
 
 import pytest
-
-from replay_archive import ArchiveServer, ReplayArchiveWriter, query
-from schemas.protocols.replay_archive import FilterSpec
+from rollout_fabric.replay_archive import ArchiveServer, ReplayArchiveWriter, query
+from rollout_fabric.schemas.protocols.replay_archive import FilterSpec
 
 from .conftest import make_episode
 
@@ -106,7 +105,7 @@ def test_dead_letter_when_retries_exhausted(tmp_path) -> None:
     lines = dead_letter.read_text().strip().splitlines()
     assert len(lines) >= 2
     parsed = [json.loads(line) for line in lines]
-    assert {p['episode_uid'] for p in parsed} == {'ep-1', 'ep-2'}
+    assert {p['record']['episode_uid'] for p in parsed} == {'ep-1', 'ep-2'}
     for p in parsed:
         assert p['reason'] == 'retry_exhausted'
 

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import pytest
-
-from schemas.episode_record import TrustLevel
-from schemas.training_sample import (
+from rollout_fabric.schemas.episode_record import TrustLevel
+from rollout_fabric.schemas.training_sample import (
     TrainingGroup,
     TrainingSample,
     assert_group_integrity,

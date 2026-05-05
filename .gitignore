@@ -273,3 +273,5 @@ outputs/
 wandb/
 scripts/log/
 .ruff_cache/
+trainer_integration/
+scripts/

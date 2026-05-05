@@ -19,8 +19,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from policy_registry.client import PolicyRegistryClient, PublishFailedError
-from policy_registry.server import serve
+from rollout_fabric.policy_registry.client import PolicyRegistryClient, PublishFailedError
+from rollout_fabric.policy_registry.server import serve
 
 pytestmark = pytest.mark.contract
 

@@ -12,8 +12,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
-
-from rollout_manager.prorl_client import ProRLClient
+from rollout_fabric.rollout_manager.prorl_client import ProRLClient
 
 
 def _fake_process_response() -> dict:

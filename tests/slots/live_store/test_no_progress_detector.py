@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from schemas.protocols.live_store import NoProgressError
+from rollout_fabric.schemas.protocols.live_store import NoProgressError
 
 from .conftest import make_sample
 

@@ -5,9 +5,8 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
-from schemas import protocols
-from schemas.protocols import (
+from rollout_fabric.schemas import protocols
+from rollout_fabric.schemas.protocols import (
     EnvironmentProvider,
     InferenceBackend,
     LiveStore,

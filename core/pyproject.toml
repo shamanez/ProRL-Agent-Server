@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "rollout-fabric"
+version = "0.1.0"
+description = "RolloutFabric: contract-first agentic RL training fabric"
+authors = ["Pluralis AI"]
+license = "MIT"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.12,<3.14"
+grpcio = ">=1.60.0"              # gRPC transport
+protobuf = "^4.21.6,<5.0.0"     # schemas/_gen/ compiled bindings
+pyarrow = "20.0.0"               # parquet (ReplayArchive + RolloutManager)
+httpx = "*"                      # RolloutManager HTTP calls
+requests = "*"                   # PolicyRegistry HTTP calls
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -123,8 +123,8 @@ log "=== GATE-2: LiveStore warm (BC-16) — waiting up to ${WARM_TIMEOUT_S}s ===
 
 GATE2_RESULT=$("${PYTHON}" - <<PYEOF 2>&1
 import sys, time
-sys.path.insert(0, '${REPO_ROOT}')
-from live_store.client import LiveStoreClient
+sys.path.insert(0, '${REPO_ROOT}/core')
+from rollout_fabric.live_store.client import LiveStoreClient
 cli = LiveStoreClient(
     '${LIVE_STORE_SOCKET}',
     policy_id='${POLICY_ID}',
@@ -168,8 +168,8 @@ log "=== GATE-3/4/5: get_batch contract checks ==="
 
 GATE345_RESULT=$("${PYTHON}" - <<PYEOF 2>&1
 import sys, time
-sys.path.insert(0, '${REPO_ROOT}')
-from live_store.client import LiveStoreClient
+sys.path.insert(0, '${REPO_ROOT}/core')
+from rollout_fabric.live_store.client import LiveStoreClient
 
 cli = LiveStoreClient(
     '${LIVE_STORE_SOCKET}',
@@ -284,8 +284,8 @@ log "=== GATE-6: PolicyRegistry contract check ==="
 
 GATE6_RESULT=$("${PYTHON}" - <<PYEOF 2>&1
 import sys
-sys.path.insert(0, '${REPO_ROOT}')
-from policy_registry.client import PolicyRegistryClient
+sys.path.insert(0, '${REPO_ROOT}/core')
+from rollout_fabric.policy_registry.client import PolicyRegistryClient
 
 try:
     cli = PolicyRegistryClient('${POLICY_REGISTRY_SOCKET}')

@@ -7,10 +7,10 @@ import time
 
 import pytest
 
-from live_store.client import LiveStoreClient
-from live_store.server import serve
-from schemas.episode_record import TrustLevel
-from schemas.training_sample import TrainingSample
+from rollout_fabric.live_store.client import LiveStoreClient
+from rollout_fabric.live_store.server import serve
+from rollout_fabric.schemas.episode_record import TrustLevel
+from rollout_fabric.schemas.training_sample import TrainingSample
 
 
 @pytest.fixture()

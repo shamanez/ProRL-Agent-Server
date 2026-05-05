@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
 import pytest
-
-from schemas.policy_version import PolicyVersionCache, PolicyVersionSnapshot
+from rollout_fabric.schemas.policy_version import (
+    PolicyVersionCache,
+    PolicyVersionSnapshot,
+)
 
 pytestmark = pytest.mark.invariant
 
@@ -29,7 +32,7 @@ def test_bootstrap_snapshot_has_zero_version() -> None:
 
 def test_snapshot_is_immutable() -> None:
     s = _snap(7, '/tmp/v7')
-    with pytest.raises(Exception):
+    with pytest.raises((AttributeError, TypeError, dataclasses.FrozenInstanceError)):
         s.version = 8  # type: ignore[misc]
 
 
