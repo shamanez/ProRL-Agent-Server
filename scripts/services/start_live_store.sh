@@ -25,7 +25,13 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 echo "[live_store] starting on unix:${SOCKET} max_size=${MAX_SIZE} k=${K}"
 
-exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -c "
+# ROLLOUT_FABRIC_PYTHON: override to use a fabric-only venv (see docs/service-envs.md).
+# POETRY_PYTHON: set to the output of: poetry env info --path)/bin/python
+# Default fallback: the pre-populated env on this machine.
+_DEFAULT_PYTHON="/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python"
+PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
+
+exec "${PYTHON}" -c "
 import logging, os, signal, sys, time
 logging.basicConfig(level=os.environ.get('LOG_LEVEL','INFO'),
     format='%(asctime)s %(levelname)s live_store: %(message)s')

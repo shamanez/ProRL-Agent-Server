@@ -1,90 +1,111 @@
-# ProRL-Agent-Server
+# RolloutFabric
 
-A scalable multi-turn agentic RL training fabric. Five independent services wired by
+A contract-first agentic RL training fabric. Six independent services wired by
 gRPC/HTTP contracts; currently training Qwen3-4B on SWE-Bench tasks via GRPO/DAPO.
-Built on VERL + OpenHands + vLLM; every service sits behind a typed `Protocol` and is
-independently replaceable.
+Every service sits behind a typed `Protocol` and is independently replaceable.
+
+## What this repo is
+
+**RolloutFabric** separates rollout generation, sandbox execution, hot storage,
+training, inference, and policy publishing into swappable service boundaries.
+See `docs/topology.md` for the deployment diagram and `docs/service-envs.md` for
+the per-service dependency footprint.
+
+## What `openhands/` is
+
+`openhands/` is the **SWE-Bench EnvironmentProvider implementation** — one concrete
+implementation of the `schemas/protocols/environment_provider.EnvironmentProvider`
+Protocol. It is NOT the framework. Other environments (ROCK, OpenReward) plug in by
+implementing the same `POST /process` contract. See `environment_providers/README.md`.
+
+## What `trainer_integration/verl/` is
+
+The VERL FSDP TrainerAdapter — one concrete implementation running inside a Docker
+container. Other trainers (slime, ROLL) plug in via the same LiveStore + PolicyRegistry
+contracts. See `trainer_adapters/README.md`.
+
+**How VERL is installed at container start (not baked into the image):**
+
+```
+Host /tmp/verl  ──bind-mount──►  /opt/verl  (inside container)
+                                      │
+                              pip install --no-deps -e /opt/verl   ← upstream VERL
+                              pip install --no-deps -e /workspace/trainer_integration/verl  ← our patch
+```
+
+VERL is never baked into the Docker image — it's always installed from the host's
+`/tmp/verl` checkout at container start. This means you can update VERL by changing
+`/tmp/verl` on the host without rebuilding the image. The `verl_custom` patch package
+(`trainer_integration/verl/pyproject.toml`) adds the LiveStore consumer seam and
+PolicyRegistry publish hook on top.
+
+## How to plug in a new environment or trainer
+
+See `schemas/protocols/PLUGGING_IN.md` for the step-by-step guide.
+
+## Python environments — three, cleanly separated
+
+| Environment | `pyproject.toml` | What runs in it |
+|---|---|---|
+| **Fabric-core** | `./pyproject.toml` | LiveStore, PolicyRegistry, ReplayArchive, RolloutManager, schemas |
+| **EnvironmentProvider** | `./openhands/pyproject.toml` | ProRL FastAPI server :8006 (OpenHands + litellm + docker + e2b...) |
+| **TrainerAdapter** | `./trainer_integration/verl/pyproject.toml` | VERL FSDP inside `verlai/verl` Docker image |
+
+```bash
+# Fabric-core venv (fast — 5 packages):
+poetry install                          # from repo root
+ROLLOUT_FABRIC_PYTHON=$(poetry env info --path)/bin/python
+
+# EnvironmentProvider venv (full openhands stack):
+cd openhands && poetry install && cd ..
+PRORL_OPENHANDS_PYTHON=$(cd openhands && poetry env info --path)/bin/python
+
+# TrainerAdapter: pip install -e inside Docker (see trainer_integration/verl/)
+# vLLM pool (EC2): pip install -r scripts/inference/requirements-remote.txt
+```
+
+See `docs/service-envs.md` for per-service details.
 
 ---
 
 ## Architecture
 
 ```
-  SkyRL-v0-293/train.ready.parquet
-         |  (ParquetDataLoader — RolloutManager owns it, §3.8 / BC-14)
-         |  filter_parquet_to_built_sifs.py keeps only rows with a .sif
-         v
-  +-------------------------------------------------------------+
-  |  RolloutManager  (scripts/services/start_rollout_manager.sh)  |
-  |  Zero VERL / OpenHands imports (BC-13)                      |
-  |                                                             |
-  |  for each task in dataloader:                               |
-  |    snap = policy_cache.snapshot()    <- ONE read per group  |
-  |    for i in range(group_size):       <- all N use snap.ver  |
-  |      ep = prorl_client.POST /process (token IDs, §3.1)      |
-  |    samples = build_group(episodes, snap)  <- BC-0 / §3.2    |
-  |    archive.submit(record)            <- tee pre-filter, BC-12|
-  |    if not zero_variance: store.push_group(samples)  <- §3.7 |
-  +-------------------------------------------------------------+
-         |  gRPC push_group (packed int32 bytes, BC-1, BC-2)
-         v
-  +------------------------------------------------------------+
-  |  LiveStore  (scripts/services/start_live_store.sh)         |
-  |  Bounded FIFO, pop-on-sample (§3.6 / BC-3)                 |
-  |  Server-side blocking get_batch (BC-4, BC-5)               |
-  |  Staleness eviction by created_at_step (§3.6)              |
-  +------------------------------------------------------------+
-         |  gRPC get_batch -> unpadded TrainingSample list (BC-11)
-         v
-  +------------------------------------------------------------+
-  |  TrainerAdapter  (scripts/_internal/s3_fullasync_docker.sh)|
-  |  VERL FSDP inside Docker, 8x A100                          |
-  |  Connects ONLY to LiveStore + PolicyRegistry (BC-15)        |
-  |  sample_mini_batch() -> pad locally -> FSDP forward/backward|
-  |  No dataloader, no producer thread (§3.8)                  |
-  |  After save_freq steps -> publish_policy_version()          |
-  +------------------------------------------------------------+
-         |  gRPC publish_policy_version (§3.3 abort gate, BC-9)
-         v
-  +------------------------------------------------------------+
-  |  PolicyRegistry  (scripts/services/start_policy_registry.sh)|
-  |  Single source of truth for LoRA version + adapter URI      |
-  |  Fans out /reload_lora to all pool children synchronously   |
-  |  endpoints_failed > 0 -> hard abort (BC-9)                 |
-  +------------------------------------------------------------+
-         |  HTTP POST /reload_lora (multipart, §3.4 pinning)
-         v
-  +------------------------------------------------------------+
-  |  InferenceBackend  (vLLM pool :8100-8103 on EC2)           |
-  |  Frozen through S4 -- _vllm_child.py unchanged             |
-  |  /v{N}/generate pins each trajectory to dispatch-time PV   |
-  |  LRU eviction of old LoRA slots                            |
-  +------------------------------------------------------------+
-         ^
-  +--------------------------------------------------------------+
-  |  EnvironmentProvider  (ProRL FastAPI :8006)                  |
-  |  Frozen through S4 -- async_server.py unchanged              |
-  |  POST /process -> Singularity sandbox -> tool loop           |
-  |  Returns token IDs + logprobs (§3.1 token-in/token-out)     |
-  +--------------------------------------------------------------+
+  SkyRL parquet
+       │ (ParquetDataLoader — RolloutManager owns this)
+       ▼
+  RolloutManager ──POST /process──► EnvironmentProvider (ProRL :8006 + Singularity)
+       │                                    │ (token generation per assistant turn)
+       │                                    ▼
+       │                             InferenceBackend (vLLM :8100-8103 EC2)
+       │                                    ▲
+  gRPC push_group                    POST /reload_lora
+       │                                    │
+       ▼                             PolicyRegistry (UDS)
+  LiveStore ──────gRPC get_batch──►        ▲
+  (UDS)                             gRPC publish_policy_version
+                                           │
+                                    TrainerAdapter (VERL FSDP, Docker 8×A100)
 ```
+
+Data flows down: parquet → groups → training steps → LoRA publishes.
+Policies flow up: trainer publishes → registry fans out → vLLM pool reloads.
+RolloutManager polls the registry at 1Hz to stamp `behavior_policy_version` on each group.
 
 ---
 
-## Quick-start training
+## Quick start
 
-### Prerequisites
-
-- Trainer box: 8x A100, Docker, Poetry, Singularity/Apptainer
-- EC2 `vllm-instance` reachable via SSH alias `~/.ssh/config` (alias: `vllm-instance`)
-- Secrets file: `/home/ubuntu/.prorl_creds.env` (sets `REMOTE_DNS`, `SINGULARITY_DOCKER_*`, `WANDB_API_KEY`, etc.)
-- Dataset already at `/home/ubuntu/data/SkyRL-v0-293/` — do not re-download
+**Prerequisites:** 8×A100 trainer box, EC2 `vllm-instance` reachable via SSH alias,
+`/home/ubuntu/.prorl_creds.env` with `REMOTE_DNS` + credentials, dataset at
+`/home/ubuntu/data/SkyRL-v0-293/`.
 
 ### 1. Build Singularity images (first time only)
 
 ```bash
 source /home/ubuntu/.prorl_creds.env
 cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
+
 CACHE_BASE="$(pwd)/scripts/_singularity_cache"
 mkdir -p "${CACHE_BASE}/apptainer_tmpdir" "${CACHE_BASE}/apptainer_localcachedir"
 
@@ -93,7 +114,8 @@ APPTAINER_LOCALCACHEDIR="${CACHE_BASE}/apptainer_localcachedir" \
 APPTAINER_TMPDIR="${CACHE_BASE}/apptainer_tmpdir" \
 APPTAINER_DOCKER_USERNAME="${SINGULARITY_DOCKER_USERNAME}" \
 APPTAINER_DOCKER_PASSWORD="${SINGULARITY_DOCKER_PASSWORD}" \
-poetry run python scripts/pull_swe_images.py \
+PRORL_OPENHANDS_PYTHON=$(cd openhands && poetry env info --path)/bin/python
+"${PRORL_OPENHANDS_PYTHON}" scripts/dev/pull_swe_images.py \
   --parquet-file /home/ubuntu/data/SkyRL-v0-293/train.parquet \
   --dest-dir singularity_images
 # ~3-5 min per image; 232 GB OCI blobs are pre-cached locally
@@ -102,16 +124,16 @@ poetry run python scripts/pull_swe_images.py \
 ### 2. Filter parquet to built SIFs
 
 ```bash
-poetry run python scripts/filter_parquet_to_built_sifs.py \
+ROLLOUT_FABRIC_PYTHON=$(poetry env info --path)/bin/python
+"${ROLLOUT_FABRIC_PYTHON}" scripts/data/filter_parquet_to_built_sifs.py \
   --input /home/ubuntu/data/SkyRL-v0-293/train.parquet \
   --sif-dir singularity_images \
   --output /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet
 ```
 
-This must be re-run whenever new SIFs are added. The worker refuses to start without
-`train.ready.parquet`.
+Re-run whenever new SIFs are added.
 
-### 3. Start all services (orchestrated)
+### 3. Start all services
 
 ```bash
 source /home/ubuntu/.prorl_creds.env
@@ -120,43 +142,25 @@ POLICY_ID="qwen3-4b-skyrl" \
   bash scripts/services/start_all.sh
 ```
 
-`start_all.sh` starts services in dependency order, health-probes each, waits for the
-RolloutManager to push at least one group (BC-16 warm-up gate), then starts the trainer.
+`start_all.sh` starts services in dependency order, health-probes each, waits for
+the RolloutManager to push ≥1 group (BC-16 warm-up gate), then starts the trainer.
+Stop with Ctrl-C; services shut down in reverse order.
 
-### 4. Or start manually in order
-
-```bash
-# Step 1: vLLM pool (remote EC2)
-bash scripts/serving/launch_remote_vllm_pool.sh start
-
-# Step 2: ProRL environment provider
-nohup bash scripts/_internal/s0_prorl.sh > /tmp/s0-prorl.log 2>&1 &
-
-# Step 3a + 3b: LiveStore and PolicyRegistry (parallel)
-# See CLAUDE.md startup sequence for inline commands.
-
-# Step 4: RolloutManager
-python -m rollout_manager.main --live-store-socket /tmp/prorl_live_store.sock ...
-
-# Step 5: Trainer (after worker warm-up)
-bash scripts/_internal/s3_fullasync_docker.sh
-```
-
-Stop in reverse order: trainer → worker → LiveStore + PolicyRegistry → ProRL + vLLM.
+For manual step-by-step startup, see `CLAUDE.md`.
 
 ---
 
-## Service scripts table
+## Service scripts
 
-| Script | Port / Socket | Health check | Notes |
+| Script | Socket / Port | Env | Notes |
 |---|---|---|---|
-| `scripts/_internal/s0_prorl.sh` | `:8006` | `GET :8006/status` | vLLM addresses baked in via `--llm-server-address` |
-| `scripts/serving/launch_remote_vllm_pool.sh` | `:8100-8103` (EC2) | `GET :810N/health` | SSH alias `vllm-instance` must exist |
-| inline — see CLAUDE.md | `/tmp/prorl_live_store.sock` | socket exists | `live_store.server.serve()` |
-| inline — see CLAUDE.md | `/tmp/prorl_policy_registry.sock` | socket exists | `policy_registry.server.serve()` |
-| `python -m rollout_manager.main` | no port (client only) | first push logged | owns `train.ready.parquet` |
-| `scripts/_internal/s3_fullasync_docker.sh` | Docker internal | begins `get_batch` | VERL FSDP, 8x A100 |
-| `scripts/services/rescue_team.py` | n/a | `--check` flag | probe + diagnose + auto-fix loop |
+| `scripts/adapters/start_env_prorl.sh` | `:8006` | `PRORL_OPENHANDS_PYTHON` | ProRL FastAPI + Singularity |
+| `scripts/inference/launch_remote_vllm_pool.sh` | `:8100-8103` (EC2) | EC2 venv | SSH alias `vllm-instance` must exist |
+| `scripts/services/start_live_store.sh` | `/tmp/prorl_live_store.sock` | `ROLLOUT_FABRIC_PYTHON` | gRPC UDS, pop-on-sample |
+| `scripts/services/start_policy_registry.sh` | `/tmp/prorl_policy_registry.sock` | `ROLLOUT_FABRIC_PYTHON` | gRPC UDS, fanout to vLLM |
+| `scripts/services/start_rollout_manager.sh` | no port | `ROLLOUT_FABRIC_PYTHON` | owns `train.ready.parquet` |
+| `scripts/adapters/start_trainer_verl.sh` | Docker internal | `verlai/verl` Docker | VERL FSDP, 8×A100 |
+| `scripts/services/rescue_team.py` | n/a | either | `--check` / `--watch` / `--rescue <service>` |
 
 ---
 
@@ -167,22 +171,24 @@ Stop in reverse order: trainer → worker → LiveStore + PolicyRegistry → Pro
 | `REMOTE_DNS` | `.prorl_creds.env` | EC2 hostname for vLLM pool and SSH |
 | `DATA_FILES` | export before start | Path to `train.ready.parquet` (filtered, SIF-verified) |
 | `POLICY_ID` | export before start | Policy identifier stamped on all groups and registry entries |
-| `LIVE_STORE_SOCKET` | env for trainer | Unix domain socket path for LiveStore gRPC |
-| `SAVE_FREQ` | trainer Hydra config | Steps between LoRA publishes (currently 5) |
-| `WANDB_API_KEY` | `.prorl_creds.env` | WandB logging; do not re-export inline |
-| `SINGULARITY_DOCKER_USERNAME` / `_PASSWORD` | `.prorl_creds.env` | Apptainer registry auth for SIF builds |
+| `SAVE_FREQ` | `scripts/adapters/start_trainer_verl.sh` env var | Steps between LoRA publishes (default: 1) |
+| `WANDB_API_KEY` | `.prorl_creds.env` | WandB logging |
+| `SINGULARITY_DOCKER_USERNAME/PASSWORD` | `.prorl_creds.env` | Apptainer registry auth for SIF builds |
 
 ---
 
-## Boundary conditions
+## Key boundary conditions
 
 | BC | What it protects | What breaks if violated |
 |---|---|---|
-| BC-0: one PolicyVersionSnapshot per group | Consistent advantage computation across siblings | Invalid advantages; NaN loss within steps |
-| BC-1: token IDs as `int` on every wire | Multi-turn RL stability | KL/entropy NaN within 2 training steps |
-| BC-9: `endpoints_failed > 0` = hard abort | Prevents mixed-version pool | IS weights become lies; silent gradient corruption |
+| BC-0: one `PolicyVersionSnapshot` per group | Consistent advantage computation across siblings | Invalid advantages; NaN loss within steps |
+| BC-1: token IDs as `int` everywhere | Multi-turn RL stability | KL/entropy NaN within 2 training steps |
+| BC-9: `endpoints_failed > 0` = hard abort | Prevents mixed-version vLLM pool | IS weights become lies; silent gradient corruption |
 | BC-13: zero VERL/OpenHands in RolloutManager | Trainer pluggability | Swapping trainer requires rewriting worker |
-| BC-15: trainer connects only to LiveStore + PolicyRegistry | Trainer pluggability | Adding a new trainer requires changing orchestration |
+| BC-14: worker owns parquet | Trainer cannot be hidden orchestrator | Trainer becomes implicit coordinator |
+| BC-15: trainer connects only to LiveStore + PolicyRegistry | Trainer pluggability | Swapping VERL for another trainer requires more than a Docker image swap |
+
+Full BC table (BC-0 through BC-15): `plans-n-solutions/rollout_fabric.md`
 
 ---
 
@@ -196,21 +202,6 @@ PYTHONPATH=. poetry run pytest tests/invariants/ tests/contracts/ tests/slots/ -
 pytest -m "not integration and not slow and not real_data" tests/ -q
 ```
 
-Tests cover: all 16 boundary conditions (BC-0 through BC-15), all seven service
-`Protocol` surfaces, LiveStore gRPC round-trips, and packed-bytes token-ID codec.
-
----
-
-## Current training status
-
-- Model: Qwen3-4B-Instruct, rank-32 LoRA
-- Task: SWE-Bench Verified (293 train / 23 val instances)
-- Training: step 3+/500, GRPO/DAPO, 8x A100 FSDP
-- Solve rate: 18.75% on SWE-Bench at step 2
-- Policy publishes at `SAVE_FREQ=5` steps
-- SIF images: building (232 GB OCI blobs cached; ~15h for all 293)
-- Trainer migration to LiveStoreClient: next step (see `plans-n-solutions/rollout_fabric_progress.md` Section 4)
-
 ---
 
 ## Repo layout
@@ -220,17 +211,17 @@ Tests cover: all 16 boundary conditions (BC-0 through BC-15), all seven service
 | `openhands/` | Upstream OpenHands tree (mostly untouched) |
 | `openhands/nvidia/` | ProRL FastAPI server, registry, AgentHandlers |
 | `openhands/llm/nvidia/` | Token-in / token-out vLLM clients (frozen) |
-| `live_store/` | Extracted gRPC LiveStore service |
+| `live_store/` | gRPC LiveStore service |
 | `policy_registry/` | PolicyRegistry gRPC service + fanout |
 | `rollout_manager/` | Standalone RolloutManager (zero VERL/OpenHands) |
 | `replay_archive/` | Append-only Parquet + SQLite archive (tee, pre-filter) |
-| `trainer_adapters/verl/` | VERL bridge: pad.py unpads LiveStore batches |
+| `trainer_adapters/verl/` | VERL bridge: `pad.py` unpads LiveStore batches |
 | `schemas/` | Typed Protocols, wire schemas, proto bindings, invariant tests |
 | `trainer_integration/verl/` | Patch package on top of pinned verl checkout |
-| `scripts/_internal/` | Canonical launchers (frozen baseline files noted) |
-| `scripts/serving/` | vLLM pool runner + orchestrator |
-| `scripts/services/` | Service start scripts + rescue team |
-| `plans-n-solutions/` | Architecture design + operational runbook |
+| `scripts/_internal/` | Canonical service launchers |
+| `scripts/serving/` | vLLM pool runner |
+| `scripts/services/` | Service start scripts + rescue team + orchestrated start_all |
+| `plans-n-solutions/` | Design rationale (`rollout_fabric.md`) + operations (`rollout_fabric_progress.md`) |
 | `tests/` | pytest suites; fast-loop markers in `pytest.ini` |
 
 ---

@@ -18,4 +18,4 @@ PRORL_HOST="${PRORL_HOST:-0.0.0.0}"
 
 echo "[env_provider] starting ProRL on ${PRORL_HOST}:${PRORL_PORT}"
 
-exec bash "${REPO_ROOT}/scripts/_internal/s0_prorl.sh"
+exec bash "${REPO_ROOT}/scripts/adapters/start_env_prorl.sh"

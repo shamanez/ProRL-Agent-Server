@@ -46,11 +46,18 @@ CREATE INDEX IF NOT EXISTS idx_pub_latest ON publishes(policy_id, version DESC);
 
 
 class PolicyRegistryServicer(policy_registry_pb2_grpc.PolicyRegistryServicer):
-    def __init__(self, *, db_path: str | Path, pool_endpoints: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        db_path: str | Path,
+        pool_endpoints: list[str],
+        manifest_path: str | None = None,
+    ) -> None:
         self._db_path = Path(db_path)
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._pool_endpoints = list(pool_endpoints)
+        self._manifest_path = manifest_path  # None → use DEFAULT_MANIFEST_PATH
         self._init_db()
         # Per-policy CV: subscribers wait; publish notifies all.
         self._cv_per_policy: dict[str, threading.Condition] = defaultdict(
@@ -112,6 +119,9 @@ class PolicyRegistryServicer(policy_registry_pb2_grpc.PolicyRegistryServicer):
                 write_manifest,
             )
 
+            kwargs: dict = {}
+            if self._manifest_path is not None:
+                kwargs['path'] = self._manifest_path
             write_manifest(
                 PolicyManifest(
                     policy_id=request.policy_id,
@@ -119,7 +129,8 @@ class PolicyRegistryServicer(policy_registry_pb2_grpc.PolicyRegistryServicer):
                     adapter_uri=request.adapter_uri,
                     trainer_id=request.trainer_id,
                     published_at=time.time(),
-                )
+                ),
+                **kwargs,
             )
         except Exception:  # noqa: BLE001
             logger.warning(
@@ -212,6 +223,7 @@ def serve(
     socket_path: str,
     db_path: str,
     pool_endpoints: list[str],
+    manifest_path: str | None = None,
     max_workers: int = 16,
 ) -> grpc.Server:
     abs_path = os.path.abspath(socket_path)
@@ -219,7 +231,11 @@ def serve(
         os.unlink(abs_path)
     except FileNotFoundError:
         pass
-    servicer = PolicyRegistryServicer(db_path=db_path, pool_endpoints=pool_endpoints)
+    servicer = PolicyRegistryServicer(
+        db_path=db_path,
+        pool_endpoints=pool_endpoints,
+        manifest_path=manifest_path,
+    )
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=max_workers))
     policy_registry_pb2_grpc.add_PolicyRegistryServicer_to_server(servicer, server)
     server.add_insecure_port(f'unix:{abs_path}')

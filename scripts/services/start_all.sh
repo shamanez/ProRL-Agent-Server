@@ -91,9 +91,9 @@ trap cleanup EXIT INT TERM
 # =========================================================================
 echo ""
 echo "=== Step 1: InferenceBackend (vLLM pool) ==="
-bash "${SCRIPT_DIR}/../serving/launch_remote_vllm_pool.sh" start
+bash "${SCRIPT_DIR}/../inference/launch_remote_vllm_pool.sh" start
 
-VLLM_BASE="${VLLM_BASE_URL:-http://vllm-instance}"
+VLLM_BASE="${VLLM_BASE_URL:-http://${REMOTE_DNS:-vllm-instance}}"
 for port in 8100 8101 8102 8103; do
     probe_http "${VLLM_BASE}:${port}/health"
 done
@@ -106,6 +106,11 @@ echo ""
 echo "=== Step 2: EnvironmentProvider (ProRL) ==="
 start_bg "env_provider" bash "${SCRIPT_DIR}/start_env_provider.sh"
 probe_http "http://localhost:${PRORL_PORT:-8006}/health" 60 2
+# Activate the agent server (CLAUDE.md Step 2 — POST /start must follow health check).
+curl -sf -X POST "http://localhost:${PRORL_PORT:-8006}/start" \
+     -H "Content-Type: application/json" -d '{}' \
+  || { echo "ERROR: ProRL /start failed"; exit 1; }
+probe_http "http://localhost:${PRORL_PORT:-8006}/status" 30 1
 echo "Step 2 complete."
 
 # =========================================================================
@@ -156,7 +161,10 @@ start_bg "rollout_manager" bash "${SCRIPT_DIR}/start_rollout_manager.sh"
 # This is the BC-16 warm-up gate: trainer must not start until buffer has data.
 echo "  waiting for rollout manager to push ≥ 1 group (BC-16 warm-up) ..."
 WARMUP_TIMEOUT="${WORKER_WARMUP_TIMEOUT_S:-300}"
-python - <<PYEOF
+# Use ROLLOUT_FABRIC_PYTHON if set; otherwise the default pre-populated env.
+_DEFAULT_PYTHON="/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python"
+WARMUP_PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
+"${WARMUP_PYTHON}" - <<PYEOF
 import sys, time
 sys.path.insert(0, '${REPO_ROOT}')
 from live_store.client import LiveStoreClient
@@ -187,7 +195,7 @@ echo "Step 4 complete."
 # =========================================================================
 echo ""
 echo "=== Step 5: TrainerAdapter ==="
-start_bg "trainer" bash "${REPO_ROOT}/scripts/_internal/s3_fullasync_docker.sh"
+start_bg "trainer" bash "${REPO_ROOT}/scripts/adapters/start_trainer_verl.sh"
 echo "Step 5 started. Trainer will call get_batch and block until N groups available."
 echo "Step 5 complete."
 

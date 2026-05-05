@@ -76,7 +76,12 @@ def registry(two_pool_endpoints, tmp_path):
     endpoints, _ = two_pool_endpoints
     socket = str(tmp_path / 'registry.sock')
     db = str(tmp_path / 'registry.db')
-    server = serve(socket_path=socket, db_path=db, pool_endpoints=endpoints)
+    server = serve(
+        socket_path=socket,
+        db_path=db,
+        pool_endpoints=endpoints,
+        manifest_path=str(tmp_path / 'manifest.json'),
+    )
     # Bounded settle.
     for _ in range(50):
         if os.path.exists(socket):

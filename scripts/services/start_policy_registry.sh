@@ -22,7 +22,11 @@ ENDPOINTS_PY="[$(echo "${ENDPOINTS}" | tr ' ' '\n' | sed "s/.*/'&'/" | paste -sd
 echo "[policy_registry] starting on unix:${SOCKET} db=${DB}"
 echo "[policy_registry] pool endpoints: ${ENDPOINTS}"
 
-exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -c "
+# ROLLOUT_FABRIC_PYTHON: override to use a fabric-only venv (see docs/service-envs.md).
+_DEFAULT_PYTHON="/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python"
+PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
+
+exec "${PYTHON}" -c "
 import logging, os, signal, sys
 logging.basicConfig(level=os.environ.get('LOG_LEVEL','INFO'),
     format='%(asctime)s %(levelname)s policy_registry: %(message)s')
@@ -32,6 +36,7 @@ server = serve(
     socket_path='${SOCKET}',
     db_path='${DB}',
     pool_endpoints=${ENDPOINTS_PY},
+    manifest_path='${POLICY_MANIFEST_PATH:-/tmp/prorl_policy_manifest.json}',
 )
 print('[policy_registry] healthy unix:${SOCKET}', flush=True)
 def _stop(s, f):

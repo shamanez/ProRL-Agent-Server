@@ -272,3 +272,4 @@ docs/*.pdf
 outputs/
 wandb/
 scripts/log/
+.ruff_cache/

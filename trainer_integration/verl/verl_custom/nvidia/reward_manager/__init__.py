@@ -12,6 +12,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .naive import NaiveRewardManager
-from .prime import PrimeRewardManager
+# naive and prime reward managers disabled (SWE-Bench fabric; restore from git if needed)
 from .swebench import SWEBenchRewardManager

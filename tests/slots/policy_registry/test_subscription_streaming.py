@@ -56,7 +56,12 @@ def test_streaming_subscription_swaps_cache(tmp_path) -> None:
     endpoint = f'http://{pool.server_address[0]}:{pool.server_address[1]}'
     socket = str(tmp_path / 'registry.sock')
     db = str(tmp_path / 'registry.db')
-    server = serve(socket_path=socket, db_path=db, pool_endpoints=[endpoint])
+    server = serve(
+        socket_path=socket,
+        db_path=db,
+        pool_endpoints=[endpoint],
+        manifest_path=str(tmp_path / 'manifest.json'),
+    )
     try:
         for _ in range(50):
             if os.path.exists(socket):
@@ -117,7 +122,12 @@ def test_subscription_reconnect_no_stale_version(tmp_path) -> None:
     endpoint = f'http://{pool.server_address[0]}:{pool.server_address[1]}'
     socket = str(tmp_path / 'registry.sock')
     db = str(tmp_path / 'registry.db')
-    server = serve(socket_path=socket, db_path=db, pool_endpoints=[endpoint])
+    server = serve(
+        socket_path=socket,
+        db_path=db,
+        pool_endpoints=[endpoint],
+        manifest_path=str(tmp_path / 'manifest.json'),
+    )
     try:
         for _ in range(50):
             if os.path.exists(socket):

@@ -18,10 +18,14 @@ mkdir -p "${ARCHIVE_ROOT}"
 
 echo "[replay_archive] archive root=${ARCHIVE_ROOT}"
 
+# ROLLOUT_FABRIC_PYTHON: override to use a fabric-only venv (see docs/service-envs.md).
+_DEFAULT_PYTHON="/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python"
+PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
+
 # The archive is co-located with the rollout manager (in-process via
 # ReplayArchiveWriter). This script exposes a tiny health HTTP endpoint
 # so the orchestrator can probe it independently.
-exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -c "
+exec "${PYTHON}" -c "
 import http.server, logging, os, sys, threading
 logging.basicConfig(level=os.environ.get('LOG_LEVEL','INFO'),
     format='%(asctime)s %(levelname)s replay_archive: %(message)s')

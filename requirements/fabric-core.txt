@@ -1,0 +1,8 @@
+# Fabric-core services only: LiveStore, PolicyRegistry, ReplayArchive, RolloutManager
+# Does NOT include: litellm, docker, e2b, aiohttp, anthropic, openhands, numpy
+# grpcio-tools belongs in dev/codegen, not runtime
+grpcio>=1.60.0
+protobuf>=4.21.6,<5.0.0
+pyarrow==20.0.0
+httpx>=0.27.0
+requests>=2.31.0

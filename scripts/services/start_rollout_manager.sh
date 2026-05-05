@@ -36,13 +36,17 @@ echo "[rollout_manager] GROUP_SIZE=${GROUP_SIZE:-16} (n siblings per GRPO group)
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
+# ROLLOUT_FABRIC_PYTHON: override to use a fabric-only venv (see docs/service-envs.md).
+_DEFAULT_PYTHON="/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python"
+PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
+
 # Convert DATA_FILES to --data-files args
 DATA_FILES_ARGS=()
 for f in ${DATA_FILES}; do
     DATA_FILES_ARGS+=("$f")
 done
 
-exec /home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python -m rollout_manager.main \
+exec "${PYTHON}" -m rollout_manager.main \
     --live-store-socket "${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}" \
     --prorl-url "${PRORL_URL:-http://localhost:8006}" \
     --policy-id "${POLICY_ID:-qwen3-4b-skyrl}" \

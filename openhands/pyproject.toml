@@ -1,0 +1,146 @@
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = [
+  "poetry-core",
+]
+
+[tool.poetry]
+name = "prorl-environment-provider"
+version = "0.1.0"
+description = "ProRL SWE-Bench EnvironmentProvider — OpenHands-based agentic scaffold for RolloutFabric"
+authors = [ "Pluralis AI" ]
+license = "MIT"
+# package-mode = false: deps-only install. openhands/ is imported via PYTHONPATH from repo root.
+# Install:  cd openhands && poetry install
+# Use:      PRORL_OPENHANDS_PYTHON=$(cd openhands && poetry env info --path)/bin/python
+package-mode = false
+
+[tool.poetry.dependencies]
+# ── EnvironmentProvider (ProRL / OpenHands SWE-Bench) ────────────────────────
+# This venv runs the FastAPI agent server on :8006.
+# Fabric services (LiveStore, PolicyRegistry, RolloutManager) use the SEPARATE
+# root rollout-fabric venv — they do NOT need any of these deps.
+# Trainers use their own Docker image (trainer_integration/{trainer}/pyproject.toml).
+# ─────────────────────────────────────────────────────────────────────────────
+python = "^3.12,<3.14"
+
+# LLM backbone (keep pinned — CVE and bug history documented)
+litellm = ">=1.60.0, <1.82.7, !=1.64.4, !=1.67.*"    # avoid 1.64.4 (known bug), 1.67.* (known bug #10272), >=1.82.7 (malware CVE)
+aiohttp = ">=3.9.0,!=3.11.13"                        # Pin to avoid yanked version 3.11.13
+anthropic = { extras = [ "vertex" ], version = "*" }
+
+# Google APIs (Gemini Pro, Sheets, Vertex)
+google-generativeai = "*"
+google-api-python-client = "^2.164.0"
+google-auth-httplib2 = "*"
+google-auth-oauthlib = "*"
+google-cloud-aiplatform = "*"
+
+# ProRL FastAPI server
+fastapi = "*"
+uvicorn = "*"
+python-multipart = "*"
+python-socketio = "^5.11.4"
+sse-starlette = "^2.1.3"
+python-json-logger = "^3.2.1"
+
+# Agent runtimes
+docker = "*"
+e2b = ">=1.0.5,<1.4.0"
+modal = ">=0.66.26,<0.78.0"
+runloop-api-client = "0.33.0"
+daytona-sdk = "0.18.1"
+libtmux = ">=0.37,<0.40"
+pexpect = "*"
+
+# Code analysis
+tree-sitter = "^0.24.0"
+bashlex = "^0.18"
+whatthepatch = "^1.0.6"
+rapidfuzz = "^3.9.0"
+
+# Storage
+boto3 = "*"
+minio = "^7.2.8"
+redis = ">=5.2,<7.0"
+
+# Observability
+opentelemetry-api = "1.25.0"
+opentelemetry-exporter-otlp-proto-grpc = "1.25.0"
+
+# Utilities
+tenacity = ">=8.5,<10.0"
+jinja2 = "^3.1.3"
+toml = "*"
+types-toml = "*"
+termcolor = "*"
+python-dotenv = "*"
+pathspec = "^0.12.1"
+dirhash = "*"
+python-frontmatter = "^1.1.0"
+python-docx = "*"
+PyPDF2 = "*"
+python-pptx = "*"
+pylatexenc = "*"
+tornado = "*"
+joblib = "*"
+openhands-aci = "0.3.0"
+psutil = "*"
+stripe = ">=11.5,<13.0"
+ipywidgets = "^8.1.5"
+qtconsole = "^5.6.1"
+memory-profiler = "^0.61.0"
+prompt-toolkit = "^3.0.50"
+poetry = "^2.1.2"
+anyio = "4.9.0"
+pythonnet = "*"
+fastmcp = "^2.5.2"
+mcpm = "1.12.0"
+json-repair = "*"
+zope-interface = "7.2"
+html2text = "*"
+numpy = "*"
+
+# MCP
+browsergym-core = "0.13.3"                           # browsing interface
+
+# Fabric overlap (openhands also uses these)
+protobuf = "^4.21.6,<5.0.0"
+httpx = "*"
+requests = "*"
+grpcio = ">=1.60.0"
+pyarrow = "20.0.0"
+
+[tool.poetry.group.runtime.dependencies]
+jupyterlab = "*"
+notebook = "*"
+jupyter_kernel_gateway = "*"
+flake8 = "*"
+
+[tool.poetry.group.evaluation.dependencies]
+streamlit = "*"
+whatthepatch = "*"
+retry = "*"
+evaluate = "*"
+swebench = "^3.0.8"
+visualswebench = { git = "https://github.com/luolin101/Visual-SWE-bench.git" }
+swegym = { git = "https://github.com/SWE-Gym/SWE-Bench-Package.git" }
+commit0 = "*"
+func_timeout = "*"
+sympy = "*"
+gdown = "*"
+matplotlib = "*"
+seaborn = "*"
+tabulate = "*"
+browsergym = "0.13.3"
+browsergym-webarena = "0.13.3"
+browsergym-miniwob = "0.13.3"
+browsergym-visualwebarena = "0.13.3"
+boto3-stubs = { extras = [ "s3" ], version = "^1.37.19" }
+datasets = "*"
+
+[tool.poetry.group.testgeneval.dependencies]
+fuzzywuzzy = "^0.18.0"
+rouge = "^1.0.1"
+python-levenshtein = ">=0.26.1,<0.28.0"
+tree-sitter-python = "^0.23.6"

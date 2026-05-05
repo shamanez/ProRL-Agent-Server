@@ -62,18 +62,9 @@ from verl.utils.tracking import ValidationGenerationsLogger
 from verl_custom.nvidia.reward_manager.length_penalty import LengthPenalty
 from verl_custom.nvidia.utils.timer import TimeoutChecker
 
-try:
-    # S2: trajectory_store is removed when the repo ships with
-    # LiveStoreClient-only mode. Import is still needed on legacy setups
-    # where the in-process store is kept alongside LiveStoreClient.
-    from verl_custom.replay.trajectory_store import (  # noqa: PLC0415
-        InsufficientTrajectoriesError,
-        TrajectoryStore,
-    )
-except ModuleNotFoundError:
-    # S2 LiveStore-only mode: these symbols are unused at runtime.
-    TrajectoryStore = None  # type: ignore[assignment,misc]
-    InsufficientTrajectoriesError = Exception  # type: ignore[assignment,misc]
+# S2 cut: trajectory_store and continuous_producer removed; LiveStoreClient is the only path.
+TrajectoryStore = None  # type: ignore[assignment,misc]
+InsufficientTrajectoriesError = Exception  # type: ignore[assignment,misc]
 from verl_custom.trainer.ppo import core_algos
 from verl_custom.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl_custom.trainer.ppo.metric_utils import (
@@ -1792,9 +1783,9 @@ class RayPPOTrainer:
         self._step_counter = None
         if not self._continuous_producer_mode():
             return
-
-        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-            StepCounter,
+        raise NotImplementedError(
+            'S2 cut: continuous_producer mode removed; use LiveStoreClient only. '
+            'Do not set replay.continuous_producer=True.'
         )
 
         if not self.async_rollout_mode:
@@ -1836,28 +1827,8 @@ class RayPPOTrainer:
         Override in subclasses (e.g., ``RayPPOTrainerDAPO``) to wire a
         different ``generate_fn`` / ``prompts_iter_factory``.
         """
-        from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-            ContinuousRolloutProducer,
-        )
-
-        def _factory():
-            # Infinite iterator: re-iterate the dataloader every epoch.
-            # The trainer's main loop still iterates its own dataloader
-            # view (ignoring batch_dict), but DataLoader creates isolated
-            # worker state per ``iter()`` call so the two iterators do
-            # not share cursors.
-            while True:
-                for batch_dict in self.train_dataloader:
-                    yield batch_dict
-
-        replay_cfg = self.config.replay
-        return ContinuousRolloutProducer(
-            rollout_manager=self.async_rollout_manager,
-            generate_fn=self._build_grpo_producer_generate_fn(),
-            store=self.trajectory_store,
-            step_counter=self._step_counter,
-            prompts_iter_factory=_factory,
-            poll_interval_s=float(replay_cfg.get('poll_interval_s', 0.05)),
+        raise NotImplementedError(
+            'S2 cut: continuous_producer removed; use LiveStoreClient only.'
         )
 
     def _stop_continuous_producer_if_needed(self) -> bool:
@@ -1903,9 +1874,9 @@ class RayPPOTrainer:
         uid → repeat → union → push+sample pipeline.
         """
         if self._producer is not None:
-            # Continuous-producer path.
-            from verl_custom.replay.continuous_producer import (  # noqa: PLC0415
-                wait_until_with_progress,
+            # S2 cut: this branch is unreachable — _producer is always None.
+            raise NotImplementedError(
+                'S2 cut: continuous_producer removed; use LiveStoreClient only.'
             )
 
             self._producer.check_background_error()
