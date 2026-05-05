@@ -92,6 +92,7 @@ docker run --rm --name "$CNAME" \
   -e CKPT_PATH="/workspace/outputs" \
   -e LIVE_STORE_SOCKET="/tmp/prorl_live_store.sock" \
   -e POLICY_REGISTRY_SOCKET="/tmp/prorl_policy_registry.sock" \
+  -e OPENHANDS_NUM_WORKERS="0" \
   -e RAY_memory_usage_threshold=0.98 \
   -e RAY_memory_monitor_refresh_ms=250 \
   -e RAY_object_store_memory=21474836480 \
