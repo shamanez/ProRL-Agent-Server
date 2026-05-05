@@ -22,8 +22,8 @@ set -eo pipefail
 source /home/ubuntu/.prorl_creds.env
 
 REPO=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
-IMG=verlai/verl:vllm018.dev1
-CNAME=s3-fullasync
+IMG="${TRAINER_IMG:-prorl/verl-trainer:latest}"
+CNAME=verl-trainer
 REMOTE_DNS="${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}"
 
 # Training knobs
@@ -101,22 +101,23 @@ docker run --rm --name "$CNAME" \
     set -eo pipefail
     source /creds.env
 
-    pip install --no-deps -e /opt/verl >/dev/null
-    pip install --no-deps -e /workspace/trainers/verl >/dev/null
-    pip install scipy math_verify tabulate absl-py async_generator codetiming peft 2>/dev/null || true
+    # Install upstream VERL and our custom trainer package.
+    # Extra pip deps (scipy, peft, etc.) are baked into the Docker image.
+    pip install --no-deps -e /opt/verl >/dev/null 2>&1
+    pip install --no-deps -e /workspace/trainers/verl >/dev/null 2>&1
 
-    # Pre-flight: vLLM pool must be healthy before training starts.
+    # Pre-flight: vLLM pool must be healthy before training starts (BC-15).
     HEALTH_TIMEOUT=300
     for port in 8100 8101 8102 8103; do
       url="http://${REMOTE_DNS}:${port}/health"
       deadline=$((SECONDS + HEALTH_TIMEOUT))
       until curl -sf --max-time 5 "${url}" >/dev/null 2>&1; do
         if (( SECONDS >= deadline )); then
-          echo "[trainer] ERROR: ${url} unreachable — start vLLM pool first" >&2; exit 1
+          echo "[verl-trainer] ERROR: ${url} unreachable — start vLLM pool first" >&2; exit 1
         fi
         sleep 2
       done
-      echo "[trainer] vLLM :${port} healthy"
+      echo "[verl-trainer] vLLM :${port} healthy"
     done
 
     cd /workspace
@@ -137,12 +138,6 @@ docker run --rm --name "$CNAME" \
       +actor_rollout_ref.model.fused_kernel_options.impl_backend=torch \
       +actor_rollout_ref.actor.use_fused_kernels=True \
       +actor_rollout_ref.actor.use_remove_padding=True \
-      # BC-14 note: data.train_files is a legacy VERL Hydra config requirement for
-      # dataset schema inference. The trainer does NOT use this for rollout generation.
-      # Rollout data comes exclusively from LiveStoreClient.get_batch().
-      # TODO: replace with a LiveStoreOnlyDataset dummy config to remove the parquet mount.
-      ++data.train_files=[/data/SkyRL-v0-293/train.parquet] \
-      ++data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
       trainer.default_local_dir=/workspace/outputs/ProAgent/fullasync \
       ++actor_rollout_ref.rollout.custom.rollout_save_dir=/workspace/outputs/rollout_data_fullasync \
       replay.staleness_cutoff_k="$STALENESS_CUTOFF_K" \

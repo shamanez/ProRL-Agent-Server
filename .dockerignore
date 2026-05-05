@@ -3,3 +3,18 @@ config.toml
 .envrc
 .env
 .git
+# Large directories not needed in Docker build context
+singularity_images/
+data/
+outputs/
+wandb/
+logs/
+scripts/log/
+*.sif
+*.log
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

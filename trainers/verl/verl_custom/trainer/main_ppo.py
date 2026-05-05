@@ -15,6 +15,8 @@
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
 
+import os
+
 import hydra
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
@@ -221,23 +223,28 @@ class TaskRunner:
 
         from verl_custom.utils.dataset.rl_dataset import collate_fn
 
-        # Create training and validation datasets.
-        train_dataset = create_rl_dataset(
-            config.data.train_files, config.data, tokenizer, processor
-        )
-        val_dataset = create_rl_dataset(
-            config.data.val_files, config.data, tokenizer, processor
-        )
-        train_sampler = create_rl_sampler(config.data, train_dataset)
-        # S2: RayPPOTrainerDAPO is the target class for all LiveStore-backed
-        # runs (filter_groups may be False while still using the external
-        # worker → LiveStore → trainer path). Select DAPO whenever
-        # replay.live_store_socket is set (S2 mode) or filter_groups is on.
-        _live_store_socket = (
+        # LiveStore mode check — must happen before dataset creation.
+        # When LIVE_STORE_SOCKET is set the trainer is a pure consumer:
+        # all training data arrives via LiveStoreClient.get_batch().
+        # No parquet DataLoader is needed or created.
+        _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '') or (
             str(config.replay.get('live_store_socket', ''))
             if hasattr(config, 'replay')
             else ''
         )
+        if _live_store_socket:
+            # LiveStore mode: skip parquet dataset entirely.
+            train_dataset = val_dataset = train_sampler = None
+            collate_fn = None
+        else:
+            # Classic mode: load parquet DataLoader for rollout generation.
+            train_dataset = create_rl_dataset(
+                config.data.train_files, config.data, tokenizer, processor
+            )
+            val_dataset = create_rl_dataset(
+                config.data.val_files, config.data, tokenizer, processor
+            )
+            train_sampler = create_rl_sampler(config.data, train_dataset)
         trainer_cls = (
             RayPPOTrainerDAPO
             if (

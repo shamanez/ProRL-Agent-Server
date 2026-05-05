@@ -700,10 +700,22 @@ class RayPPOTrainer:
         print('[validate_config] All configuration checks passed successfully!')
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler):
-        """
-        Creates the train and validation dataloaders.
-        """
-        # TODO: we have to make sure the batch size is divisible by the dp size
+        """Creates train/val dataloaders — skipped entirely in LiveStore mode."""
+        # LiveStore mode: all training data comes from get_batch(); no parquet
+        # DataLoader is needed. RayPPOTrainerDAPO never iterates self.train_dataloader.
+        import os
+
+        _live_store_socket = os.environ.get('LIVE_STORE_SOCKET', '') or (
+            str(self.config.replay.get('live_store_socket', ''))
+            if hasattr(self.config, 'replay')
+            else ''
+        )
+        if _live_store_socket:
+            self.train_dataset = self.val_dataset = None
+            self.train_dataloader = self.val_dataloader = None
+            return
+
+        # Classic mode: parquet DataLoader for rollout generation.
         from verl_custom.trainer.main_ppo import create_rl_dataset, create_rl_sampler
 
         if train_dataset is None:
@@ -742,7 +754,7 @@ class RayPPOTrainer:
             sampler=train_sampler,
         )
 
-        val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
+        val_batch_size = self.config.data.val_batch_size
         if val_batch_size is None:
             val_batch_size = len(self.val_dataset)
 
