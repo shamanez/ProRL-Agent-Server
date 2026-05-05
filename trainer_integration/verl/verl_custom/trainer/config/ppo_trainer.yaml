@@ -913,9 +913,9 @@ ray_init:
 # With enable=False the trainer path is identical to Phase 1 (lock-step).
 replay:
 
-  # Master gate: when False the trajectory store is not instantiated and
-  # the training loop is unchanged from Phase 1.
-  enable: False
+  # LiveStore gRPC client. Always True in the contract-first topology —
+  # the trainer is a pure consumer of the external LiveStore service.
+  enable: True
 
   # Max number of groups (one "group" = actor_rollout_ref.rollout.n siblings)
   # retained in the buffer. Default 32 ≈ 4 × (train_batch_size // n) for a

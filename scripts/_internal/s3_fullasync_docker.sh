@@ -121,14 +121,11 @@ docker run --rm --name "$CNAME" \
       data.val_files=[/data/SkyRL-v0-293/validation.parquet] \
       trainer.default_local_dir=/workspace/outputs/ProAgent/fullasync \
       ++actor_rollout_ref.rollout.custom.rollout_save_dir=/workspace/outputs/rollout_data_fullasync \
-      replay.enable=True \
       replay.staleness_cutoff_k="$STALENESS_CUTOFF_K" \
       replay.use_temporal_is="$USE_TEMPORAL_IS" \
-      replay.continuous_producer=False \
       ++replay.live_store_socket="${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}" \
       ++replay.policy_registry_socket="${POLICY_REGISTRY_SOCKET:-/tmp/prorl_policy_registry.sock}" \
       ++replay.no_progress_timeout_s=5400 \
       ++replay.swap_protocol="$SWAP_PROTOCOL" \
-      ++algorithm.filter_groups.enable=False \
       "$@"
   ' _ "$@" 2>&1 | tee "$LOG_PATH"
