@@ -37,7 +37,7 @@ echo "[rollout_manager] GROUP_SIZE=${GROUP_SIZE:-16} (n siblings per GRPO group)
 export PYTHONPATH="${REPO_ROOT}/core:${PYTHONPATH:-}"
 
 # ROLLOUT_FABRIC_PYTHON: override to use a fabric-only venv (see docs/service-envs.md).
-_DEFAULT_PYTHON="$(cd "${REPO_ROOT}/core" && poetry env info --path 2>/dev/null)/bin/python"
+_DEFAULT_PYTHON="$(cd "${REPO_ROOT}" && poetry env info --path 2>/dev/null)/bin/python"
 PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
 
 # Convert DATA_FILES to --data-files args

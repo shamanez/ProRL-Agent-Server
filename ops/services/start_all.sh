@@ -162,7 +162,7 @@ start_bg "rollout_manager" bash "${SCRIPT_DIR}/start_rollout_manager.sh"
 echo "  waiting for rollout manager to push ≥ 1 group (BC-16 warm-up) ..."
 WARMUP_TIMEOUT="${WORKER_WARMUP_TIMEOUT_S:-300}"
 # Use ROLLOUT_FABRIC_PYTHON if set; otherwise the default pre-populated env.
-_DEFAULT_PYTHON="$(cd "${REPO_ROOT}/core" && poetry env info --path 2>/dev/null)/bin/python"
+_DEFAULT_PYTHON="$(cd "${REPO_ROOT}" && poetry env info --path 2>/dev/null)/bin/python"
 WARMUP_PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
 "${WARMUP_PYTHON}" - <<PYEOF
 import sys, time
