@@ -14,7 +14,10 @@
 #   POLICY_ID              (default qwen3-4b-skyrl)
 #   ENVIRONMENT_ID         (default prorl_default)
 #   DATA_FILES             space-separated parquet paths (REQUIRED)
-#   GROUP_SIZE             GRPO/DAPO group size n (default 16)
+#   GROUP_SIZE             GRPO/DAPO group size n (default 4)
+#   NUM_PARALLEL_GROUPS    concurrent tasks dispatched at once (default 8)
+#                          8 tasks × GROUP_SIZE siblings = 32 concurrent episodes,
+#                          fully utilizing the EnvironmentProvider's 32 run workers.
 #   POLICY_MANIFEST_PATH   (default /tmp/prorl_policy_manifest.json)
 #   REPLAY_ARCHIVE_ROOT    (default /home/ubuntu/replay_archive)
 #   REPLAY_ARCHIVE_DISABLED 1 to skip archive tee (default 0)
@@ -32,7 +35,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 echo "[rollout_manager] starting"
 echo "[rollout_manager] DATA_FILES=${DATA_FILES}"
 echo "[rollout_manager] PRORL_URL=${PRORL_URL:-http://localhost:8006}"
-echo "[rollout_manager] GROUP_SIZE=${GROUP_SIZE:-16} (n siblings per GRPO group)"
+echo "[rollout_manager] GROUP_SIZE=${GROUP_SIZE:-4} × NUM_PARALLEL_GROUPS=${NUM_PARALLEL_GROUPS:-8} = $((${GROUP_SIZE:-4} * ${NUM_PARALLEL_GROUPS:-8})) concurrent episodes"
 
 export PYTHONPATH="${REPO_ROOT}/core:${PYTHONPATH:-}"
 
@@ -52,7 +55,8 @@ exec "${PYTHON}" -m rollout_fabric.rollout_manager.main \
     --policy-id "${POLICY_ID:-qwen3-4b-skyrl}" \
     --environment-id "${ENVIRONMENT_ID:-prorl_default}" \
     --data-files "${DATA_FILES_ARGS[@]}" \
-    --group-size "${GROUP_SIZE:-16}" \
+    --group-size "${GROUP_SIZE:-4}" \
+    --num-parallel-groups "${NUM_PARALLEL_GROUPS:-8}" \
     --policy-manifest-path "${POLICY_MANIFEST_PATH:-/tmp/prorl_policy_manifest.json}" \
     --archive-root "${REPLAY_ARCHIVE_ROOT:-/home/ubuntu/replay_archive}" \
     --archive-dead-letter "${REPLAY_ARCHIVE_DEAD_LETTER:-/tmp/replay_archive_deadletter.jsonl}" \
