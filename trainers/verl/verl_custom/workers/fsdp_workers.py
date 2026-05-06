@@ -715,8 +715,11 @@ class AsyncActorRolloutRefWorker(_UpstreamAsyncWorker):
         #    but only rank-0 writes to disk.
         logger.info('save_checkpoint: extracting LoRA adapter via get_per_tensor_param')
         try:
-            per_tensor_param, peft_config_dict = (
-                self.actor.engine.get_per_tensor_param()
+            # base_sync_done=True: vLLM already has the base model; we want only
+            # the LoRA delta (A/B matrices via get_peft_model_state_dict).
+            # Without this, collect_lora_params returns the full base weights (~15 GB).
+            per_tensor_param, peft_config_dict = self.actor.engine.get_per_tensor_param(
+                base_sync_done=True
             )
         except Exception:
             logger.warning(

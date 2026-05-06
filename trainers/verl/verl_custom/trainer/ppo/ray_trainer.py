@@ -829,36 +829,26 @@ class RayPPOTrainer:
                 'validate': True,
             }
             print(f'test_gen_batch meta info: {test_gen_batch.meta_info}')
-            # only pad for non-openhands async manager
-            if (
-                self.config.actor_rollout_ref.rollout.get('async_manager', '')
-                != 'openhands'
-            ):
-                # pad to be divisible by dp_size
-                test_gen_batch, pad_size = pad_dataproto_to_divisor(
-                    test_gen_batch, self.actor_rollout_wg.world_size
-                )
+            # pad to be divisible by dp_size
+            test_gen_batch, pad_size = pad_dataproto_to_divisor(
+                test_gen_batch, self.actor_rollout_wg.world_size
+            )
 
-            if not self.async_rollout_mode:
-                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(
-                    test_gen_batch
-                )
-            else:
+            if self.async_rollout_manager is not None:
                 self.async_rollout_manager.wake_up()
                 test_output_gen_batch = self.async_rollout_manager.generate_sequences(
                     test_gen_batch, val_mode=True
                 )
                 self.async_rollout_manager.sleep()
-
-            # only unpad for non-openhands async manager
-            if (
-                self.config.actor_rollout_ref.rollout.get('async_manager', '')
-                != 'openhands'
-            ):
-                # unpad
-                test_output_gen_batch = unpad_dataproto(
-                    test_output_gen_batch, pad_size=pad_size
+            else:
+                test_output_gen_batch = self.actor_rollout_wg.generate_sequences(
+                    test_gen_batch
                 )
+
+            # unpad
+            test_output_gen_batch = unpad_dataproto(
+                test_output_gen_batch, pad_size=pad_size
+            )
             print('validation generation end')
 
             # Store generated outputs
@@ -1197,39 +1187,6 @@ class RayPPOTrainer:
                 # is created, so no GPU memory is consumed by a sleeping vLLM.
                 self.async_rollout_mode = True
                 # async_rollout_manager deliberately left None.
-            elif (
-                self.config.actor_rollout_ref.rollout.get('async_manager', '')
-                == 'openhands'
-            ):
-                if self.config.algorithm.get('filter_groups', {}).get('enable', False):
-                    from verl_custom.nvidia.rollout.async_server_dapo import (
-                        AsyncLLMServerManagerDAPO as AsyncLLMServerManager,
-                    )
-                else:
-                    from verl_custom.nvidia.rollout.async_server import (
-                        AsyncLLMServerManager,
-                    )
-                self.async_rollout_mode = True
-                self.async_rollout_manager = AsyncLLMServerManager(
-                    config=self.config,
-                    worker_group=self.actor_rollout_wg,
-                )
-                if self.config.algorithm.get('filter_groups', {}).get('enable', False):
-                    self.async_rollout_manager.data_loader = self.train_dataloader
-            else:
-                try:
-                    from verl.workers.rollout.async_server import AsyncLLMServerManager
-                except ImportError:
-                    raise ImportError(
-                        'verl.workers.rollout.async_server was removed in verl v0.8. '
-                        'Set actor_rollout_ref.rollout.async_manager="openhands" to use '
-                        "verl_custom's AsyncLLMServerManager instead."
-                    )
-                self.async_rollout_mode = True
-                self.async_rollout_manager = AsyncLLMServerManager(
-                    config=self.config,
-                    worker_group=self.actor_rollout_wg,
-                )
 
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
@@ -1761,38 +1718,6 @@ class RayPPOTrainer:
             'Do not set replay.continuous_producer=True.'
         )
 
-        if not self.async_rollout_mode:
-            raise RuntimeError(
-                'replay.continuous_producer=True requires '
-                'actor_rollout_ref.rollout.mode=async'
-            )
-        assert self.trajectory_store is not None  # enable=True → store built
-
-        self._step_counter = StepCounter(initial=self.global_steps)
-        # Cut 5: wire the eager-push closure into the DAPO manager (no-op
-        # for plain GRPO, whose manager has no ``_push_fn`` attribute).
-        # The manager calls this once per survivor as soon as
-        # ``filter_easy_hard_instance`` clears it — the trainer sees
-        # content in the store during the 53 min DAPO iteration, not
-        # only after it.
-        if hasattr(self.async_rollout_manager, '_push_fn'):
-            store = self.trajectory_store
-            manager = self.async_rollout_manager
-            step_counter = self._step_counter
-
-            def _eager_push(single_group_dp):
-                policy_version = int(getattr(manager, 'policy_version', 0))
-                current_step = step_counter.get()
-                store.push_from_dataproto(
-                    single_group_dp,
-                    behavior_policy_version=policy_version,
-                    current_step=current_step,
-                )
-
-            self.async_rollout_manager._push_fn = _eager_push
-        self._producer = self._make_continuous_producer()
-        self._producer.start()
-
     def _make_continuous_producer(self):
         """Build a ``ContinuousRolloutProducer`` for plain GRPO.
 
@@ -1852,61 +1777,6 @@ class RayPPOTrainer:
                 'S2 cut: continuous_producer removed; use LiveStoreClient only.'
             )
 
-            self._producer.check_background_error()
-            # Cut 5: ``train_batch_size`` is now groups-per-step (mirror of
-            # ray_trainer_dapo.py change). The old ``max(1, tbs // n)``
-            # floor collapsed to 1 whenever ``n >= tbs``, starving the
-            # FSDP trainer. The replay buffer + ingest filter already
-            # guarantee every sampled group has gradient content.
-            n_groups = int(self.config.data.train_batch_size)
-            # No-progress detector (mirror of ray_trainer_dapo.py). See
-            # that file for the prep-100 step-44 incident this replaces.
-            no_progress_timeout_s = float(
-                self.config.replay.get('no_progress_timeout_s', 1800.0)
-            )
-            with _timer('gen', timing_raw):
-                # Predicate uses non-stale group count (run4-step-11
-                # race). Progress uses monotonic ``total_pushes`` so a
-                # slow-but-healthy producer doesn't trip the guardrail.
-                filled = wait_until_with_progress(
-                    lambda: self.trajectory_store.num_fresh_groups(self.global_steps)
-                    >= n_groups,
-                    self.trajectory_store.total_pushes,
-                    no_progress_timeout=no_progress_timeout_s,
-                )
-            if not filled:
-                self._producer.check_background_error()
-                raise RuntimeError(
-                    f'Replay store made no forward progress for '
-                    f'{no_progress_timeout_s:.1f}s while waiting for '
-                    f'{n_groups} fresh groups (current='
-                    f'{self.trajectory_store.num_fresh_groups(self.global_steps)} '
-                    f'fresh / {self.trajectory_store.num_groups()} total, '
-                    f'total_pushes={self.trajectory_store.total_pushes()}). '
-                    'Producer is wedged — check pool /health and producer logs.'
-                )
-            metrics.update(
-                self.trajectory_store.metrics(self.global_steps, suffix='_pre_sample')
-            )
-            from verl_custom.fabric_adapter.live_store_batch import (
-                sample_mini_batch,  # noqa: PLC0415
-            )
-
-            sampled = sample_mini_batch(
-                self.trajectory_store,
-                n_groups=n_groups,
-                current_step=self.global_steps,
-            )
-            metrics.update(self.trajectory_store.metrics(self.global_steps))
-            metrics.update(
-                self.trajectory_store.metrics(self.global_steps, suffix='_post_sample')
-            )
-            return DataProto.from_dict(
-                tensors=sampled.tensors,
-                non_tensors=sampled.non_tensors,
-                meta_info=sampled.meta_info,
-            )
-
         # Classic path (original fit() gen block).
         batch: DataProto = DataProto.from_single_dict(batch_dict)
         batch_keys_to_pop = ['input_ids', 'attention_mask', 'position_ids']
@@ -1926,14 +1796,14 @@ class RayPPOTrainer:
         )
 
         with _timer('gen', timing_raw):
-            if not self.async_rollout_mode:
-                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
-            else:
+            if self.async_rollout_manager is not None:
                 self.async_rollout_manager.wake_up()
                 gen_batch_output = self.async_rollout_manager.generate_sequences(
                     gen_batch
                 )
                 self.async_rollout_manager.sleep()
+            else:
+                gen_batch_output = self.actor_rollout_wg.generate_sequences(gen_batch)
             timing_raw.update(gen_batch_output.meta_info['timing'])
             gen_batch_output.meta_info.pop('timing', None)
 
@@ -1989,7 +1859,8 @@ class RayPPOTrainer:
             # Pool keeps its PV across a trainer restart; align trainer to it so
             # the first post-resume /reload_lora isn't rejected as non-monotonic.
             self.policy_version = self.global_steps
-            self.async_rollout_manager.policy_version = self.global_steps
+            if self.async_rollout_manager is not None:
+                self.async_rollout_manager.policy_version = self.global_steps
 
         # perform validation before training
         # currently, we only support validation using the reward_function.

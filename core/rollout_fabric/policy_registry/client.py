@@ -43,7 +43,10 @@ class PolicyRegistryClient:
             adapter_uri=adapter_uri,
             trainer_id=trainer_id,
         )
-        resp = self._stub.PublishPolicyVersion(req)
+        # 600 s deadline: fanout reads adapter (~300 MB), gzips it, and POSTs to
+        # all pool children.  Without a deadline the trainer hangs indefinitely
+        # if the registry or a vLLM child becomes unresponsive.
+        resp = self._stub.PublishPolicyVersion(req, timeout=600)
         if not resp.success:
             raise PublishFailedError(
                 f'ABORT: registry publish failed policy_id={policy_id!r} '

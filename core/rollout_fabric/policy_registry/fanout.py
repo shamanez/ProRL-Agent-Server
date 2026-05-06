@@ -75,8 +75,10 @@ def fanout_to_pool(
     with ThreadPoolExecutor(max_workers=len(endpoints)) as pool:
         responses = list(pool.map(_post, endpoints))
 
-    ok = [r for r in responses if r['status'] in (200, 409)]
-    failed = [r for r in responses if r['status'] not in (200, 409)]
+    # 200 = adapter installed.  409 = vLLM rejected non-monotonic version (the
+    # adapter was NOT installed) — must be treated as failure, not idempotent OK.
+    ok = [r for r in responses if r['status'] == 200]
+    failed = [r for r in responses if r['status'] != 200]
     elapsed = time.monotonic() - started
 
     if failed:

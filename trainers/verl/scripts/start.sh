@@ -22,6 +22,30 @@ set -eo pipefail
 source /home/ubuntu/.prorl_creds.env
 
 REPO=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
+
+# ── VERL source tree ────────────────────────────────────────────────────────
+# Pinned commit: a4351480871347092436d17573ad3ccf75b24122
+# Branch: main @ github.com/verl-project/verl
+# See trainers/verl/VERL_PIN.md for rationale.
+VERL_COMMIT="a4351480871347092436d17573ad3ccf75b24122"
+VERL_DIR="${VERL_DIR:-/tmp/verl}"
+if [[ ! -d "${VERL_DIR}/.git" ]]; then
+  echo "[trainer] /tmp/verl missing — cloning VERL @ ${VERL_COMMIT:0:8} ..."
+  git clone --depth=1 https://github.com/verl-project/verl "${VERL_DIR}" 2>&1
+  git -C "${VERL_DIR}" fetch --depth=1 origin "${VERL_COMMIT}" 2>&1
+  git -C "${VERL_DIR}" checkout FETCH_HEAD 2>&1
+  echo "[trainer] VERL cloned to ${VERL_DIR}"
+else
+  actual=$(git -C "${VERL_DIR}" rev-parse HEAD 2>/dev/null || echo "unknown")
+  if [[ "${actual}" != "${VERL_COMMIT}" ]]; then
+    echo "[trainer] WARNING: ${VERL_DIR} is at ${actual:0:8}, expected ${VERL_COMMIT:0:8}"
+    echo "[trainer] Remove ${VERL_DIR} and re-run to pull the pinned commit."
+  else
+    echo "[trainer] VERL at pinned commit ${actual:0:8} ✓"
+  fi
+fi
+# ───────────────────────────────────────────────────────────────────────────
+
 # Build once: cd ProRL-Agent-Server && docker build -f trainers/verl/Dockerfile -t prorl/verl-trainer:vllm018 .
 IMG="${TRAINER_IMG:-prorl/verl-trainer:vllm018}"
 CNAME=prorl-trainer
