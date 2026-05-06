@@ -28,7 +28,8 @@
 set -euo pipefail
 
 LOG_FILE="${SMOKE_LOG:-/tmp/training_bootstrap.log}"
-PYTHON="${POETRY_PYTHON:-/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python}"
+_DEFAULT_PYTHON="$(cd "${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/core" && poetry env info --path 2>/dev/null)/bin/python"
+PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 PRORL_URL="${PRORL_URL:-http://localhost:8006}"

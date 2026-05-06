@@ -9,6 +9,76 @@ All paths are relative to the repo root:
 
 ---
 
+## 0. From-Scratch Checklist
+
+Run this checklist **once on a fresh machine**. Skip steps that are already done.
+
+```bash
+cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
+source /home/ubuntu/.prorl_creds.env   # Must exist — see section 2.1
+```
+
+### 0.1 Build the trainer Docker image (one-time, ~5 min)
+
+```bash
+docker build -f trainers/verl/Dockerfile -t prorl/verl-trainer:vllm018 .
+```
+
+Requires Docker with GPU support and internet access to pull `verlai/verl:vllm018.dev1`
+from Docker Hub. The resulting local image is `prorl/verl-trainer:vllm018` — this is
+what `trainers/verl/scripts/start.sh` uses by default.
+
+### 0.2 Install Python environments (one-time, ~5 min total)
+
+```bash
+# Fabric-core (LiveStore, PolicyRegistry, RolloutManager, ReplayArchive)
+cd core && poetry install && cd ..
+
+# EnvironmentProvider (ProRL FastAPI server — OpenHands + litellm + Singularity)
+cd environments/prorl_openhands && poetry install && cd ../..
+
+# Out-of-band git dep required by SweAgentHandler (not on PyPI):
+$(cd environments/prorl_openhands && poetry env info --path)/bin/pip install \
+    "git+https://github.com/SWE-Gym/SWE-Bench-Package.git"
+```
+
+### 0.3 Export Python paths (every session)
+
+```bash
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
+```
+
+Add these to your shell profile or a `.env` file so they survive across sessions.
+`start_all.sh` will auto-resolve them if unset, but having them pre-exported is safer.
+
+### 0.4 Build Singularity images (one-time, 3–5 min/image)
+
+See section 1.1. Skip if `.sif` files already exist in `singularity_images/`.
+
+### 0.5 Filter parquet dataset (one-time, after each new SIF batch)
+
+See section 1.2. Skip if `train.ready.parquet` already exists and SIF list hasn't changed.
+
+### 0.6 Set required env vars then start
+
+```bash
+export DATA_FILES="/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet"
+export POLICY_ID="qwen3-4b-skyrl"
+export ENVIRONMENT_ID="swe_agent"
+
+# Step 1: vLLM pool (if not already running on the remote EC2)
+bash inference/vllm/scripts/launch_remote_vllm_pool.sh start
+
+# Steps 2–5: everything else in order with health gates
+bash ops/services/start_all.sh
+```
+
+`start_all.sh` handles steps 2–5 in strict dependency order and blocks until the
+BC-16 warm-up gate passes before starting the trainer.
+
+---
+
 ## 1. Prerequisites
 
 ### 1.1 Singularity images
@@ -58,34 +128,38 @@ This writes `train.ready.parquet` — the file used by `DATA_FILES`.
 
 ### 1.3 Python environments
 
-Three environments are required. The Docker trainer environment is set up at container
+Two host venvs are required. The Docker trainer environment is set up at container
 start, not on the host.
 
-**Fabric-core** (LiveStore, PolicyRegistry, RolloutManager, schemas — 5 deps, fast):
+**Fabric-core** (LiveStore, PolicyRegistry, RolloutManager, ReplayArchive — 13 packages):
 
 ```bash
 cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/core
 poetry install
-ROLLOUT_FABRIC_PYTHON=$(poetry env info --path)/bin/python
+export ROLLOUT_FABRIC_PYTHON=$(poetry env info --path)/bin/python
 cd ..
 ```
 
-**EnvironmentProvider** (full OpenHands stack):
+**EnvironmentProvider** (full OpenHands + litellm + Singularity stack, ~200 packages):
 
 ```bash
 cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/environments/prorl_openhands
 poetry install
-PRORL_OPENHANDS_PYTHON=$(poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(poetry env info --path)/bin/python
 cd ../..
 ```
 
-The pre-built envs on this machine are available as a fallback:
+**Out-of-band git dep** — required for `SweAgentHandler` (not on PyPI):
 
 ```bash
-# Same venv happens to satisfy both on this machine:
-ROLLOUT_FABRIC_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
-PRORL_OPENHANDS_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
+# Run once after poetry install, into the EnvironmentProvider venv:
+$(cd environments/prorl_openhands && poetry env info --path)/bin/pip install \
+    "git+https://github.com/SWE-Gym/SWE-Bench-Package.git"
 ```
+
+> `ROLLOUT_FABRIC_PYTHON` and `PRORL_OPENHANDS_PYTHON` must be exported before
+> running any service script, or add them to your shell profile / `.env` file.
+> Resolve them fresh each session — never hardcode the hash portion of the venv path.
 
 **TrainerAdapter** — never install on host. The Docker image installs it at container
 start:
@@ -118,9 +192,13 @@ This file contains secrets. Never commit it. It defines at minimum:
 ### 2.2 Set before starting services
 
 ```bash
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
 export DATA_FILES="/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet"
 export POLICY_ID="qwen3-4b-skyrl"
 export ENVIRONMENT_ID="swe_agent"
+# Required if calling `python -m rollout_fabric.*` directly (the ops/services/ scripts
+# set this internally, but you need it in your shell for ad-hoc commands):
 export PYTHONPATH=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/core
 ```
 
@@ -134,7 +212,7 @@ export PYTHONPATH=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/core
 | `LIVE_STORE_SOCKET` | `/tmp/prorl_live_store.sock` | LiveStore, Trainer | UDS path |
 | `POLICY_REGISTRY_SOCKET` | `/tmp/prorl_policy_registry.sock` | PolicyRegistry, Trainer | UDS path |
 | `LIVE_STORE_MAX_SIZE` | `256` | LiveStore | Max groups in buffer |
-| `STALENESS_CUTOFF_K` | `4` | LiveStore, Trainer | Max step age for groups |
+| `STALENESS_CUTOFF_K` | `32` | LiveStore, Trainer | Max step age for groups |
 | `NO_PROGRESS_TIMEOUT` | `1800` | LiveStore | Seconds before abort if no new push |
 | `VLLM_POOL_ENDPOINTS` | auto from `REMOTE_DNS` | PolicyRegistry | Space-separated vLLM endpoint URLs |
 | `GROUP_SIZE` | `16` | RolloutManager | GRPO group size (N siblings per task) |
@@ -548,11 +626,13 @@ when no venv exists for that project directory.
 `PRORL_OPENHANDS_PYTHON` explicitly before running any script:
 
 ```bash
-export ROLLOUT_FABRIC_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
-export PRORL_OPENHANDS_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
 ```
 
-The scripts check `ROLLOUT_FABRIC_PYTHON` first and only fall back to `poetry env info`.
+The scripts check `ROLLOUT_FABRIC_PYTHON` / `PRORL_OPENHANDS_PYTHON` first and only
+fall back to `poetry env info`. Use the dynamic form above — never hardcode the venv
+hash path.
 
 ### Error 6: `Server is already running` / HTTP 400 from trainer on ProRL `/start`
 

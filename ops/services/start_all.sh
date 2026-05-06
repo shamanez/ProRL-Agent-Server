@@ -17,15 +17,50 @@
 #
 #  Required env vars:
 #    DATA_FILES          space-separated parquet paths for the worker
-#    VLLM_POOL_ENDPOINTS space-separated pool URLs
 #
 #  Optional (have defaults):
+#    ROLLOUT_FABRIC_PYTHON   fabric-core venv python (resolved from core/ if unset)
+#    PRORL_OPENHANDS_PYTHON  openhands venv python   (resolved from environments/ if unset)
 #    PRORL_PORT, LIVE_STORE_SOCKET, POLICY_REGISTRY_SOCKET, etc.
 # ============================================================
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+# ---- resolve and export Python interpreters ---------------------------------
+# These must be exported so all child scripts (start_live_store.sh etc.) inherit
+# them. Resolved here once so every script uses the same interpreter.
+if [[ -z "${ROLLOUT_FABRIC_PYTHON:-}" ]]; then
+    ROLLOUT_FABRIC_PYTHON="$(cd "${REPO_ROOT}/core" && poetry env info --path 2>/dev/null)/bin/python"
+fi
+if [[ -z "${PRORL_OPENHANDS_PYTHON:-}" ]]; then
+    PRORL_OPENHANDS_PYTHON="$(cd "${REPO_ROOT}/environments/prorl_openhands" && poetry env info --path 2>/dev/null)/bin/python"
+fi
+export ROLLOUT_FABRIC_PYTHON PRORL_OPENHANDS_PYTHON
+
+if [[ ! -x "${ROLLOUT_FABRIC_PYTHON}" ]]; then
+    echo "ERROR: ROLLOUT_FABRIC_PYTHON=${ROLLOUT_FABRIC_PYTHON} is not executable."
+    echo "  Run:  cd core && poetry install"
+    exit 1
+fi
+if [[ ! -x "${PRORL_OPENHANDS_PYTHON}" ]]; then
+    echo "ERROR: PRORL_OPENHANDS_PYTHON=${PRORL_OPENHANDS_PYTHON} is not executable."
+    echo "  Run:  cd environments/prorl_openhands && poetry install"
+    exit 1
+fi
+echo "[start_all] ROLLOUT_FABRIC_PYTHON=${ROLLOUT_FABRIC_PYTHON}"
+echo "[start_all] PRORL_OPENHANDS_PYTHON=${PRORL_OPENHANDS_PYTHON}"
+
+# ---- validate DATA_FILES early (BC-14) --------------------------------------
+if [[ -z "${DATA_FILES:-}" ]]; then
+    echo "ERROR: DATA_FILES must be set before calling start_all.sh"
+    echo "  export DATA_FILES=/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet"
+    exit 1
+fi
+for f in ${DATA_FILES}; do
+    [[ -f "$f" ]] || { echo "ERROR: DATA_FILES path does not exist: $f"; exit 1; }
+done
 
 # ---- health probe helpers -----------------------------------------------
 
@@ -40,6 +75,22 @@ probe_http() {
         sleep "${interval}"
     done
     echo "  ✗ ${url} did not become healthy after $((retries * interval))s"
+    return 1
+}
+
+# Like probe_http but succeeds on any HTTP response (including 4xx/5xx).
+# Use this for "server is listening" checks before calling POST /start.
+probe_http_any() {
+    local url="$1" retries="${2:-60}" interval="${3:-2}"
+    echo "  probing ${url} (any response) ..."
+    for ((i=1; i<=retries; i++)); do
+        if curl -s --max-time 3 -o /dev/null -w "%{http_code}" "${url}" 2>/dev/null | grep -qE "^[0-9]{3}$"; then
+            echo "  ✓ ${url} accepting connections (attempt ${i})"
+            return 0
+        fi
+        sleep "${interval}"
+    done
+    echo "  ✗ ${url} did not accept connections after $((retries * interval))s"
     return 1
 }
 
@@ -105,11 +156,13 @@ echo "Step 1 complete."
 echo ""
 echo "=== Step 2: EnvironmentProvider (ProRL) ==="
 start_bg "env_provider" bash "${SCRIPT_DIR}/start_env_provider.sh"
-probe_http "http://localhost:${PRORL_PORT:-8006}/health" 60 2
-# Activate the agent server (CLAUDE.md Step 2 — POST /start must follow health check).
+# Wait for FastAPI to be listening (any HTTP response — /status returns 503 pre-start).
+probe_http_any "http://localhost:${PRORL_PORT:-8006}/status" 60 2
+# Activate the agent server (BC: POST /start must follow server-up check).
 curl -sf -X POST "http://localhost:${PRORL_PORT:-8006}/start" \
      -H "Content-Type: application/json" -d '{}' \
-  || { echo "ERROR: ProRL /start failed"; exit 1; }
+  || echo "  WARN: /start returned non-2xx (server may already be running — continuing)"
+# Wait for /status to reflect the running state (200 OK).
 probe_http "http://localhost:${PRORL_PORT:-8006}/status" 30 1
 echo "Step 2 complete."
 
@@ -149,11 +202,6 @@ fi
 # =========================================================================
 echo ""
 echo "=== Step 4: RolloutManager ==="
-
-if [[ -z "${DATA_FILES:-}" ]]; then
-    echo "ERROR: DATA_FILES must be set (BC-14 — worker owns the dataset, not the trainer)"
-    exit 1
-fi
 
 start_bg "rollout_manager" bash "${SCRIPT_DIR}/start_rollout_manager.sh"
 

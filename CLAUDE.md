@@ -59,45 +59,50 @@ Six services in data-flow order. Read the diagram, then the table.
 
 ## Startup sequence
 
-Run in strict order. Each step must pass its health gate before the next begins.
+> **Authoritative guide:** `docs/TRAINING_OPERATIONS.md` — read Section 0 (From-Scratch
+> Checklist) first, then Section 3 (Startup Sequence). The steps below are a summary;
+> TRAINING_OPERATIONS.md has the health gates, knob table, and troubleshooting.
+
+**From scratch — run once:**
 
 ```bash
-# Prerequisites
+cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
 source /home/ubuntu/.prorl_creds.env
+
+# 1. Build the trainer Docker image
+docker build -f trainers/verl/Dockerfile -t prorl/verl-trainer:vllm018 .
+
+# 2. Install Python environments
+cd core && poetry install && cd ..
+cd environments/prorl_openhands && poetry install && cd ../..
+$(cd environments/prorl_openhands && poetry env info --path)/bin/pip install \
+    "git+https://github.com/SWE-Gym/SWE-Bench-Package.git"
+
+# 3. Export Python paths (also add to shell profile)
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
+```
+
+**Every session — set env vars and start:**
+
+```bash
+source /home/ubuntu/.prorl_creds.env
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
 export DATA_FILES="/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet"
 export POLICY_ID="qwen3-4b-skyrl"
 export ENVIRONMENT_ID="swe_agent"
-export PYTHONPATH=/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/core
 
-# ── Three poetry environments (four total including Docker) ──────────────────
-#
-#  1. Fabric-core  (core/pyproject.toml — 5 packages, fast install)
-#     cd core && poetry install && cd ..
-#     ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
-#
-#  2. EnvironmentProvider  (environments/prorl_openhands/pyproject.toml — full OpenHands stack)
-#     cd environments/prorl_openhands && poetry install && cd ../..
-#     PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
-#
-#  3. TrainerAdapter  (verlai/verl Docker — installed at container start, not baked in)
-#     NEVER use the host poetry env for trainer deps.
-#     /tmp/verl is bind-mounted as /opt/verl inside the container.
-#
-# On this machine the pre-built envs are still present as fallback:
-#   ROLLOUT_FABRIC_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
-#   PRORL_OPENHANDS_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
-# ─────────────────────────────────────────────────────────────────────────────
+# Step 1: vLLM pool on remote EC2 (skip if already running)
+bash inference/vllm/scripts/launch_remote_vllm_pool.sh start
+
+# Steps 2–5: all host services + trainer, in order, with health gates
+bash ops/services/start_all.sh
 ```
 
-**Before starting the worker**, filter the parquet to tasks with built SIF images.
-Run once after any new SIFs are added:
-
-```bash
-python ops/data/filter_parquet_to_built_sifs.py \
-  --input /home/ubuntu/data/SkyRL-v0-293/train.parquet \
-  --sif-dir singularity_images \
-  --output /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet
-```
+`start_all.sh` auto-resolves `ROLLOUT_FABRIC_PYTHON` / `PRORL_OPENHANDS_PYTHON` if
+not set, validates `DATA_FILES` before starting anything, and blocks on the BC-16
+warm-up gate before launching the trainer.
 
 ### Step 1 — InferenceBackend
 

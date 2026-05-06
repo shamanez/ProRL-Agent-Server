@@ -1,6 +1,5 @@
 from openhands.runtime.base import Runtime
 from openhands.runtime.impl.cli.cli_runtime import CLIRuntime
-from openhands.runtime.impl.daytona.daytona_runtime import DaytonaRuntime
 from openhands.runtime.impl.docker.docker_runtime import (
     DockerRuntime,
 )
@@ -13,6 +12,16 @@ from openhands.runtime.impl.runloop.runloop_runtime import RunloopRuntime
 from openhands.runtime.impl.singularity.singularity_runtime import SingularityRuntime
 from openhands.utils.import_utils import get_impl
 
+# daytona_sdk 0.18.1 is incompatible with daytona_api_client >= 0.171 (WorkspaceState renamed).
+# Not used for SWE-Bench/Singularity training; guard to avoid startup failure.
+try:
+    from openhands.runtime.impl.daytona.daytona_runtime import DaytonaRuntime
+
+    _daytona_available = True
+except ImportError:
+    DaytonaRuntime = None  # type: ignore[assignment,misc]
+    _daytona_available = False
+
 # mypy: disable-error-code="type-abstract"
 _DEFAULT_RUNTIME_CLASSES: dict[str, type[Runtime]] = {
     'eventstream': DockerRuntime,
@@ -22,11 +31,12 @@ _DEFAULT_RUNTIME_CLASSES: dict[str, type[Runtime]] = {
     'modal': ModalRuntime,
     'runloop': RunloopRuntime,
     'local': LocalRuntime,
-    'daytona': DaytonaRuntime,
     'enroot': EnrootRuntime,
     'singularity': SingularityRuntime,
     'cli': CLIRuntime,
 }
+if _daytona_available and DaytonaRuntime is not None:
+    _DEFAULT_RUNTIME_CLASSES['daytona'] = DaytonaRuntime
 
 
 def get_runtime_cls(name: str) -> type[Runtime]:

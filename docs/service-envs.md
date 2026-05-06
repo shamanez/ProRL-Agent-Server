@@ -10,14 +10,25 @@
 | `./trainers/verl/pyproject.toml` | inside Docker only | TrainerAdapter — never installed on host |
 
 ```bash
-# Fabric-core (fast — 5 packages):
+# ── Step 1: Fabric-core (fast — 13 packages, ~2s) ─────────────────────────
 cd core && poetry install && cd ..
-ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
 
-# EnvironmentProvider (full OpenHands stack):
+# ── Step 2: EnvironmentProvider (full OpenHands stack, ~200 packages) ──────
 cd environments/prorl_openhands && poetry install && cd ../..
-PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
+
+# ── Step 3: Out-of-band git dep (required for SweAgentHandler) ─────────────
+# swegym is not on PyPI in the required form; install it directly into the
+# EnvironmentProvider venv after poetry install.
+VENV_BIN=$(cd environments/prorl_openhands && poetry env info --path)/bin
+"${VENV_BIN}/pip" install "git+https://github.com/SWE-Gym/SWE-Bench-Package.git"
 ```
+
+> **Note:** `ROLLOUT_FABRIC_PYTHON` and `PRORL_OPENHANDS_PYTHON` must be exported
+> before running any service script. Alternatively, set them in a `.env` file or
+> add them to your shell profile so the `ops/services/start_*.sh` scripts can pick
+> them up automatically.
 
 ## Why NOT one env for everything
 
@@ -47,13 +58,16 @@ PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --pa
 
 ## Current single-machine default
 
-All Python services (except the Docker trainer and remote vLLM) can share the same openhands poetry env on this machine as a deployment convenience. The env variables above override it per-script.
+Both venvs are deployed on this machine. Resolve paths dynamically — never hardcode:
 
-Pre-built envs on this machine:
 ```bash
-ROLLOUT_FABRIC_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
-PRORL_OPENHANDS_PYTHON=/home/ubuntu/.cache/pypoetry/virtualenvs/openhands-ai-342rfuwh-py3.12/bin/python
+export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
+export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
 ```
+
+These must be set before starting any service. The `ops/services/start_*.sh` scripts
+check `ROLLOUT_FABRIC_PYTHON` / `PRORL_OPENHANDS_PYTHON` first and fall back to
+`$(poetry env info --path)/bin/python` only if neither is set.
 
 ## Trainer Docker isolation
 
