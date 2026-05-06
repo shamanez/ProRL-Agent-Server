@@ -61,8 +61,13 @@ class RolloutManagerLoop:
         Number of sibling episodes per GRPO/DAPO group (``n`` in
         ``compute_advantage``). All siblings run with the same snapshot.
     created_at_step_fn:
-        Callable returning the trainer's current step (via StepCounter).
-        Used to stamp ``created_at_step`` on every sample (BC-8).
+        Deprecated / unused. ``created_at_step`` is now sourced directly
+        from ``policy_cache.snapshot().version`` at dispatch time, which
+        is the policy version the group was generated under. This makes
+        the staleness filter (``staleness_cutoff_k``) semantically correct:
+        a group is stale when the policy has advanced more than k versions
+        since the group was collected. Kept in the signature for backward
+        compatibility; any value passed is ignored.
     archive_writer:
         Optional archive tee. Receives ALL episodes before filtering
         (BC-12 — archive sees pre-filter; LiveStore sees post-filter).
@@ -225,8 +230,11 @@ class RolloutManagerLoop:
         # Step 2: take ONE policy snapshot for the whole group (BC-0 / §3.2).
         # All N siblings are dispatched with this same policy_version so no
         # trajectory spans two policies.
+        # created_at_step = snap.version: stamp groups with the policy version
+        # they were collected under so the LiveStore staleness filter can evict
+        # groups older than staleness_cutoff_k policy updates.
         snap = self._cache.snapshot()
-        created_at_step = self._step_fn()
+        created_at_step = snap.version
 
         # Step 3: run group_size episodes in parallel — same policy version for all.
         # BC-0: snap captured once above; all futures use the same snap.version.

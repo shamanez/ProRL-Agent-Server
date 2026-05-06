@@ -8,22 +8,26 @@
 # Env vars:
 #   LIVE_STORE_SOCKET    (default /tmp/prorl_live_store.sock)
 #   LIVE_STORE_MAX_SIZE  (default 256 groups)
-#   STALENESS_CUTOFF_K   (default 1000 steps — see note below)
+#   STALENESS_CUTOFF_K   (default 32 policy versions)
 #   NO_PROGRESS_TIMEOUT  (default 1800 seconds)
 #
 # BC-16: trainer blocks server-side in get_batch until buffer is warm.
 # The no-progress timeout (1800s) is the safety abort, not a short RPC timeout.
 #
-# Staleness note: groups are stamped created_at_step=0 because the StepCounter
-# RPC that would sync the rollout manager to the trainer's step is not yet
-# implemented. With k=4, groups become stale at trainer step 5 (5-0>4),
-# permanently blocking training after any resume. k=1000 effectively disables
-# staleness for the full 500-step run. Restore k=4 once StepCounter is wired.
+# Staleness semantics: groups are stamped created_at_step=policy_version at
+# dispatch time (loop.py). A group is stale when the live policy has advanced
+# more than k versions since the group was collected. k=32 means trajectories
+# collected under a policy >32 gradient updates old are rejected — keeping
+# training approximately on-policy for GRPO/DAPO.
+# Restart safety: after resume from step N the manifest shows version=N, so
+# new groups get created_at_step=N and trainer's get_batch(current_step=N+1)
+# sees age=1 ≤ 32 → fresh. Old pre-restart groups with small created_at_step
+# are naturally evicted when N-created_at_step > 32.
 set -euo pipefail
 
 SOCKET="${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}"
 MAX_SIZE="${LIVE_STORE_MAX_SIZE:-256}"
-K="${STALENESS_CUTOFF_K:-1000}"
+K="${STALENESS_CUTOFF_K:-32}"
 NO_PROGRESS="${NO_PROGRESS_TIMEOUT:-1800}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

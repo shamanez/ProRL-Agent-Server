@@ -161,7 +161,7 @@ def main() -> int:
         dataloader=dataloader,
         group_size=args.group_size,
         num_parallel_groups=args.num_parallel_groups,
-        created_at_step_fn=lambda: 0,  # updated via StepCounter RPC at S2+
+        # created_at_step is sourced from policy_cache.snapshot().version in loop.py
         archive_writer=archive_writer,
         environment_id=args.environment_id,
         filter_zero_variance=args.filter_zero_variance,
