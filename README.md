@@ -43,29 +43,9 @@ PolicyRegistry publish hook on top.
 
 See `core/rollout_fabric/schemas/protocols/PLUGGING_IN.md` for the step-by-step guide.
 
-## Python environments — four, cleanly separated
+## Python environments
 
-| Component | Machine Role | Install |
-|---|---|---|
-| **Fabric-core** | Any host running fabric services | `cd core && poetry install` |
-| **ProRL / OpenHands** | Host running EnvironmentProvider | `cd environments/prorl_openhands && poetry install` |
-| **VERL TrainerAdapter** | Inside Docker container | `pip install -e /workspace/trainers/verl` |
-| **vLLM InferenceBackend** | Remote EC2 inference machine | `pip install -r inference/vllm/scripts/requirements-remote.txt` |
-
-```bash
-# Fabric-core venv (fast — 5 packages):
-cd core && poetry install && cd ..
-ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
-
-# EnvironmentProvider venv (full openhands stack):
-cd environments/prorl_openhands && poetry install && cd ../..
-PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
-
-# TrainerAdapter: pip install -e inside Docker (see trainers/verl/)
-# vLLM pool (EC2): pip install -r inference/vllm/scripts/requirements-remote.txt
-```
-
-See `docs/service-envs.md` for per-service details.
+Two host venvs (`fabric-core` and `prorl_openhands`); trainer runs inside Docker; vLLM on remote EC2. See `docs/service-envs.md` for the full dependency footprint and install commands.
 
 ---
 

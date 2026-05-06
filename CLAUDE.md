@@ -59,31 +59,21 @@ Six services in data-flow order. Read the diagram, then the table.
 
 ## Startup sequence
 
-> **Authoritative guide:** `docs/TRAINING_OPERATIONS.md` — read Section 0 (From-Scratch
-> Checklist) first, then Section 3 (Startup Sequence). The steps below are a summary;
-> TRAINING_OPERATIONS.md has the health gates, knob table, and troubleshooting.
+> **Authoritative guide:** `docs/TRAINING_OPERATIONS.md` — Section 0 (from-scratch checklist) and Section 3 (step-by-step with health gates, knob table, error recovery).
 
 **From scratch — run once:**
 
 ```bash
 cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
 source /home/ubuntu/.prorl_creds.env
-
-# 1. Build the trainer Docker image
 docker build -f trainers/verl/Dockerfile -t prorl/verl-trainer:vllm018 .
-
-# 2. Install Python environments
 cd core && poetry install && cd ..
 cd environments/prorl_openhands && poetry install && cd ../..
 $(cd environments/prorl_openhands && poetry env info --path)/bin/pip install \
     "git+https://github.com/SWE-Gym/SWE-Bench-Package.git"
-
-# 3. Export Python paths (also add to shell profile)
-export ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
-export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
 ```
 
-**Every session — set env vars and start:**
+**Every session:**
 
 ```bash
 source /home/ubuntu/.prorl_creds.env
@@ -92,110 +82,11 @@ export PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env in
 export DATA_FILES="/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet"
 export POLICY_ID="qwen3-4b-skyrl"
 export ENVIRONMENT_ID="swe_agent"
-
-# Step 1: vLLM pool on remote EC2 (skip if already running)
-bash inference/vllm/scripts/launch_remote_vllm_pool.sh start
-
-# Steps 2–5: all host services + trainer, in order, with health gates
+bash inference/vllm/scripts/launch_remote_vllm_pool.sh start  # skip if already running
 bash ops/services/start_all.sh
 ```
 
-`start_all.sh` auto-resolves `ROLLOUT_FABRIC_PYTHON` / `PRORL_OPENHANDS_PYTHON` if
-not set, validates `DATA_FILES` before starting anything, and blocks on the BC-16
-warm-up gate before launching the trainer.
-
-### Step 1 — InferenceBackend
-
-```bash
-bash inference/vllm/scripts/launch_remote_vllm_pool.sh start
-# Health gate: all 4 ports return 200
-for port in 8100 8101 8102 8103; do
-  curl -sf --max-time 3 "http://${REMOTE_DNS}:${port}/health" && echo ":${port} OK"
-done
-```
-
-### Step 2 — EnvironmentProvider
-
-```bash
-nohup bash environments/prorl_openhands/scripts/start.sh > /tmp/s0-prorl.log 2>&1 &
-echo $! > /tmp/prorl.pid
-# Health gate:
-for i in $(seq 1 30); do
-  curl -sf http://localhost:8006/status -o /dev/null && { echo "ProRL up"; break; }; sleep 1
-done
-curl -sf -X POST http://localhost:8006/start -H "Content-Type: application/json" -d '{}'
-```
-
-### Step 3a — LiveStore (parallel with 3b)
-
-```bash
-nohup $POETRY_PYTHON -c "
-import logging, signal, sys
-sys.path.insert(0, '/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/core')
-logging.basicConfig(level='INFO', format='%(asctime)s %(levelname)s live_store: %(message)s')
-from rollout_fabric.live_store.server import serve
-server = serve(socket_path='/tmp/prorl_live_store.sock',
-               max_size=256, staleness_cutoff_k=4, no_progress_timeout_s=1800)
-print('[live_store] healthy', flush=True)
-def _stop(s, f): server.stop(grace=2.0); sys.exit(0)
-signal.signal(signal.SIGINT, _stop); signal.signal(signal.SIGTERM, _stop)
-server.wait_for_termination()
-" > /tmp/live_store.log 2>&1 &
-echo $! > /tmp/live_store.pid
-# Health gate: [[ -S /tmp/prorl_live_store.sock ]]
-```
-
-### Step 3b — PolicyRegistry (parallel with 3a)
-
-```bash
-ENDPOINTS_PY="['http://${REMOTE_DNS}:8100','http://${REMOTE_DNS}:8101','http://${REMOTE_DNS}:8102','http://${REMOTE_DNS}:8103']"
-nohup $POETRY_PYTHON -c "
-import logging, signal, sys
-sys.path.insert(0, '/home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server/core')
-logging.basicConfig(level='INFO', format='%(asctime)s %(levelname)s policy_registry: %(message)s')
-from rollout_fabric.policy_registry.server import serve
-server = serve(socket_path='/tmp/prorl_policy_registry.sock',
-               db_path='/tmp/prorl_policy_registry.db',
-               pool_endpoints=${ENDPOINTS_PY})
-print('[policy_registry] healthy', flush=True)
-def _stop(s, f): server.stop(grace=2.0); sys.exit(0)
-signal.signal(signal.SIGINT, _stop); signal.signal(signal.SIGTERM, _stop)
-server.wait_for_termination()
-" > /tmp/policy_registry.log 2>&1 &
-echo $! > /tmp/policy_registry.pid
-# Health gate: [[ -S /tmp/prorl_policy_registry.sock ]]
-```
-
-### Step 4 — RolloutManager
-
-```bash
-nohup $POETRY_PYTHON -m rollout_fabric.rollout_manager.main \
-  --live-store-socket /tmp/prorl_live_store.sock \
-  --prorl-url http://localhost:8006 \
-  --policy-id "${POLICY_ID}" \
-  --environment-id "${ENVIRONMENT_ID}" \
-  --data-files "${DATA_FILES}" \
-  --group-size 4 \
-  --policy-manifest-path /tmp/prorl_policy_manifest.json \
-  --archive-root /home/ubuntu/replay_archive \
-  --filter-zero-variance \
-  --archive-disabled \
-  > /tmp/rollout_manager.log 2>&1 &
-echo $! > /tmp/rollout_manager.pid
-# Health gate: wait for >=1 group in LiveStore before starting trainer (BC-16)
-```
-
-### Step 5 — TrainerAdapter
-
-```bash
-# Start ONLY after RolloutManager has pushed >=1 group (BC-16).
-bash trainers/verl/scripts/start.sh
-```
-
-**Orchestrated startup:** `bash ops/services/start_all.sh` runs steps 1–5 in order,
-enforces the BC-16 warm-up gate, and handles clean shutdown in reverse order on Ctrl-C.
-
-**Stop order:** trainer → rollout manager → LiveStore + PolicyRegistry → EnvironmentProvider + InferenceBackend.
+`start_all.sh` starts services 1–5 in dependency order, enforces the BC-16 warm-up gate (trainer starts only after ≥1 group in LiveStore), and shuts down in reverse on Ctrl-C. Stop order: trainer → rollout manager → LiveStore + PolicyRegistry → EnvironmentProvider + InferenceBackend.
 
 ---
 
