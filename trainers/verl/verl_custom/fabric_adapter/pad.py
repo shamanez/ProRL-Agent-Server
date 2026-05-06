@@ -26,7 +26,6 @@ from typing import Any
 
 import numpy as np
 import torch
-
 from rollout_fabric.schemas.training_sample import TrainingSample
 
 
@@ -119,7 +118,7 @@ def pack_unpadded_groups(
         rewards[i] = float(s.reward)
         raw_rewards[i] = float(s.raw_reward)
         truncated[i] = bool(s.truncated)
-        uids.append(s.sample_uid)
+        uids.append(s.group_uid)
         inst = dict(s.instance)
         successes.append(bool(inst.get('success', True)))
         resolveds.append(bool(inst.get('resolved', False)))
