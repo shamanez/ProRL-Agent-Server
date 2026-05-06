@@ -184,11 +184,15 @@ def main() -> int:
     while True:
         loop.check_error()
         snap = cache.snapshot()
+        try:
+            store_groups = live_store.num_groups()
+        except Exception:  # noqa: BLE001
+            store_groups = -1  # LiveStore temporarily unreachable (reconnecting)
         logger.info(
             'rollout_manager heartbeat: policy_id=%s version=%d store_groups=%d stats=%s',
             snap.policy_id,
             snap.version,
-            live_store.num_groups(),
+            store_groups,
             loop.stats(),
         )
         time.sleep(30.0)

@@ -286,22 +286,23 @@ class RolloutManagerLoop:
         # Drop samples with no response tokens — these cannot be trained on
         # (response_mask would be all-zeros → AssertionError in actor update).
         valid_pre_bind = [s for s in samples_pre_bind if len(s.response_token_ids) > 0]
-        if len(valid_pre_bind) < len(samples_pre_bind):
+        n_valid = len(valid_pre_bind)
+        n_total = len(samples_pre_bind)
+        # Drop if any episode failed (exception → missing from raw_episodes)
+        # OR returned empty token_ids. Both produce n_valid < group_size.
+        if n_valid < self._group_size:
             logger.warning(
-                'Dropped %d/%d samples with empty response_token_ids '
+                'Partial group: %d/%d valid samples (needed %d) '
+                '— dropping entire group to preserve fixed group_size '
+                '(trainer chunk requires batch divisible by world_size) '
                 'group_uid=%s task_id=%s',
-                len(samples_pre_bind) - len(valid_pre_bind),
-                len(samples_pre_bind),
+                n_valid,
+                n_total,
+                self._group_size,
                 group_uid,
                 task_id,
             )
-        if not valid_pre_bind:
-            logger.warning(
-                'All samples in group have empty responses — skipping push '
-                'group_uid=%s task_id=%s',
-                group_uid,
-                task_id,
-            )
+            self._groups_filtered += 1
             return
 
         # Bind all siblings to the shared group_uid (§3.2 group integrity).
