@@ -53,7 +53,8 @@ REMOTE_DNS="${REMOTE_DNS:-ec2-3-87-168-160.compute-1.amazonaws.com}"
 
 # Training knobs
 BATCH_SIZE="${BATCH_SIZE:-4}"
-STALENESS_CUTOFF_K="${STALENESS_CUTOFF_K:-4}"
+# Keep in sync with ops/services/start_live_store.sh — see staleness note there.
+STALENESS_CUTOFF_K="${STALENESS_CUTOFF_K:-1000}"
 REPLAY_ENABLE="${REPLAY_ENABLE:-True}"
 BUFFER_SIZE="${BUFFER_SIZE:-64}"
 USE_TEMPORAL_IS="${USE_TEMPORAL_IS:-False}"

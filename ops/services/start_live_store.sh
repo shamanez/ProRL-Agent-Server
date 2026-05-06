@@ -8,16 +8,22 @@
 # Env vars:
 #   LIVE_STORE_SOCKET    (default /tmp/prorl_live_store.sock)
 #   LIVE_STORE_MAX_SIZE  (default 256 groups)
-#   STALENESS_CUTOFF_K   (default 4 steps)
+#   STALENESS_CUTOFF_K   (default 1000 steps — see note below)
 #   NO_PROGRESS_TIMEOUT  (default 1800 seconds)
 #
 # BC-16: trainer blocks server-side in get_batch until buffer is warm.
 # The no-progress timeout (1800s) is the safety abort, not a short RPC timeout.
+#
+# Staleness note: groups are stamped created_at_step=0 because the StepCounter
+# RPC that would sync the rollout manager to the trainer's step is not yet
+# implemented. With k=4, groups become stale at trainer step 5 (5-0>4),
+# permanently blocking training after any resume. k=1000 effectively disables
+# staleness for the full 500-step run. Restore k=4 once StepCounter is wired.
 set -euo pipefail
 
 SOCKET="${LIVE_STORE_SOCKET:-/tmp/prorl_live_store.sock}"
 MAX_SIZE="${LIVE_STORE_MAX_SIZE:-256}"
-K="${STALENESS_CUTOFF_K:-4}"
+K="${STALENESS_CUTOFF_K:-1000}"
 NO_PROGRESS="${NO_PROGRESS_TIMEOUT:-1800}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
