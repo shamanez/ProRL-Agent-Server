@@ -20,7 +20,7 @@ class TimeoutChecker:
 
         current_time = time.time()
         elapsed_time = current_time - self.start_time
-        
+
         if elapsed_time >= self.last_save_time:
             self.last_saved = True
             return True
