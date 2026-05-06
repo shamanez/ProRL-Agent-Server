@@ -38,7 +38,7 @@ echo "[live_store] starting on unix:${SOCKET} max_size=${MAX_SIZE} k=${K}"
 # ROLLOUT_FABRIC_PYTHON: override to use a fabric-only venv (see docs/service-envs.md).
 # POETRY_PYTHON: set to the output of: poetry env info --path)/bin/python
 # Default fallback: the pre-populated env on this machine.
-_DEFAULT_PYTHON="$(cd "${REPO_ROOT}" && poetry env info --path 2>/dev/null)/bin/python"
+_DEFAULT_PYTHON="$(cd "${REPO_ROOT}" && poetry env info --path 2>/dev/null || true)/bin/python"
 PYTHON="${ROLLOUT_FABRIC_PYTHON:-${POETRY_PYTHON:-${_DEFAULT_PYTHON}}}"
 
 exec "${PYTHON}" -c "
