@@ -165,16 +165,12 @@ class TaskRunner:
             from verl.workers.reward_manager import NaiveRewardManager
 
             reward_manager_cls = NaiveRewardManager
-        elif reward_manager_name == 'prime':
-            from verl_custom.nvidia.reward_manager import PrimeRewardManager
-
-            reward_manager_cls = PrimeRewardManager
         elif reward_manager_name == 'dapo':
             from verl.workers.reward_manager import DAPORewardManager
 
             reward_manager_cls = DAPORewardManager
         elif reward_manager_name == 'swebench':
-            from verl_custom.nvidia.reward_manager import SWEBenchRewardManager
+            from verl_custom.reward import SWEBenchRewardManager
 
             reward_manager_cls = SWEBenchRewardManager
         else:

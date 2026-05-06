@@ -45,13 +45,13 @@ from verl.utils.ulysses import (
 )
 from verl.workers.actor import BasePPOActor
 
-from verl_custom.nvidia.utils.utils import boost_high_score_advantages
 from verl_custom.trainer.ppo.core_algos import (
     agg_loss,
     compute_gspo_policy_loss,
     compute_policy_loss,
     kl_penalty,
 )
+from verl_custom.workers.actor.utils import boost_high_score_advantages
 
 if is_cuda_available:
     from flash_attn.bert_padding import (
@@ -526,7 +526,7 @@ class DataParallelPPOActor(BasePPOActor):
                         response_mask = attention_mask[:, -response_length:]
 
                     if 'is_padded' in data:
-                        from verl_custom.nvidia.utils.utils import apply_padding_mask
+                        from verl_custom.workers.actor.utils import apply_padding_mask
 
                         response_mask = apply_padding_mask(
                             response_mask, data['is_padded'], log_stats=True

@@ -58,8 +58,8 @@ from verl.utils.seqlen_balancing import (
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
 
-from verl_custom.nvidia.reward_manager.length_penalty import LengthPenalty
-from verl_custom.nvidia.utils.timer import TimeoutChecker
+from verl_custom.reward.length_penalty import LengthPenalty
+from verl_custom.trainer.utils.timer import TimeoutChecker
 
 # S2 cut: trajectory_store and continuous_producer removed; LiveStoreClient is the only path.
 TrajectoryStore = None  # type: ignore[assignment,misc]

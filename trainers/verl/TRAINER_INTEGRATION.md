@@ -30,8 +30,7 @@ Two integration seams:
 
 ## Active reward manager
 
-Only `verl_custom/nvidia/reward_manager/swebench.py` is active in production.
-The `naive.py` and `prime.py` reward managers are disabled; restore from git if needed.
+Only `verl_custom/reward/swebench.py` is active in production.
 
 ## BC-14 note: data.train_files
 

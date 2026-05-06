@@ -134,7 +134,7 @@ docker run --rm --name "$CNAME" \
     done
 
     cd /workspace
-    bash trainers/verl/verl_custom/nvidia/scripts/run_proagent_qwn3_4B_instruct_fullasync.sh \
+    bash trainers/verl/scripts/run_fullasync_hydra.sh \
       trainer.total_epochs="$TOTAL_EPOCHS" \
       ++trainer.total_training_steps="$TOTAL_TRAINING_STEPS" \
       trainer.save_freq="$SAVE_FREQ" \
