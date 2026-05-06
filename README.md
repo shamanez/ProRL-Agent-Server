@@ -105,21 +105,14 @@ RolloutManager polls the registry at 1Hz to stamp `behavior_policy_version` on e
 
 ```bash
 source /home/ubuntu/.prorl_creds.env
-cd /home/ubuntu/de-coupled-rollouts-rl/ProRL-Agent-Server
+PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
 
-CACHE_BASE="$(pwd)/singularity_cache"
-mkdir -p "${CACHE_BASE}/apptainer_tmpdir" "${CACHE_BASE}/apptainer_localcachedir"
-
-APPTAINER_CACHEDIR="${CACHE_BASE}/apptainer_cachedir" \
-APPTAINER_LOCALCACHEDIR="${CACHE_BASE}/apptainer_localcachedir" \
-APPTAINER_TMPDIR="${CACHE_BASE}/apptainer_tmpdir" \
 APPTAINER_DOCKER_USERNAME="${SINGULARITY_DOCKER_USERNAME}" \
 APPTAINER_DOCKER_PASSWORD="${SINGULARITY_DOCKER_PASSWORD}" \
-PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
-"${PRORL_OPENHANDS_PYTHON}" ops/data/pull_skyrl_data.sh \
+"${PRORL_OPENHANDS_PYTHON}" ops/data/pull_skyrl_data.py \
   --parquet-file /home/ubuntu/data/SkyRL-v0-293/train.parquet \
   --dest-dir singularity_images
-# ~3-5 min per image; 232 GB OCI blobs are pre-cached locally
+# ~3-5 min per image
 ```
 
 ### 2. Filter parquet to built SIFs
@@ -147,7 +140,8 @@ POLICY_ID="qwen3-4b-skyrl" \
 the RolloutManager to push ≥1 group (BC-16 warm-up gate), then starts the trainer.
 Stop with Ctrl-C; services shut down in reverse order.
 
-For manual step-by-step startup, see `CLAUDE.md`.
+For the manual step-by-step sequence, health gates, monitoring, and error recovery
+see `docs/TRAINING_OPERATIONS.md`.
 
 ---
 
@@ -215,7 +209,7 @@ ProRL-Agent-Server/
 ├── inference/vllm/         # vLLM InferenceBackend (remote EC2)
 ├── ops/services/           # orchestration, rescue, monitoring
 ├── ops/data/               # data utilities
-├── docs/                   # topology, service-envs
+├── docs/                   # TRAINING_FLOW, TRAINING_OPERATIONS, PLUGGING_IN_*, topology, service-envs
 ├── tests/                  # test suite
 └── pyproject.toml          # dev workspace
 ```

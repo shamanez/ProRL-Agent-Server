@@ -10,9 +10,11 @@ sits behind a typed `Protocol` and is independently replaceable.
 
 Design rationale and BC definitions: `plans-n-solutions/rollout_fabric.md`
 Operational details (SIF build, rescue team): `plans-n-solutions/rollout_fabric_progress.md`
+End-to-end training flow (all 6 services, groups, staleness): `docs/TRAINING_FLOW.md`
 Deployment topology + co-location rules: `docs/topology.md`
 Per-service Python env footprint: `docs/service-envs.md`
-How to plug in a new environment or trainer: `core/rollout_fabric/schemas/protocols/PLUGGING_IN.md`
+Operational runbook (startup, monitoring, errors): `docs/TRAINING_OPERATIONS.md`
+How to plug in a new environment or trainer: `core/rollout_fabric/schemas/protocols/PLUGGING_IN.md` and `docs/PLUGGING_IN_NEW_TRAINER_OR_ENVIRONMENT.md`
 
 **Four `pyproject.toml` files:**
 - `./pyproject.toml` — dev workspace (ruff, mypy, pytest, pre-commit)
