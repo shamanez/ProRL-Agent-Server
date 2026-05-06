@@ -11,37 +11,14 @@ training, inference, and policy publishing into swappable service boundaries.
 See `docs/topology.md` for the deployment diagram and `docs/service-envs.md` for
 the per-service dependency footprint.
 
-## What `environments/prorl_openhands/` is
+## Pluggable adapters
 
-`environments/prorl_openhands/` is the **SWE-Bench EnvironmentProvider implementation** — one concrete
-implementation of the `core/rollout_fabric/schemas/protocols/environment_provider.EnvironmentProvider`
-Protocol. It is NOT the framework. Other environments (ROCK, OpenReward) plug in by
-implementing the same `POST /process` contract. See `environment_providers/README.md`.
+The fabric ships with two concrete adapters for the current training run. Each is independently replaceable — see `docs/PLUGGING_IN_NEW_TRAINER_OR_ENVIRONMENT.md`.
 
-## What `trainers/verl/` is
-
-The VERL FSDP TrainerAdapter — one concrete implementation running inside a Docker
-container. Other trainers (slime, ROLL) plug in via the same LiveStore + PolicyRegistry
-contracts.
-
-**How VERL is installed at container start (not baked into the image):**
-
-```
-Host /tmp/verl  ──bind-mount──►  /opt/verl  (inside container)
-                                      │
-                              pip install --no-deps -e /opt/verl   ← upstream VERL
-                              pip install --no-deps -e /workspace/trainers/verl  ← our patch
-```
-
-VERL is never baked into the Docker image — it's always installed from the host's
-`/tmp/verl` checkout at container start. This means you can update VERL by changing
-`/tmp/verl` on the host without rebuilding the image. The `verl_custom` patch package
-(`trainers/verl/pyproject.toml`) adds the LiveStore consumer seam and
-PolicyRegistry publish hook on top.
-
-## How to plug in a new environment or trainer
-
-See `core/rollout_fabric/schemas/protocols/PLUGGING_IN.md` for the step-by-step guide.
+| Role | Current adapter | Plug in a new one by |
+|---|---|---|
+| EnvironmentProvider | [`environments/prorl_openhands/`](environments/prorl_openhands/README.md) — SWE-Bench via OpenHands | Implementing `POST /process` (same HTTP contract) |
+| TrainerAdapter | [`trainers/verl/`](trainers/verl/README.md) — VERL FSDP in Docker | Connecting to LiveStore + PolicyRegistry only (BC-15) |
 
 ## Python environments
 
