@@ -1,196 +1,83 @@
 # RolloutFabric
 
-A contract-first agentic RL training fabric. Six independent services wired by
-gRPC/HTTP contracts; currently training Qwen3-4B on SWE-Bench tasks via GRPO/DAPO.
-Every service sits behind a typed `Protocol` and is independently replaceable.
-
-## What this repo is
-
-**RolloutFabric** separates rollout generation, sandbox execution, hot storage,
-training, inference, and policy publishing into swappable service boundaries.
-See `docs/topology.md` for the deployment diagram and `docs/service-envs.md` for
-the per-service dependency footprint.
-
-## Pluggable adapters
-
-The fabric ships with two concrete adapters for the current training run. Each is independently replaceable — see `docs/PLUGGING_IN_NEW_TRAINER_OR_ENVIRONMENT.md`.
-
-| Role | Current adapter | Plug in a new one by |
-|---|---|---|
-| EnvironmentProvider | [`environments/prorl_openhands/`](environments/prorl_openhands/README.md) — SWE-Bench via OpenHands | Implementing `POST /process` (same HTTP contract) |
-| TrainerAdapter | [`trainers/verl/`](trainers/verl/README.md) — VERL FSDP in Docker | Connecting to LiveStore + PolicyRegistry only (BC-15) |
-
-## Python environments
-
-Two host venvs (`fabric-core` and `prorl_openhands`); trainer runs inside Docker; vLLM on remote EC2. See `docs/service-envs.md` for the full dependency footprint and install commands.
-
----
+Six independent services wired by gRPC/HTTP contracts. Plug in any environment,
+any agent framework, any trainer — the fabric stays the same.
+Currently running: SWE-Bench tasks (OpenHands + Singularity) with VERL FSDP on 8×A100.
 
 ## Architecture
 
 ```
-  SkyRL parquet
-       │ (ParquetDataLoader — RolloutManager owns this)
+  dataset (parquet)
+       │
        ▼
-  RolloutManager ──POST /process──► EnvironmentProvider (ProRL :8006 + Singularity)
-       │                                    │ (token generation per assistant turn)
+  RolloutManager ──POST /process──► EnvironmentProvider  (:8006)
+       │                                    │  any env + agent framework
        │                                    ▼
-       │                             InferenceBackend (vLLM :8100-8103 EC2)
-       │                                    ▲
-  gRPC push_group                    POST /reload_lora
+       │                             InferenceBackend    (:8100-8103, EC2)
+       │                                    ▲  any inference server
+  gRPC push_group              POST /reload_lora
        │                                    │
-       ▼                             PolicyRegistry (UDS)
-  LiveStore ──────gRPC get_batch──►        ▲
-  (UDS)                             gRPC publish_policy_version
-                                           │
-                                    TrainerAdapter (VERL FSDP, Docker 8×A100)
+       ▼                             PolicyRegistry     (UDS)
+  LiveStore ──gRPC get_batch──► TrainerAdapter          (Docker)
+  (UDS)                                any trainer framework
 ```
 
-Data flows down: parquet → groups → training steps → LoRA publishes.
-Policies flow up: trainer publishes → registry fans out → vLLM pool reloads.
-RolloutManager polls the registry at 1Hz to stamp `behavior_policy_version` on each group.
+Data flows down: dataset → groups → gradient steps → LoRA publishes.
+Policies flow up: trainer → registry fans out → inference pool reloads.
 
----
+## Pluggable adapters
+
+| Role | Current | Swap by |
+|---|---|---|
+| EnvironmentProvider | [OpenHands / SWE-Bench](environments/prorl_openhands/README.md) | Implementing `POST /process` |
+| TrainerAdapter | [VERL FSDP](trainers/verl/README.md) | Connecting to LiveStore + PolicyRegistry (BC-15) |
+
+See `docs/PLUGGING_IN_NEW_TRAINER_OR_ENVIRONMENT.md` for the step-by-step contract guide.
 
 ## Quick start
 
-**Prerequisites:** 8×A100 trainer box, EC2 `vllm-instance` reachable via SSH alias,
-`/home/ubuntu/.prorl_creds.env` with `REMOTE_DNS` + credentials, dataset at
-`/home/ubuntu/data/SkyRL-v0-293/`.
-
-### 1. Build Singularity images (first time only)
-
 ```bash
 source /home/ubuntu/.prorl_creds.env
-PRORL_OPENHANDS_PYTHON=$(cd environments/prorl_openhands && poetry env info --path)/bin/python
-
-APPTAINER_DOCKER_USERNAME="${SINGULARITY_DOCKER_USERNAME}" \
-APPTAINER_DOCKER_PASSWORD="${SINGULARITY_DOCKER_PASSWORD}" \
-"${PRORL_OPENHANDS_PYTHON}" ops/data/pull_skyrl_data.py \
-  --parquet-file /home/ubuntu/data/SkyRL-v0-293/train.parquet \
-  --dest-dir singularity_images
-# ~3-5 min per image
+export DATA_FILES="/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet"
+export POLICY_ID="qwen3-4b-skyrl"
+bash ops/services/start_all.sh
 ```
 
-### 2. Filter parquet to built SIFs
+`start_all.sh` starts all services in order with health gates, enforces the BC-16
+warm-up gate, and shuts down cleanly on Ctrl-C.
+Full setup, health gates, monitoring, and error recovery: `docs/TRAINING_OPERATIONS.md`.
 
-```bash
-ROLLOUT_FABRIC_PYTHON=$(cd core && poetry env info --path)/bin/python
-"${ROLLOUT_FABRIC_PYTHON}" ops/data/filter_parquet_to_built_sifs.py \
-  --input /home/ubuntu/data/SkyRL-v0-293/train.parquet \
-  --sif-dir singularity_images \
-  --output /home/ubuntu/data/SkyRL-v0-293/train.ready.parquet
-```
+## Boundary conditions
 
-Re-run whenever new SIFs are added.
-
-### 3. Start all services
-
-```bash
-source /home/ubuntu/.prorl_creds.env
-DATA_FILES="/home/ubuntu/data/SkyRL-v0-293/train.ready.parquet" \
-POLICY_ID="qwen3-4b-skyrl" \
-  bash ops/services/start_all.sh
-```
-
-`start_all.sh` starts services in dependency order, health-probes each, waits for
-the RolloutManager to push ≥1 group (BC-16 warm-up gate), then starts the trainer.
-Stop with Ctrl-C; services shut down in reverse order.
-
-For the manual step-by-step sequence, health gates, monitoring, and error recovery
-see `docs/TRAINING_OPERATIONS.md`.
-
----
-
-## Service scripts
-
-| Script | Socket / Port | Env | Notes |
-|---|---|---|---|
-| `environments/prorl_openhands/scripts/start.sh` | `:8006` | `PRORL_OPENHANDS_PYTHON` | ProRL FastAPI + Singularity |
-| `inference/vllm/scripts/launch_remote_vllm_pool.sh` | `:8100-8103` (EC2) | EC2 venv | SSH alias `vllm-instance` must exist |
-| `ops/services/start_live_store.sh` | `/tmp/prorl_live_store.sock` | `ROLLOUT_FABRIC_PYTHON` | gRPC UDS, pop-on-sample |
-| `ops/services/start_policy_registry.sh` | `/tmp/prorl_policy_registry.sock` | `ROLLOUT_FABRIC_PYTHON` | gRPC UDS, fanout to vLLM |
-| `ops/services/start_rollout_manager.sh` | no port | `ROLLOUT_FABRIC_PYTHON` | owns `train.ready.parquet` |
-| `trainers/verl/scripts/start.sh` | Docker internal | `verlai/verl` Docker | VERL FSDP, 8×A100 |
-| `ops/services/rescue_team.py` | n/a | either | `--check` / `--watch` / `--rescue <service>` |
-
----
-
-## Key configuration
-
-| Variable | Where set | What it controls |
+| BC | Rule | Breaks if violated |
 |---|---|---|
-| `REMOTE_DNS` | `.prorl_creds.env` | EC2 hostname for vLLM pool and SSH |
-| `DATA_FILES` | export before start | Path to `train.ready.parquet` (filtered, SIF-verified) |
-| `POLICY_ID` | export before start | Policy identifier stamped on all groups and registry entries |
-| `SAVE_FREQ` | `trainers/verl/scripts/start.sh` env var | Steps between LoRA publishes (default: 1) |
-| `WANDB_API_KEY` | `.prorl_creds.env` | WandB logging |
-| `SINGULARITY_DOCKER_USERNAME/PASSWORD` | `.prorl_creds.env` | Apptainer registry auth for SIF builds |
-
----
-
-## Key boundary conditions
-
-| BC | What it protects | What breaks if violated |
-|---|---|---|
-| BC-0: one `PolicyVersionSnapshot` per group | Consistent advantage computation across siblings | Invalid advantages; NaN loss within steps |
-| BC-1: token IDs as `int` everywhere | Multi-turn RL stability | KL/entropy NaN within 2 training steps |
-| BC-9: `endpoints_failed > 0` = hard abort | Prevents mixed-version vLLM pool | IS weights become lies; silent gradient corruption |
-| BC-13: zero VERL/OpenHands in RolloutManager | Trainer pluggability | Swapping trainer requires rewriting worker |
-| BC-14: worker owns parquet | Trainer cannot be hidden orchestrator | Trainer becomes implicit coordinator |
-| BC-15: trainer connects only to LiveStore + PolicyRegistry | Trainer pluggability | Swapping VERL for another trainer requires more than a Docker image swap |
-
-Full BC table (BC-0 through BC-15): `plans-n-solutions/rollout_fabric.md`
-
----
+| BC-0 | One policy snapshot per group — all siblings stamped before dispatch | Siblings see different policies → invalid advantages |
+| BC-1 | Token IDs as `int` on every wire — never decode and re-tokenize | KL/entropy NaN within 2 training steps |
+| BC-9 | `endpoints_failed > 0` = hard abort, never degraded mode | Mixed-version pool → silent gradient corruption |
+| BC-13 | RolloutManager imports zero trainer/env framework code | Swapping trainer requires rewriting the worker |
+| BC-14 | RolloutManager owns the dataset — trainer has no parquet path | Trainer becomes hidden orchestrator |
+| BC-15 | Trainer connects only to LiveStore + PolicyRegistry | Swapping trainer requires more than a Docker swap |
+| BC-16 | Start trainer only after ≥1 group in LiveStore | No-progress timer burns during warm-up |
 
 ## Tests
 
 ```bash
-# Fast loop — no real services needed (~36 tests, ~7s)
 PYTHONPATH=core poetry run pytest tests/invariants/ tests/contracts/ tests/slots/ -q
-
-# Full suite excluding integration/slow/real_data
 pytest -m "not integration and not slow and not real_data" tests/ -q
 ```
-
----
 
 ## Repo layout
 
 ```
-ProRL-Agent-Server/
-├── core/rollout_fabric/    # fabric services (LiveStore, PolicyRegistry, RolloutManager, ReplayArchive, schemas)
-├── environments/prorl_openhands/  # OpenHands EnvironmentProvider
-├── trainers/verl/          # VERL TrainerAdapter (Docker)
-├── inference/vllm/         # vLLM InferenceBackend (remote EC2)
-├── ops/services/           # orchestration, rescue, monitoring
-├── ops/data/               # data utilities
-├── docs/                   # TRAINING_FLOW, TRAINING_OPERATIONS, PLUGGING_IN_*, topology, service-envs
-├── tests/                  # test suite
-└── pyproject.toml          # dev workspace
+├── core/rollout_fabric/          # LiveStore, PolicyRegistry, RolloutManager, schemas
+├── environments/                 # EnvironmentProvider adapters (prorl_openhands + others)
+├── trainers/                     # TrainerAdapter adapters (verl, slime, roll)
+├── inference/vllm/               # vLLM InferenceBackend (remote EC2)
+├── ops/services/                 # start_all.sh, rescue_team.py, monitoring
+├── docs/                         # TRAINING_FLOW, TRAINING_OPERATIONS, topology, service-envs
+└── tests/
 ```
-
-| Path | What's there |
-|---|---|
-| `core/rollout_fabric/live_store/` | gRPC LiveStore service |
-| `core/rollout_fabric/policy_registry/` | PolicyRegistry gRPC service + fanout |
-| `core/rollout_fabric/rollout_manager/` | Standalone RolloutManager (zero VERL/OpenHands) |
-| `core/rollout_fabric/replay_archive/` | Append-only Parquet + SQLite archive (tee, pre-filter) |
-| `core/rollout_fabric/schemas/` | Typed Protocols, wire schemas, proto bindings, invariant tests |
-| `environments/prorl_openhands/openhands/` | Upstream OpenHands tree (mostly untouched) |
-| `environments/prorl_openhands/openhands/nvidia/` | ProRL FastAPI server, registry, AgentHandlers |
-| `environments/prorl_openhands/openhands/llm/nvidia/` | Token-in / token-out vLLM clients (frozen) |
-| `trainers/verl/` | Patch package on top of pinned verl checkout |
-| `trainers/verl/verl_custom/fabric_adapter/` | VERL bridge: `pad.py` unpads LiveStore batches |
-| `inference/vllm/scripts/` | vLLM pool runner |
-| `ops/services/` | Service start scripts + rescue team + orchestrated start_all |
-| `ops/data/` | Data utilities (filter parquet, pull skyrl data) |
-| `plans-n-solutions/` | Design rationale (`rollout_fabric.md`) + operations (`rollout_fabric_progress.md`) |
-| `tests/` | pytest suites; fast-loop markers in `pytest.ini` |
-
----
 
 ## License
 
-See [`LICENSE`](LICENSE). Inherits from upstream OpenHands.
+See [`LICENSE`](LICENSE).
